@@ -34,6 +34,26 @@ Manual round trip against a stub provider:
     curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
     curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
 
+## Container
+
+Published on every push to `main` and on every tag as a public multi-arch
+(`linux/amd64`, `linux/arm64`) image:
+
+    ghcr.io/nethesis/nethesis-insights:latest
+
+Run it:
+
+    podman run -d --name insights -p 9595:9595 \
+      -v insights-data:/var/lib/insights \
+      -e AUTH_SYSTEM_ID=abc123 -e AUTH_SECRET=s3cret \
+      -e LLM_BASE_URL=https://api.openai.com/v1 \
+      -e LLM_MODEL=gpt-4o-mini -e LLM_API_KEY=sk-... \
+      ghcr.io/nethesis/nethesis-insights:latest
+
+The binary is static (`CGO_ENABLED=0`, `modernc.org/sqlite`) and runs as uid
+1001; the SQLite database lives in the `/var/lib/insights` volume. Build
+locally with `podman build -t nethesis-insights .`.
+
 ## Configuration
 
 | Variable | Purpose |
