@@ -13,9 +13,10 @@ inside the request. The production design adds Redpanda as a durable buffer
 between ingest and analysis, an external forward-auth validator, and an
 optional Postgres backend. See the design doc referenced below.
 
-Design: `docs/superpowers/specs/2026-08-05-nethesis-insights-design.md` and
-`docs/superpowers/plans/2026-08-05-nethesis-insights.md` in the `ns8-loki`
-repository.
+Design documents live in this repository:
+
+- Spec: `docs/specs/2026-08-05-nethesis-insights-design.md`
+- Implementation plan: `docs/plans/2026-08-05-nethesis-insights.md` (Tasks 1–10)
 
 ## Development
 
@@ -23,19 +24,29 @@ repository.
     go vet ./...
     go test ./... -race -count=1
 
+Manual round trip against a stub provider:
+
+    go run ./hack/stubserver &                     # OpenAI-compatible stub on :8081
+    LLM_BASE_URL=http://127.0.0.1:8081 LLM_MODEL=stub-model LLM_API_KEY=x \
+    AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
+      go run ./cmd/insightsd
+
+    curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
+    curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
+
 ## Configuration
 
 | Variable | Purpose |
 |---|---|
 | `LISTEN_ADDR` | HTTP bind address (default `:9595`) |
-| `DB_PATH` | SQLite file path |
+| `DB_PATH` | SQLite file path (default `/var/lib/insights/insights.db`) |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | OpenAI-compatible provider |
-| `LLM_TIMEOUT` | request timeout |
+| `LLM_TIMEOUT` | request timeout (default `120s`) |
 | `AUTH_SYSTEM_ID`, `AUTH_SECRET` | prototype static credential |
-| `GATE_TOLERANCE` | deviation ratio threshold (default 3.0) |
-| `STALE_AFTER` | finding staleness threshold |
-| `EWMA_ALPHA` | server-side baseline smoothing factor |
-| `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices |
+| `GATE_TOLERANCE` | deviation ratio threshold (default `3.0`) |
+| `STALE_AFTER` | finding staleness threshold (default `24h`) |
+| `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |
+| `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices (default `0`) |
 
 ## License
 
