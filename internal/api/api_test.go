@@ -1,0 +1,146 @@
+// Copyright (C) 2026 Nethesis S.r.l.
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/nethesis/nethesis-insights/internal/model"
+)
+
+type fakePublisher struct {
+	published []model.Bundle
+	err       error
+}
+
+func (f *fakePublisher) Publish(b model.Bundle) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.published = append(f.published, b)
+	return nil
+}
+
+const (
+	testSystemID = "sys1"
+	testSecret   = "s3cret"
+)
+
+func testServer(p Publisher) http.Handler {
+	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret})
+}
+
+func validBundle() string {
+	b, _ := json.Marshal(model.Bundle{
+		SchemaVersion: model.SchemaVersion,
+		SystemID:      testSystemID,
+		Window:        model.Window{Start: 1000, End: 2000},
+	})
+	return string(b)
+}
+
+func postBundle(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/bundles", strings.NewReader(body))
+	if withAuth {
+		req.SetBasicAuth(testSystemID, testSecret)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// The whole point of the queue: ingest must answer without waiting for -- or
+// even starting -- the analysis.
+func TestIngestAcceptsWithoutRunningTheAnalysis(t *testing.T) {
+	pub := &fakePublisher{}
+	rec := postBundle(t, testServer(pub), validBundle(), true)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var got map[string]bool
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !got["accepted"] {
+		t.Fatalf("body: got %s, want accepted=true", rec.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published %d bundles, want 1", len(pub.published))
+	}
+}
+
+// A saturated queue is the one case where the client must be told to come
+// back: the bundle was NOT accepted.
+func TestIngestReports503WhenThePublisherRefuses(t *testing.T) {
+	pub := &fakePublisher{err: errors.New("queue: full")}
+	rec := postBundle(t, testServer(pub), validBundle(), true)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestIngestRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"invalid json", `{"schema_version":`, http.StatusBadRequest},
+		{"wrong schema version", `{"schema_version":99,"system_id":"sys1","window":{"start":1,"end":2}}`, http.StatusBadRequest},
+		{"missing system_id", `{"schema_version":1,"window":{"start":1,"end":2}}`, http.StatusBadRequest},
+		{"foreign system_id", `{"schema_version":1,"system_id":"other","window":{"start":1,"end":2}}`, http.StatusForbidden},
+		{"empty window", `{"schema_version":1,"system_id":"sys1","window":{"start":2,"end":2}}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			rec := postBundle(t, testServer(pub), tc.body, true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			if len(pub.published) != 0 {
+				t.Fatal("a rejected bundle reached the queue")
+			}
+		})
+	}
+}
+
+func TestIngestRequiresCredentials(t *testing.T) {
+	pub := &fakePublisher{}
+	rec := postBundle(t, testServer(pub), validBundle(), false)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if len(pub.published) != 0 {
+		t.Fatal("an unauthenticated bundle reached the queue")
+	}
+}
+
+// The 401 body stays opaque, but the error carries a reason for the debug log
+// -- and never the presented secret.
+func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
+	auth := StaticAuth{SystemID: testSystemID, Secret: testSecret}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.SetBasicAuth("wrong-system", "hunter2")
+
+	_, err := auth.Validate(context.Background(), req.Header.Get("Authorization"))
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("error: got %v, want ErrInvalidCredentials", err)
+	}
+	if !strings.Contains(err.Error(), "wrong-system") {
+		t.Fatalf("error %q does not name the presented system_id", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("error %q leaks the presented secret", err)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -98,8 +99,23 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	// The URL and payload size are safe to log; the Authorization header is
+	// never touched here or anywhere else in this package.
+	slog.Debug("llm request",
+		"url", o.baseURL+"/chat/completions",
+		"model", req.Model,
+		"payload_bytes", len(payload),
+	)
+
+	start := time.Now()
 	resp, err := o.client.Do(httpReq)
 	if err != nil {
+		slog.Debug("llm transport error",
+			"model", req.Model,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ctx_err", ctx.Err(),
+			"error", err.Error(),
+		)
 		// http.Client wraps transport errors in *url.Error, whose Error()
 		// includes only the method and URL, never headers -- so the API
 		// key (sent as a header) cannot leak here. We still never format
@@ -108,13 +124,25 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	}
 	defer resp.Body.Close()
 
+	slog.Debug("llm response headers",
+		"status", resp.StatusCode,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"content_type", resp.Header.Get("Content-Type"),
+	)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		slog.Debug("llm error body", "status", resp.StatusCode, "body", string(limited))
 		return Response{}, &HTTPError{StatusCode: resp.StatusCode, Body: string(limited)}
 	}
 
 	var parsed chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		slog.Debug("llm response decode failed",
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ctx_err", ctx.Err(),
+			"error", err.Error(),
+		)
 		return Response{}, fmt.Errorf("llm: decode response: %w", err)
 	}
 
