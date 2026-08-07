@@ -1,0 +1,10 @@
+.git
+.github
+.serena
+docs
+hack
+*.md
+LICENSE
+*.db
+*.db-shm
+*.db-wal
