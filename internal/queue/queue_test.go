@@ -96,6 +96,108 @@ func TestStopDrainsAcknowledgedBundles(t *testing.T) {
 	}
 }
 
+// An edge that resends a window while its analysis is still running must not
+// buy a second LLM call for the same data.
+func TestDuplicateWindowInFlightIsNotAnalyzedTwice(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	release := make(chan struct{})
+	started := make(chan struct{})
+
+	q := New(8, time.Minute, func(ctx context.Context, b model.Bundle) error {
+		mu.Lock()
+		calls++
+		if calls == 1 {
+			close(started)
+		}
+		mu.Unlock()
+		<-release
+		return nil
+	})
+	q.Start(2)
+
+	if err := q.Publish(bundle("s1", 100)); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	<-started
+
+	// Same window, analysis still running: accepted, but not queued again.
+	if err := q.Publish(bundle("s1", 100)); err != nil {
+		t.Fatalf("resend must be a successful no-op, got %v", err)
+	}
+	// A different window of the same system is unrelated work.
+	if err := q.Publish(bundle("s1", 200)); err != nil {
+		t.Fatalf("other window: %v", err)
+	}
+	// So is the same window on another system.
+	if err := q.Publish(bundle("s2", 100)); err != nil {
+		t.Fatalf("other system: %v", err)
+	}
+
+	close(release)
+	q.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("handler ran %d times, want 3 (the resent window must not run twice)", calls)
+	}
+}
+
+// Once the analysis is done the window is claimable again: a later resend is
+// the store's duplicate-window case, not the queue's.
+func TestWindowIsClaimableAgainAfterTheAnalysisFinishes(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	done := make(chan struct{}, 2)
+
+	q := New(4, time.Minute, func(ctx context.Context, b model.Bundle) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		done <- struct{}{}
+		return nil
+	})
+	q.Start(1)
+
+	for round := 1; round <= 2; round++ {
+		if err := q.Publish(bundle("s1", 100)); err != nil {
+			t.Fatalf("publish round %d: %v", round, err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("round %d never ran -- the window stayed claimed after completion", round)
+		}
+	}
+	q.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("handler ran %d times, want 2", calls)
+	}
+}
+
+// A full queue must not leave the window claimed: nothing was accepted, so a
+// retry has to be able to get in.
+func TestRejectedBundleDoesNotStayClaimed(t *testing.T) {
+	q := New(1, time.Minute, func(ctx context.Context, b model.Bundle) error { return nil })
+
+	if err := q.Publish(bundle("s1", 100)); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if err := q.Publish(bundle("s1", 200)); !errors.Is(err, ErrFull) {
+		t.Fatalf("second publish: got %v, want ErrFull", err)
+	}
+
+	// Drain one slot, then the rejected window must be publishable.
+	<-q.ch
+	if err := q.Publish(bundle("s1", 200)); err != nil {
+		t.Fatalf("retry after ErrFull: got %v, want it accepted", err)
+	}
+}
+
 func TestHandlerRunsOnABackgroundContextWithTimeout(t *testing.T) {
 	deadlines := make(chan time.Time, 1)
 

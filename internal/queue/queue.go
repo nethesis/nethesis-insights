@@ -30,11 +30,27 @@ var ErrFull = errors.New("queue: full")
 // already been paid for.
 type Handler func(ctx context.Context, b model.Bundle) error
 
+// window identifies the unit of idempotency: (system_id, window_start), the
+// same key the analyses table is unique on.
+type window struct {
+	systemID string
+	start    int64
+}
+
 type Queue struct {
 	ch      chan model.Bundle
 	handler Handler
 	timeout time.Duration
 	wg      sync.WaitGroup
+
+	// inflight holds the windows queued or being analyzed right now. The
+	// store keeps a window claimable until it completes -- deliberately, so a
+	// retry after a transient failure is not rejected as a duplicate -- which
+	// means an edge that resends while an analysis is still running would
+	// start a second LLM call for the same data. This set closes that gap for
+	// the lifetime of the process.
+	mu       sync.Mutex
+	inflight map[window]bool
 }
 
 // New returns a queue holding at most size bundles. Each bundle gets at most
@@ -44,16 +60,33 @@ func New(size int, timeout time.Duration, h Handler) *Queue {
 		size = 1
 	}
 	return &Queue{
-		ch:      make(chan model.Bundle, size),
-		handler: h,
-		timeout: timeout,
+		ch:       make(chan model.Bundle, size),
+		handler:  h,
+		timeout:  timeout,
+		inflight: map[window]bool{},
 	}
 }
 
 // Publish accepts a bundle for later analysis, or reports ErrFull immediately.
 // It never blocks: blocking here would reintroduce the coupling the queue
 // exists to remove.
+//
+// Re-sending a window that is still queued or in flight is a successful
+// no-op, not an error -- the edge did nothing wrong, and the analysis it is
+// asking for is already happening.
 func (q *Queue) Publish(b model.Bundle) error {
+	w := window{systemID: b.SystemID, start: b.Window.Start}
+
+	q.mu.Lock()
+	if q.inflight[w] {
+		q.mu.Unlock()
+		slog.Info("duplicate window already in flight, not queued again",
+			"system_id", b.SystemID, "window_start", b.Window.Start)
+		return nil
+	}
+	q.inflight[w] = true
+	q.mu.Unlock()
+
 	select {
 	case q.ch <- b:
 		slog.Debug("bundle queued",
@@ -65,6 +98,8 @@ func (q *Queue) Publish(b model.Bundle) error {
 		)
 		return nil
 	default:
+		// Nothing was queued, so the claim must not outlive the attempt.
+		q.release(w)
 		slog.Warn("bundle rejected, queue full",
 			"system_id", b.SystemID,
 			"window_start", b.Window.Start,
@@ -72,6 +107,12 @@ func (q *Queue) Publish(b model.Bundle) error {
 		)
 		return ErrFull
 	}
+}
+
+func (q *Queue) release(w window) {
+	q.mu.Lock()
+	delete(q.inflight, w)
+	q.mu.Unlock()
 }
 
 // Start launches the workers. Call Stop to drain and wait.
@@ -92,6 +133,11 @@ func (q *Queue) Start(workers int) {
 
 func (q *Queue) process(worker int, b model.Bundle) {
 	start := time.Now()
+	// Released only once the analysis is over: while it runs, a resend of the
+	// same window must not start a second one. Afterwards the store's own
+	// idempotency takes over.
+	defer q.release(window{systemID: b.SystemID, start: b.Window.Start})
+
 	ctx, cancel := context.WithTimeout(context.Background(), q.timeout)
 	defer cancel()
 
