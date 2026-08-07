@@ -136,11 +136,27 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		return fmt.Errorf("analyzer: baselines: %w", err)
 	}
 
+	slog.Debug("prior state loaded",
+		"system_id", b.SystemID,
+		"known_templates", len(knownTemplates),
+		"baselines", len(baselines),
+		"bundle_templates", len(b.Templates),
+		"bundle_digest_entries", len(b.Digest),
+	)
+
 	// 4. Decide whether this bundle is worth an LLM call.
 	decision := gate.Evaluate(b, gate.SystemState{
 		KnownTemplates: knownTemplates,
 		Baselines:      baselines,
 	}, a.cfg.Tolerance)
+
+	slog.Debug("gate decision",
+		"system_id", b.SystemID,
+		"window_start", b.Window.Start,
+		"call", decision.Call,
+		"reasons", decision.Reasons,
+		"tolerance", a.cfg.Tolerance,
+	)
 
 	// 5. Gated out: record bookkeeping, no LLM call.
 	if !decision.Call {
@@ -161,11 +177,30 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	}
 	rendered := prompt.Render(b, open)
 
+	slog.Debug("calling llm",
+		"system_id", b.SystemID,
+		"model", a.cfg.Model,
+		"prompt_bytes", len(rendered),
+		"open_findings", len(open),
+	)
+
+	llmStart := time.Now()
 	resp, err := a.llm.Complete(ctx, llm.Request{Model: a.cfg.Model, UserPrompt: rendered})
 	if err != nil {
 		var httpErr *llm.HTTPError
 		permanent := errors.As(err, &httpErr) && httpErr.Permanent()
 		durationMs := int(time.Since(start).Milliseconds())
+
+		// ctx.Err() separates "the provider failed" from "our own deadline or
+		// shutdown cut the call short" -- the two look identical downstream.
+		slog.Debug("llm call failed",
+			"system_id", b.SystemID,
+			"model", a.cfg.Model,
+			"permanent", permanent,
+			"llm_duration_ms", time.Since(llmStart).Milliseconds(),
+			"ctx_err", ctx.Err(),
+			"error", err.Error(),
+		)
 
 		if permanent {
 			// The request itself is wrong and will fail identically forever.
@@ -194,6 +229,15 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		return fmt.Errorf("analyzer: llm call: %w", err)
 	}
 
+	slog.Debug("llm responded",
+		"system_id", b.SystemID,
+		"model", resp.Model,
+		"llm_duration_ms", time.Since(llmStart).Milliseconds(),
+		"input_tokens", resp.InputTokens,
+		"output_tokens", resp.OutputTokens,
+		"content_bytes", len(resp.Content),
+	)
+
 	// 7. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
@@ -213,8 +257,12 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		if finalizeErr != nil {
 			slog.Error("finalize analysis after parse error failed", "error", finalizeErr)
 		}
+		slog.Debug("llm response rejected",
+			"system_id", b.SystemID, "content_bytes", len(resp.Content), "error", err.Error())
 		return fmt.Errorf("analyzer: parse response: %w: %w", ErrPermanent, err)
 	}
+
+	slog.Debug("response parsed", "system_id", b.SystemID, "findings", len(parsed))
 
 	// 8. Persist each finding, deduplicated by fingerprint.
 	for _, pf := range parsed {

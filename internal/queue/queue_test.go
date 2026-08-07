@@ -1,0 +1,123 @@
+// Copyright (C) 2026 Nethesis S.r.l.
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package queue
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/nethesis/nethesis-insights/internal/model"
+)
+
+func bundle(systemID string, windowStart int64) model.Bundle {
+	return model.Bundle{
+		SystemID: systemID,
+		Window:   model.Window{Start: windowStart, End: windowStart + 1},
+	}
+}
+
+func TestPublishDoesNotWaitForTheHandler(t *testing.T) {
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	q := New(4, time.Minute, func(ctx context.Context, b model.Bundle) error {
+		<-release
+		close(done)
+		return nil
+	})
+	q.Start(1)
+
+	// Publish must return while the handler is still blocked, otherwise the
+	// HTTP handler would again be waiting on the LLM.
+	publishReturned := make(chan struct{})
+	go func() {
+		if err := q.Publish(bundle("s1", 1)); err != nil {
+			t.Errorf("publish: %v", err)
+		}
+		close(publishReturned)
+	}()
+
+	select {
+	case <-publishReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish blocked on the handler")
+	}
+
+	close(release)
+	<-done
+	q.Stop()
+}
+
+func TestPublishReportsFullInsteadOfBlocking(t *testing.T) {
+	// No workers started: nothing drains the buffer.
+	q := New(2, time.Minute, func(ctx context.Context, b model.Bundle) error { return nil })
+
+	if err := q.Publish(bundle("s1", 1)); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if err := q.Publish(bundle("s1", 2)); err != nil {
+		t.Fatalf("second publish: %v", err)
+	}
+	if err := q.Publish(bundle("s1", 3)); !errors.Is(err, ErrFull) {
+		t.Fatalf("third publish: got %v, want ErrFull", err)
+	}
+	if got := q.Depth(); got != 2 {
+		t.Fatalf("depth: got %d, want 2", got)
+	}
+}
+
+func TestStopDrainsAcknowledgedBundles(t *testing.T) {
+	var mu sync.Mutex
+	var seen []int64
+
+	q := New(8, time.Minute, func(ctx context.Context, b model.Bundle) error {
+		mu.Lock()
+		seen = append(seen, b.Window.Start)
+		mu.Unlock()
+		return nil
+	})
+
+	for i := int64(1); i <= 5; i++ {
+		if err := q.Publish(bundle("s1", i)); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	q.Start(2)
+	q.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 5 {
+		t.Fatalf("processed %d bundles, want 5 -- an accepted bundle was dropped", len(seen))
+	}
+}
+
+func TestHandlerRunsOnABackgroundContextWithTimeout(t *testing.T) {
+	deadlines := make(chan time.Time, 1)
+
+	q := New(1, 50*time.Millisecond, func(ctx context.Context, b model.Bundle) error {
+		dl, ok := ctx.Deadline()
+		if !ok {
+			t.Error("handler context has no deadline")
+		}
+		deadlines <- dl
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	q.Start(1)
+
+	if err := q.Publish(bundle("s1", 1)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case <-deadlines:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	q.Stop()
+}

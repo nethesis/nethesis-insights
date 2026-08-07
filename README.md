@@ -8,10 +8,17 @@ any LLM call, and stores fingerprinted findings that do not repeat.
 
 Working prototype. It runs a full round trip — authenticated ingest, gating,
 an OpenAI-compatible LLM call, server-computed finding identity, and a read
-API — against a single SQLite file, with the LLM call made synchronously
-inside the request. The production design adds Redpanda as a durable buffer
-between ingest and analysis, an external forward-auth validator, and an
-optional Postgres backend. See the design doc referenced below.
+API — against a single SQLite file. Ingest is asynchronous: `POST /v1/bundles`
+validates the bundle, puts it on an in-memory queue and answers `202` right
+away, so an edge node's HTTP timeout can never abort an analysis in flight.
+The production design replaces that queue with Redpanda as a durable buffer,
+and adds an external forward-auth validator and an optional Postgres backend.
+See the design doc referenced below.
+
+Because analysis is asynchronous, the ingest response says only whether the
+bundle was **accepted**. Analysis outcomes are visible in the findings API and
+in the `analyses` ledger, not in the POST response. A `503` means the queue is
+saturated and the edge should retry the window.
 
 Design documents live in this repository:
 
@@ -67,6 +74,16 @@ locally with `podman build -t nethesis-insights .`.
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |
 | `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |
 | `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices (default `0`) |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (default `info`) |
+| `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
+| `QUEUE_WORKERS` | concurrent analyses (default `2`) |
+| `ANALYSIS_TIMEOUT` | ceiling for one bundle's analysis (default `5m`) |
+
+`LOG_LEVEL=debug` adds request detail, the reason behind every 401/400/403,
+the gate decision and its inputs, prompt size, provider status and timing, and
+queue depth. It never logs credentials: the API key is reported only as
+`llm_api_key_set=true`, and an authentication failure names the presented
+`system_id` but never the secret.
 
 ## License
 
