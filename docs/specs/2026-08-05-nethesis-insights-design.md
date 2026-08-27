@@ -36,7 +36,14 @@ call, finding identity and dedup, storage, read API, container packaging.
 - **Edge collector v2** (filtering, template masking, per-module fairness,
   digest-driven selection). Separate spec. The edge keeps calling the LLM
   directly until the server is live; see §12 for the cutover.
-- **Operator dashboard / UI.** The read API is the only consumer surface here.
+- **Consumer-facing dashboard / UI.** The read API remains the only *consumer*
+  surface: no customer, and no edge node, ever reaches this system's data
+  through a page. `insightsd` does ship a built-in **operator** UI
+  (`internal/ui`, enabled only by setting `UI_LISTEN_ADDR`), but it is a debug
+  and operations surface in the spirit of a daemon's built-in status pages —
+  read-only, off by default, on its own listener, and never part of the edge's
+  or a customer's path to data. It changes nothing below: not the wire
+  protocol, not gating, not finding identity, not the API's own scope.
 - **Operator-wide (cross-system) queries.** The API is per-system only.
 - **Finding acknowledgement / mutation.** The API is read-only.
 

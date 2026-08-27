@@ -209,18 +209,23 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://controller.gs.nethserver.net/i
 
 ## 6. Host tooling
 
-```bash
-dnf install -y sqlite      # not present on a fresh Rocky 9; scripts/insights-sql.sh needs it
-```
-
-Copy the inspection helper from a checkout of this repository:
+Inspection is the built-in operator UI, not a shell script — nothing to install on
+the node. Add `UI_LISTEN_ADDR` to the unit's environment and restart:
 
 ```bash
-scp scripts/insights-sql.sh root@rl1.leader.default.gs.nethserver.net:/root/insights-sql.sh
+UI_LISTEN_ADDR=127.0.0.1:9596
 ```
 
-**Check:** `bash /root/insights-sql.sh counts` prints the table row counts (all zero on a
-fresh database).
+`rl1` is a shared live cluster, so bind it to loopback and reach it over an SSH
+tunnel from the workstation rather than publishing the port:
+
+```bash
+ssh -N -L 9596:127.0.0.1:9596 root@rl1.leader.default.gs.nethserver.net
+```
+
+**Check:** <http://localhost:9596/> renders the status page, with all five row counts
+zero on a fresh database. The UI is unauthenticated and fleet-wide — never bind it to
+`0.0.0.0` on this machine (`insightsd` warns but will not stop you).
 
 `scripts/insights-api.sh` runs from the workstation, not the node. It defaults to
 `http://localhost:9595`, so hitting the node over the Traefik route from step 5 needs
@@ -275,9 +280,10 @@ add-module ghcr.io/nethserver/crowdsec 1
 # 1. ingest answers immediately, analysis runs behind it
 journalctl -u insights | grep 'POST /v1/bundles'          # status=202 duration_ms=0..2
 
-# 2. the pipeline produced findings
-bash /root/insights-sql.sh findings
-bash /root/insights-sql.sh analyses                        # gate_reasons, tokens, duration
+# 2. the pipeline produced findings (over the tunnel from step 6)
+curl -s localhost:9596/findings                            # severity-ranked, all systems
+curl -s localhost:9596/analyses                            # gate_reasons, tokens, duration
+curl -s localhost:9596/gate                                # why a window did or did not spend
 
 # 3. the read API serves them, scoped to the authenticated system
 curl -sk -u "<system_id>:<auth_token>" \

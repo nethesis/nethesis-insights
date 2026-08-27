@@ -95,6 +95,7 @@ locally with `podman build -t nethesis-insights .`.
 | Variable | Purpose |
 |---|---|
 | `LISTEN_ADDR` | HTTP bind address (default `:9595`) |
+| `UI_LISTEN_ADDR` | bind address for the optional operator UI (default empty — **the UI is off**). See [Operator UI](#operator-ui) |
 | `DB_PATH` | SQLite file path (default `/var/lib/insights/insights.db`) |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | OpenAI-compatible provider |
 | `LLM_TIMEOUT` | request timeout (default `120s`) |
@@ -116,6 +117,71 @@ the gate decision and its inputs, prompt size, provider status and timing, and
 queue depth. It never logs credentials: the API key is reported only as
 `llm_api_key_set=true`, and an authentication failure names the presented
 `system_id` but never the secret.
+
+## Operator UI
+
+A built-in, read-only web dashboard over everything `insightsd` records about
+its own behaviour — findings, the cost ledger and its `gate_reasons`, spend per
+day, known templates, EWMA baselines — plus live process state the database
+cannot show: queue depth, uptime, and the effective configuration.
+
+It is **off unless you set `UI_LISTEN_ADDR`**:
+
+    UI_LISTEN_ADDR=127.0.0.1:9596 insightsd
+
+| Route | |
+|---|---|
+| `/` | row counts, queue depth/capacity/workers, uptime, build, effective config |
+| `/systems` | every system, with its template, finding, window, LLM-call and cost totals |
+| `/findings` | severity-ranked findings; filter by system, status and severity; each row expands to summary, evidence, suggested action and fingerprint |
+| `/analyses` | the cost ledger: window, gated, `llm_called`, tokens, cost, duration, `gate_reasons`, error |
+| `/gate` | windows, LLM calls and cost per distinct gate-reason set — why you are paying |
+| `/cost` | spend and tokens per UTC day and model |
+| `/templates` | what the server already considers known for a system |
+| `/baselines` | the EWMA rates the gate falls back on when a bundle carries no `expected` |
+
+### Read this before exposing it
+
+**The UI is unauthenticated and fleet-wide.** It shows every system's findings,
+templates, baselines and spend, across tenants. The ingest and read APIs are
+per-system and authenticated; this is not.
+
+So **bind it to `127.0.0.1` or a trusted management network.** `insightsd` will
+not refuse a wider bind — a `0.0.0.0` bind is the administrator's call to make,
+not the server's — but it logs a `WARN` at startup whenever the UI is bound
+anywhere other than a loopback address, so the choice is never made by accident.
+
+It runs on its own listener, deliberately: the public `:9595` ingest socket
+never serves an unauthenticated fleet-wide page, so a reverse-proxy or firewall
+mistake there cannot expose it. The container image `EXPOSE`s `9595` only —
+publishing the UI port is a deliberate act:
+
+    podman run -d --name insights -p 9595:9595 -p 127.0.0.1:9596:9596 \
+      -v insights-data:/var/lib/insights \
+      -e UI_LISTEN_ADDR=:9596 \
+      -e LLM_BASE_URL=https://api.openai.com/v1 \
+      -e LLM_MODEL=gpt-4o-mini -e LLM_API_KEY=sk-... \
+      ghcr.io/nethesis/nethesis-insights:latest
+
+Note the container must bind `:9596` internally while `podman` publishes it to
+`127.0.0.1` on the host — that is what keeps it off the network.
+
+Everything else about it is constrained to match that exposure:
+
+- **Read-only.** No handler writes; anything other than `GET` is `405`.
+- **No secrets.** The configuration table is built from an explicit list of
+  fields, never by iterating the environment. `LLM_API_KEY` and `AUTH_PEPPER`
+  appear only as `set` / `unset` (or `set (ephemeral)` for a generated pepper).
+- **Nothing unmasked.** Raw log samples are never persisted, so the UI can only
+  ever render masked templates.
+- **No JavaScript at all.** Auto-refresh is a `<meta http-equiv="refresh">`
+  toggled by nav links, filters are plain `<form method="get">`, and row detail
+  is a native `<details>` disclosure.
+- **No arbitrary SQL.** Every page is a fixed query with a server-side limit.
+
+[Pico CSS](https://picocss.com) (MIT) is vendored into the binary, so the page
+fetches nothing from the network at runtime — offline management networks are a
+supported deployment.
 
 ## License
 

@@ -50,6 +50,7 @@ of the spec are **not** built before assuming a bug:
 | Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
 | Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
+| Operator UI | `internal/ui`: read-only, zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set — unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses). Backed by the cross-system read methods in `internal/store/ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.
@@ -92,6 +93,13 @@ pair, or point `AUTH_VALIDATE_URL` at a private validator for isolated testing.
 `scripts/insights-api.sh` wraps the same calls (`health`, `findings`, `open`,
 `post <bundle.json>`, `raw <path>`); it defaults to `http://localhost:9595`.
 
+To inspect what the server stored, add `UI_LISTEN_ADDR=127.0.0.1:9596` and open
+the operator UI — findings, the cost ledger with its `gate_reasons`, the gate
+rollup, templates and baselines, plus queue depth and effective config. It
+replaces the old `scripts/insights-sql.sh`, which needed `sqlite3`, root on the
+node and the podman volume path (it is still in git history if the deleted
+`sql "SELECT …"` escape hatch is ever needed offline).
+
 Environment variables are documented in `README.md` — do not duplicate that table
 here.
 
@@ -105,8 +113,16 @@ fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
 llm  store                  interfaces, each with a real and a stub impl
 analyzer                    the pipeline; depends on all of the above
 api                         HTTP: ingest + read, auth via the Authenticator iface
+ui                          HTTP: optional operator dashboard, off by default
 cmd/insightsd               env config, wiring, graceful shutdown
 ```
+
+`ui` sits beside `api`, not under it: it depends on `store` + `model` only, and
+never on `api`, `analyzer` or `queue`. Live process state reaches it through a
+local `Runtime` interface (`Depth`/`Cap`, which `*queue.Queue` satisfies) and the
+store through a local `Reader` interface, so the package stays testable with a
+fake and the layering stays a DAG. It deliberately copies `api`'s ~30-line
+logging handler rather than importing it.
 
 The purity of `gate`, `fingerprint` and `prompt` is the point: they hold all the
 correctness and all the cost logic, and they are table-driven-testable with no
@@ -179,8 +195,21 @@ after:
 // SPDX-License-Identifier: GPL-3.0-or-later
 ```
 
-`#`-comment form for SQL, YAML, Makefile and shell. `scripts/check-license-headers.sh`
-fails the build on any miss (Task 1).
+`#`-comment form for SQL, YAML, Makefile and shell; `<!-- … -->` for HTML
+templates; `/* … */` for CSS. In `internal/ui/templates/layout.html` the header
+sits outside any `{{define}}` block, so it is emitted into the served page
+source — that is correct and intended for GPL.
+
+**Vendored third-party files are exempt and must stay exempt.** Anything under
+`internal/ui/static/` that is not ours — today `pico.min.css` and `pico.LICENSE`
+(Pico CSS v2.1.1, MIT) — keeps its own upstream copyright and permission notice
+byte-for-byte and must **never** receive the Nethesis GPL header: we did not
+write them, and MIT requires the original notice ship intact. MIT is
+GPL-3.0-compatible, so combining is fine; misattributing is not.
+
+`scripts/check-license-headers.sh` fails the build on any miss (Task 1, still
+unwritten) and must therefore learn both the two new comment forms and this
+vendored-file exemption.
 
 **Schema portability** — SQLite today, Postgres later, so from day one:
 
