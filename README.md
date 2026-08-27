@@ -41,6 +41,37 @@ Manual round trip against a stub provider:
     curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
     curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
 
+Manual round trip against a real model, free of charge, using an OpenRouter
+account and its free NVIDIA Nemotron tier — useful when the stub's canned
+response isn't enough and a paid key isn't warranted:
+
+    LLM_BASE_URL=https://openrouter.ai/api/v1 \
+    LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free \
+    LLM_API_KEY=<an OpenRouter API key> \
+    AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
+      go run ./cmd/insightsd
+
+    curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
+    curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
+
+The provider is OpenAI-compatible, so no code change is needed — only the
+three `LLM_*` variables differ from the stub round trip above. Two things to
+know before assuming a bug:
+
+- **It is slow, not hung.** The free model returns HTTP response headers
+  immediately but the body only once generation finishes, commonly ~105s
+  later. `LLM_TIMEOUT` (default `120s`) and `ANALYSIS_TIMEOUT` (default `5m`)
+  are already sized to tolerate this; do not lower them for this provider.
+  Since ingest is asynchronous (`POST /v1/bundles` returns `202`
+  immediately), the delay is invisible at the HTTP layer — check
+  `LOG_LEVEL=debug` output or poll `/v1/findings` to see when analysis lands.
+- **Free tier, so it can rate-limit or be temporarily unavailable.** Treat
+  provider errors as a signal to retry later, not as a code regression.
+
+Get a key at <https://openrouter.ai>. This same combination is also what the
+`rl1` dev deployment runs — see `docs/runbooks/dev-machine-rl1.md` for the
+production-shaped systemd/quadlet setup instead of ad hoc `go run`.
+
 ## Container
 
 Published on every push to `main` and on every tag as a public multi-arch
