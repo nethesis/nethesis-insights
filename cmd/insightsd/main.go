@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,10 +18,16 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	"github.com/nethesis/nethesis-insights/internal/api"
+	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	"github.com/nethesis/nethesis-insights/internal/store"
 )
+
+// defaultAuthValidateURL is Nethesis's own subscription/auth endpoint. It
+// forwards the edge's Authorization: Basic header verbatim and answers 200
+// (valid), 401 (invalid) or an empty body either way -- no tenant/org id.
+const defaultAuthValidateURL = "https://my.nethesis.it/auth"
 
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -66,6 +74,18 @@ func setupLogger(level string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
 }
 
+// randomPepper returns a fresh 32-byte hex key. It exits on a rand.Reader
+// failure, matching this project's other os.Exit(1)-on-startup-error style
+// -- a broken entropy source is not a condition to run degraded under.
+func randomPepper() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		slog.Error("failed to generate a random AUTH_PEPPER", "error", err)
+		os.Exit(1)
+	}
+	return hex.EncodeToString(b)
+}
+
 func main() {
 	logLevel := getenv("LOG_LEVEL", "info")
 	setupLogger(logLevel)
@@ -75,8 +95,11 @@ func main() {
 	llmBaseURL := getenv("LLM_BASE_URL", "")
 	llmModel := getenv("LLM_MODEL", "")
 	llmAPIKey := getenv("LLM_API_KEY", "")
-	authSystemID := getenv("AUTH_SYSTEM_ID", "")
-	authSecret := getenv("AUTH_SECRET", "")
+	authValidateURL := getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
+	authPepper := getenv("AUTH_PEPPER", "")
+	authCacheTTL := getenvDuration("AUTH_CACHE_TTL", 5*time.Minute)
+	authNegCacheTTL := getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
+	authTimeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
 	staleAfter := getenvDuration("STALE_AFTER", 24*time.Hour)
 	ewmaAlpha := getenvFloat("EWMA_ALPHA", 0.3)
@@ -125,24 +148,36 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 
-	auth := api.StaticAuth{SystemID: authSystemID, Secret: authSecret}
-	handler := api.NewServer(q, s, auth)
+	if authPepper == "" {
+		// A pepper is only defense in depth here -- the cache it keys never
+		// leaves memory (spec §10) -- so an unset AUTH_PEPPER gets a random
+		// one for this process's lifetime rather than refusing to start.
+		authPepper = randomPepper()
+		slog.Warn("AUTH_PEPPER not set, generated an ephemeral one for this process")
+	}
+	authenticator := auth.New(authValidateURL, authPepper, authTimeout, time.Now)
+	authenticator.PositiveTTL = authCacheTTL
+	authenticator.NegativeTTL = authNegCacheTTL
+	handler := api.NewServer(q, s, authenticator)
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
 	}
 
-	// NEVER log the API key.
+	// NEVER log the API key, the pepper, or any credential.
 	slog.Info("starting insightsd", "listen_addr", listenAddr, "model", llmModel, "db_path", dbPath,
-		"log_level", logLevel, "queue_size", queueSize, "queue_workers", queueWorkers)
+		"log_level", logLevel, "queue_size", queueSize, "queue_workers", queueWorkers,
+		"auth_validate_url", authValidateURL)
 	slog.Debug("configuration",
 		"llm_base_url", llmBaseURL,
 		"llm_timeout", llmTimeout.String(),
 		"analysis_timeout", analysisTimeout.String(),
 		"llm_api_key_set", llmAPIKey != "",
-		"auth_system_id", authSystemID,
-		"auth_secret_set", authSecret != "",
+		"auth_validate_url", authValidateURL,
+		"auth_cache_ttl", authCacheTTL.String(),
+		"auth_neg_cache_ttl", authNegCacheTTL.String(),
+		"auth_timeout", authTimeout.String(),
 		"gate_tolerance", gateTolerance,
 		"stale_after", staleAfter.String(),
 		"ewma_alpha", ewmaAlpha,

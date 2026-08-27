@@ -11,9 +11,13 @@ an OpenAI-compatible LLM call, server-computed finding identity, and a read
 API — against a single SQLite file. Ingest is asynchronous: `POST /v1/bundles`
 validates the bundle, puts it on an in-memory queue and answers `202` right
 away, so an edge node's HTTP timeout can never abort an analysis in flight.
-That in-memory queue is the permanent design. The production design still
-adds an external forward-auth validator and an optional Postgres backend.
-See the design doc referenced below.
+That in-memory queue is the permanent design.
+
+Authentication forwards the edge's `Authorization: Basic` header verbatim to
+an external validator (`AUTH_VALIDATE_URL`, default Nethesis's own
+`https://my.nethesis.it/auth`) and caches the outcome — see Configuration
+below. The production design still adds an optional Postgres backend. See
+the design doc referenced below.
 
 Because analysis is asynchronous, the ingest response says only whether the
 bundle was **accepted**. Analysis outcomes are visible in the findings API and
@@ -37,11 +41,17 @@ account and its free NVIDIA Nemotron tier:
     LLM_BASE_URL=https://openrouter.ai/api/v1 \
     LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free \
     LLM_API_KEY=<an OpenRouter API key> \
-    AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
+    DB_PATH=/tmp/insights.db \
       go run ./cmd/insightsd
 
-    curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
-    curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
+    curl -u <system_id>:<auth_token> -X POST localhost:9595/v1/bundles -d @bundle.json
+    curl -u <system_id>:<auth_token> 'localhost:9595/v1/findings?since=0'
+
+`system_id`/`auth_token` are a real NethServer subscription pair — `insightsd`
+authenticates by forwarding whatever `Authorization` header it receives to
+`AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`; see Configuration
+below). To test against a private validator instead, set `AUTH_VALIDATE_URL`
+to it before starting the server.
 
 The provider is OpenAI-compatible, so no code change is needed — set the
 three `LLM_*` variables above and run `insightsd` as usual. Two things to
@@ -72,7 +82,6 @@ Run it:
 
     podman run -d --name insights -p 9595:9595 \
       -v insights-data:/var/lib/insights \
-      -e AUTH_SYSTEM_ID=abc123 -e AUTH_SECRET=s3cret \
       -e LLM_BASE_URL=https://api.openai.com/v1 \
       -e LLM_MODEL=gpt-4o-mini -e LLM_API_KEY=sk-... \
       ghcr.io/nethesis/nethesis-insights:latest
@@ -89,7 +98,10 @@ locally with `podman build -t nethesis-insights .`.
 | `DB_PATH` | SQLite file path (default `/var/lib/insights/insights.db`) |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | OpenAI-compatible provider |
 | `LLM_TIMEOUT` | request timeout (default `120s`) |
-| `AUTH_SYSTEM_ID`, `AUTH_SECRET` | prototype static credential |
+| `AUTH_VALIDATE_URL` | forward-auth validator (default `https://my.nethesis.it/auth`) |
+| `AUTH_PEPPER` | HMAC pepper for the auth cache — secret; unset gets a random, process-lifetime one |
+| `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative validator-outcome cache lifetimes (default `5m`/`30s`) |
+| `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
 | `GATE_TOLERANCE` | deviation ratio threshold (default `3.0`) |
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |
 | `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |

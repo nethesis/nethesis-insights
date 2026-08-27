@@ -18,43 +18,43 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/store"
 )
-
-// ErrInvalidCredentials is returned by Authenticator.Validate on mismatch.
-var ErrInvalidCredentials = errors.New("invalid credentials")
 
 type Authenticator interface {
 	Validate(ctx context.Context, authHeader string) (systemID string, err error)
 }
 
 // StaticAuth validates a single hardcoded system id / secret pair using
-// HTTP Basic auth, comparing both sides in constant time.
+// HTTP Basic auth, comparing both sides in constant time. It exists for
+// tests and local development; ForwardAuth (package auth) is what
+// cmd/insightsd wires up against a real validator.
 type StaticAuth struct {
 	SystemID string
 	Secret   string
 }
 
-// Validate wraps ErrInvalidCredentials with the reason it failed. The reason
-// is for debug logs only -- the HTTP response stays a bare 401 -- and it
-// never carries the presented secret, only which half did not match.
+// Validate wraps auth.ErrInvalidCredentials with the reason it failed. The
+// reason is for debug logs only -- the HTTP response stays a bare 401 --
+// and it never carries the presented secret, only which half did not match.
 func (a StaticAuth) Validate(ctx context.Context, authHeader string) (string, error) {
 	const prefix = "Basic "
 	if authHeader == "" {
-		return "", fmt.Errorf("%w: no Authorization header", ErrInvalidCredentials)
+		return "", fmt.Errorf("%w: no Authorization header", auth.ErrInvalidCredentials)
 	}
 	if !strings.HasPrefix(authHeader, prefix) {
 		scheme, _, _ := strings.Cut(authHeader, " ")
-		return "", fmt.Errorf("%w: scheme is %q, want Basic", ErrInvalidCredentials, scheme)
+		return "", fmt.Errorf("%w: scheme is %q, want Basic", auth.ErrInvalidCredentials, scheme)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authHeader, prefix))
 	if err != nil {
-		return "", fmt.Errorf("%w: credentials are not valid base64", ErrInvalidCredentials)
+		return "", fmt.Errorf("%w: credentials are not valid base64", auth.ErrInvalidCredentials)
 	}
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
-		return "", fmt.Errorf("%w: credentials are not system_id:secret", ErrInvalidCredentials)
+		return "", fmt.Errorf("%w: credentials are not system_id:secret", auth.ErrInvalidCredentials)
 	}
 	systemID, secret := parts[0], parts[1]
 
@@ -62,11 +62,11 @@ func (a StaticAuth) Validate(ctx context.Context, authHeader string) (string, er
 	secretMatch := subtle.ConstantTimeCompare([]byte(secret), []byte(a.Secret)) == 1
 	switch {
 	case !systemMatch && !secretMatch:
-		return "", fmt.Errorf("%w: system_id %q unknown and secret mismatch", ErrInvalidCredentials, systemID)
+		return "", fmt.Errorf("%w: system_id %q unknown and secret mismatch", auth.ErrInvalidCredentials, systemID)
 	case !systemMatch:
-		return "", fmt.Errorf("%w: system_id %q does not match the configured one", ErrInvalidCredentials, systemID)
+		return "", fmt.Errorf("%w: system_id %q does not match the configured one", auth.ErrInvalidCredentials, systemID)
 	case !secretMatch:
-		return "", fmt.Errorf("%w: secret mismatch for system_id %q", ErrInvalidCredentials, systemID)
+		return "", fmt.Errorf("%w: secret mismatch for system_id %q", auth.ErrInvalidCredentials, systemID)
 	}
 	return systemID, nil
 }
@@ -153,14 +153,20 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
 	systemID, err := s.auth.Validate(r.Context(), r.Header.Get("Authorization"))
 	if err != nil {
-		// The client only ever learns "invalid credentials"; the operator
-		// gets the reason in the debug log.
+		// The client only ever learns "invalid credentials" or "temporarily
+		// unavailable"; the operator gets the reason in the debug log.
 		slog.Debug("authentication rejected",
 			"path", r.URL.Path,
 			"remote_addr", r.RemoteAddr,
 			"reason", err.Error(),
 		)
-		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
+		if errors.Is(err, auth.ErrUnavailable) {
+			// Fail closed (spec §4): an ingestion gap the edge retries is
+			// recoverable, a false 401 reject is not.
+			writeJSONError(w, http.StatusServiceUnavailable, "temporarily unavailable")
+		} else {
+			writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
+		}
 		return "", false
 	}
 	slog.Debug("authenticated", "system_id", systemID, "path", r.URL.Path)

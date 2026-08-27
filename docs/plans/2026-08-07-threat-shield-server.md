@@ -218,10 +218,10 @@ Whole suite must stay green under `go test ./... -race -count=1`.
 2. Local round trip, no containers:
    ```
    BLOCKLIST_PUBLISHED=true BLOCKLIST_MIN_SYSTEMS=1 LOG_LEVEL=debug \
-   AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/i.db go run ./cmd/insightsd
-   curl -u abc123:s3cret -X POST localhost:9595/v1/threat-events -d @decisions.json
-   curl -u abc123:s3cret -D- localhost:9595/v1/blocklist          # entry present, ETag set
-   curl -u abc123:s3cret -H 'If-None-Match: "<etag>"' -o /dev/null -w '%{http_code}\n' \
+   DB_PATH=/tmp/i.db go run ./cmd/insightsd
+   curl -u <system_id>:<auth_token> -X POST localhost:9595/v1/threat-events -d @decisions.json
+   curl -u <system_id>:<auth_token> -D- localhost:9595/v1/blocklist          # entry present, ETag set
+   curl -u <system_id>:<auth_token> -H 'If-None-Match: "<etag>"' -o /dev/null -w '%{http_code}\n' \
         localhost:9595/v1/blocklist                                # 304
    ```
 3. Sanitizer proof by hand: post a batch mixing `10.0.0.5`, `100.64.1.1`,

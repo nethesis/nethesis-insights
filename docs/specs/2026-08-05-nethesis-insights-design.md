@@ -141,10 +141,15 @@ Traefik `forwardAuth` pattern:
 
 ```
 ingest ──► $AUTH_VALIDATE_URL   (Authorization header forwarded verbatim)
-       ◄── 200      → valid; tenant/org id captured if returned
+       ◄── 200      → valid
        ◄── 401/403  → reject
        ◄── other/timeout → treat as unavailable (see fail-closed below)
 ```
+
+The default validator is Nethesis's own `https://my.nethesis.it/auth`, checked
+live against it: a `GET` with the edge's `Authorization: Basic` header returns
+a bare `200` or `401` with an empty body either way — no tenant or
+organisation id, so `internal/auth` scopes everything on `system_id` alone.
 
 Four requirements:
 
@@ -519,9 +524,10 @@ window is incompatible with 15-minute detection latency.
 | Variable | Purpose |
 |---|---|
 | `LISTEN_ADDR` | ingest + read API bind address |
-| `AUTH_VALIDATE_URL` | external forward-auth endpoint |
-| `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative cache lifetimes |
-| `AUTH_PEPPER` | HMAC pepper for cache keys — secret |
+| `AUTH_VALIDATE_URL` | external forward-auth endpoint (default `https://my.nethesis.it/auth`) |
+| `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative cache lifetimes (default `5m`/`30s`) |
+| `AUTH_PEPPER` | HMAC pepper for cache keys — secret; an unset pepper gets a random, process-lifetime one, since the cache it keys never leaves memory |
+| `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
 | `DB_DRIVER` | `sqlite` or `postgres` |
 | `DB_DSN` | connection string |
 | `QUEUE_SIZE` | bundles buffered before ingest answers `503` |
@@ -600,6 +606,7 @@ is useful and testable before that spec exists, which is why it is built first.
   reads it today (`imageroot/actions/set-clm-forwarder/10set:16`) but only tests
   truthiness, so the `system_id` / secret field names are unconfirmed. Must be
   read from a live node.
-- **The external validator's contract**: endpoint, method, response codes, and
-  whether it returns a tenant or organisation identifier the server can use for
-  scoping.
+
+Resolved: the external validator's contract (§4) — `GET $AUTH_VALIDATE_URL`
+with `Authorization` forwarded, `200`/`401`, empty body, no tenant/org id.
+Checked live against the default `https://my.nethesis.it/auth`.

@@ -5,15 +5,16 @@
 #
 # Query a running insightsd over HTTP.
 #
-#   INSIGHTS_URL   base URL          (default https://controller.gs.nethserver.net/insights)
+#   INSIGHTS_URL   base URL          (default http://localhost:9595)
 #   INSIGHTS_CRED  system_id:secret  (required for everything except `health`)
-#   INSIGHTS_CURL  extra curl flags  (default -k, the route serves a self-signed cert)
+#   INSIGHTS_CURL  extra curl flags  (default none; pass -k for a self-signed
+#                  route like the one in docs/runbooks/dev-machine-rl1.md)
 
 set -euo pipefail
 
-URL=${INSIGHTS_URL:-https://controller.gs.nethserver.net/insights}
+URL=${INSIGHTS_URL:-http://localhost:9595}
 CRED=${INSIGHTS_CRED:-}
-CURL_OPTS=${INSIGHTS_CURL:--k}
+CURL_OPTS=${INSIGHTS_CURL:-}
 
 pretty() {
     if command -v jq >/dev/null; then jq .; else python3 -m json.tool; fi
@@ -72,7 +73,7 @@ raw)
     ;;
 
 *)
-    sed -n '7,12p' "$0"
+    sed -n '7,13p' "$0"
     echo
     echo "commands: health | findings [since] | open | post <bundle.json> | raw <path>"
     exit 2

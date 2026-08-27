@@ -85,8 +85,11 @@ Rocky 9.
 
 ## 3. Register the subscription
 
-The insights server authenticates edges with the cluster's subscription identity, and
-`ns8-loki`'s collector reads the same pair, so this must exist before either works.
+`ns8-loki`'s collector reads the cluster's subscription identity and authenticates to
+the insights server with it, so this must exist before the edge loop works. The server
+itself needs no server-side credential: it forwards whatever `Authorization` header it
+receives to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`) and trusts that
+answer (spec §4).
 
 Register the cluster in cluster-admin (Settings → Subscription) with a valid auth token.
 
@@ -97,25 +100,24 @@ redis-cli --raw HGET cluster/subscription system_id
 redis-cli --raw HKEYS cluster/subscription     # provider support_user auth_token system_id vpn_cert_cn
 ```
 
-`system_id` is a UUID and `auth_token` is the shared secret. Both are needed verbatim in
-step 4 — the server's `AUTH_SYSTEM_ID`/`AUTH_SECRET` must equal them, because the
-prototype's `api.StaticAuth` compares against one hardcoded pair.
+`system_id` is a UUID and `auth_token` is the shared secret — this is exactly the
+`Authorization: Basic` pair the edge will present, and it only needs to be a credential
+`AUTH_VALIDATE_URL` accepts, not anything configured on the server.
 
 ## 4. Deploy the insights container
 
 Rootful podman via a quadlet unit — deliberately *not* an NS8 module: the image carries
 no `imageroot`, and `add-module` would reject it.
 
-Environment file. Fill `AUTH_SYSTEM_ID`/`AUTH_SECRET` from step 3 and supply a fresh
-OpenRouter key:
+Environment file — supply a fresh OpenRouter key. `AUTH_VALIDATE_URL` defaults to
+`https://my.nethesis.it/auth`, so it does not need to be set unless testing against a
+private validator:
 
 ```bash
 install -m 600 /dev/null /etc/insights.env
 cat > /etc/insights.env <<EOF
 LISTEN_ADDR=:9595
 DB_PATH=/var/lib/insights/insights.db
-AUTH_SYSTEM_ID=$(redis-cli --raw HGET cluster/subscription system_id)
-AUTH_SECRET=$(redis-cli --raw HGET cluster/subscription auth_token)
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
 LLM_API_KEY=<paste a fresh OpenRouter key>

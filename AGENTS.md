@@ -44,11 +44,11 @@ of the spec are **not** built before assuming a bug:
 | Area | Prototype (built) | Design (Task 11+) |
 |---|---|---|
 | Ingest → analysis | asynchronous: `internal/queue`, an in-memory bounded channel — this is the permanent design | same |
-| Auth | `api.StaticAuth` — one hardcoded `AUTH_SYSTEM_ID`/`AUTH_SECRET` pair | `internal/auth`: forward-auth to `AUTH_VALIDATE_URL`, TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 |
+| Auth | `internal/auth.ForwardAuth`: forward-auth to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design; `api.StaticAuth` still exists for tests only | same |
 | Schema | `CREATE TABLE IF NOT EXISTS` in `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
 | Backends | SQLite only | `Store` iface already in place; `pgStore` added later |
 | Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
-| Missing packages | — | `auth`, `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
@@ -79,11 +79,15 @@ free-tier walkthrough):
 ```bash
 LLM_BASE_URL=https://openrouter.ai/api/v1 LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free \
 LLM_API_KEY=<an OpenRouter API key> \
-AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
+DB_PATH=/tmp/insights.db \
   go run ./cmd/insightsd
-curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
-curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
+curl -u <system_id>:<auth_token> -X POST localhost:9595/v1/bundles -d @bundle.json
+curl -u <system_id>:<auth_token> 'localhost:9595/v1/findings?since=0'
 ```
+
+`system_id`/`auth_token` must be a credential the configured `AUTH_VALIDATE_URL`
+(default `https://my.nethesis.it/auth`) accepts — a real NethServer subscription
+pair, or point `AUTH_VALIDATE_URL` at a private validator for isolated testing.
 
 `scripts/insights-api.sh` wraps the same calls (`health`, `findings`, `open`,
 `post <bundle.json>`, `raw <path>`); it defaults to `http://localhost:9595`.

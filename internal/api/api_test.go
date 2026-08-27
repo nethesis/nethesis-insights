@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
@@ -129,12 +130,12 @@ func TestIngestRequiresCredentials(t *testing.T) {
 // The 401 body stays opaque, but the error carries a reason for the debug log
 // -- and never the presented secret.
 func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
-	auth := StaticAuth{SystemID: testSystemID, Secret: testSecret}
+	sa := StaticAuth{SystemID: testSystemID, Secret: testSecret}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.SetBasicAuth("wrong-system", "hunter2")
 
-	_, err := auth.Validate(context.Background(), req.Header.Get("Authorization"))
-	if !errors.Is(err, ErrInvalidCredentials) {
+	_, err := sa.Validate(context.Background(), req.Header.Get("Authorization"))
+	if !errors.Is(err, auth.ErrInvalidCredentials) {
 		t.Fatalf("error: got %v, want ErrInvalidCredentials", err)
 	}
 	if !strings.Contains(err.Error(), "wrong-system") {
