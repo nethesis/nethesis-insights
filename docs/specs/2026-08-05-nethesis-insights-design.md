@@ -48,35 +48,41 @@ load-bearing for server-side dedup.
 
 ### 3.1 Topology
 
-One container, three processes, supervised by `s6-overlay`.
+One container: a static Go binary and SQLite. No second process, so no
+process supervisor is needed — the container's `ENTRYPOINT` is the binary
+itself.
 
 ```
                      ┌──────────── container ─────────────┐
 edge (2700 nodes)    │                                    │
-  bundle/15min ──────┼─► ingest HTTP ─► topic: bundles ──┐ │
-   POST /v1/bundles  │      (auth)      (48h retention)  │ │
+  bundle/15min ──────┼─► ingest HTTP ─► in-memory queue ─┐ │
+   POST /v1/bundles  │      (auth)      (bounded, RAM)   │ │
                      │                                   ▼ │
    GET /v1/findings ─┼─◄─ read API ◄─ SQLite ◄── analyzer  │
-                     │                            │       │
-                     └────────────────────────────┼───────┘
-                                                  ▼
-                                       OpenAI / OpenRouter
+                     │                            │        │
+                     └────────────────────────────┼────────┘
+                                                   ▼
+                                        OpenAI / OpenRouter
 ```
 
-`s6-overlay` rather than a bash `&` because the container needs correct signal
-forwarding, PID-1 zombie reaping, and independent restart of Redpanda without
-killing the Go binary. Redpanda runs single-node: `--smp 1 --memory 1G
---overprovisioned`.
+The `bundles` buffer is an in-process, in-memory bounded channel
+(`internal/queue`), not a broker. `POST /v1/bundles` validates and enqueues,
+then answers `202` immediately, so an edge node's own HTTP timeout can never
+abort an analysis in flight; a worker pool drains the queue, gates each
+bundle, and calls the LLM only when the gate fires.
+
+This trades durability for simplicity: nothing in the queue survives a
+process restart. A crash drops at most `QUEUE_SIZE` buffered-but-unprocessed
+bundles rather than persisting them for replay. That is an accepted risk, not
+an oversight — see §9.4 for why it is survivable at this cadence.
 
 ### 3.2 Sizing
 
-2700 systems × 4 bundles/hour = **3 requests/second**. Redpanda is not present
-for throughput — at this rate a database table would serve. It is present for
-durable buffering, replay from offset, and decoupling ingest latency from
-multi-second LLM calls. Sizing the deployment for a higher load would be
-sizing for a load that does not exist.
-
-Redpanda's practical floor is ~1–2 GB RAM even idle; budget for it.
+2700 systems × 4 bundles/hour = **3 requests/second**. A bounded in-memory
+channel inside the same process serves that ingest-to-analysis decoupling
+with no additional moving part. Sizing the deployment for a higher load, or
+for durability guarantees this fleet's cadence does not need, would be sizing
+for a problem that does not exist.
 
 ### 3.3 Packages
 
@@ -85,8 +91,8 @@ Redpanda's practical floor is ~1–2 GB RAM even idle; budget for it.
 | `cmd/insightsd` | wiring, config, graceful shutdown | all |
 | `internal/model` | `Bundle`, `Digest`, `Template`, `Finding` types | — |
 | `internal/auth` | forward-auth client + TTL cache | — |
-| `internal/ingest` | HTTP handler: validate, produce | `auth`, `queue` |
-| `internal/queue` | franz-go produce/consume, interface-typed | — |
+| `internal/ingest` | HTTP handler: validate, enqueue | `auth`, `queue` |
+| `internal/queue` | in-memory bounded channel, interface-typed | — |
 | **`internal/gate`** | **pure**: `(Bundle, SystemState) → Decision` | — |
 | `internal/llm` | OpenAI-compatible client, strict `json_schema` | — |
 | **`internal/fingerprint`** | **pure**: `Finding → stable hash` | — |
@@ -245,10 +251,10 @@ ordinary module for baselines, allocation and findings. It is a real bucket,
 not a missing value, and rejecting an empty `module_id` would discard the most
 security-relevant stream on the node.
 
-### 5.4 Validation before produce
+### 5.4 Validation before enqueue
 
-Never poison the topic. Rejected with `400`, logged with `system_id`, not
-retried:
+Never let a malformed bundle occupy a worker. Rejected with `400`, logged with
+`system_id`, not retried:
 
 - unknown `schema_version`
 - `window.end - window.start` outside tolerance
@@ -261,16 +267,20 @@ retried:
 The 6-hour acceptance window is what gives the edge room to retry across
 several failed cycles without the server rejecting recovered data.
 
-### 5.5 Topics
+### 5.5 Queue
 
-| Topic | Key | Partitions | Retention | Purpose |
-|---|---|---|---|---|
-| `bundles` | `system_id` | 12 | 48 h, zstd | ingest → analyzer, per-system ordering |
-| `bundles.dlq` | `system_id` | 1 | 7 d | permanently failed bundles |
+`internal/queue` is a single bounded, in-memory `chan model.Bundle` (default
+`QUEUE_SIZE=256`), drained by `QUEUE_WORKERS` goroutines (default 2). There
+are no partitions, no offsets and no retention: ordering across systems is
+not guaranteed, and ordering within one system is not relied upon either —
+identity is keyed on `(system_id, window_start)`, not arrival order.
 
-Consumer group `analyzer`, manual commit **after** the store write —
-at-least-once delivery, made harmless by the `(system_id, window_start)`
-uniqueness constraint.
+An in-flight set keyed on `(system_id, window_start)` makes resending a
+window that is still queued or being analyzed a no-op rather than a second
+LLM call — the store's own idempotency (§5.2) only covers a window that has
+already finished. A worker holds that claim for the lifetime of one analysis;
+publishing to the channel is not itself the unit of durability, since nothing
+in the channel survives a process restart (§3.1, §9.4).
 
 ### 5.6 Read API
 
@@ -292,8 +302,9 @@ Six tables.
 | `schema_migrations` | — | `golang-migrate` state |
 
 There is no `bundles` table. Per §10, bundles are not persisted: they live only
-in the topic under 48-hour retention. `analyses` records that a window was
-processed and what it cost; the digest is absorbed into `module_baselines`.
+in the in-memory queue (§5.5) for the duration of one analysis. `analyses`
+records that a window was processed and what it cost; the digest is absorbed
+into `module_baselines`.
 
 ### 6.1 Why a server-side baseline exists
 
@@ -342,17 +353,17 @@ string enum so one can be added without a schema change.
 
 ```
 consume bundle
- 1. INSERT analyses(system_id, window_start)   → conflict? commit offset, done
+ 1. INSERT analyses(system_id, window_start)   → conflict? done (duplicate)
  2. read known templates + baselines → compute novel set, deviations
  3. gate(bundle, state) → Decision
- 4. gated out? → record decision, commit offset, done      ← zero LLM cost
+ 4. gated out? → record decision, done                      ← zero LLM cost
  5. build prompt (deterministic assembly, §8.2)
  6. LLM call (strict json_schema, no temperature)
  7. parse, validate, sort severity-descending
  8. per finding: fingerprint → INSERT, or bump/reopen
  9. upsert system_templates + module_baselines              ← only now
 10. mark absent open findings stale
-11. finalize analyses row (tokens, cost, model), commit offset
+11. finalize analyses row (tokens, cost, model)
 ```
 
 **Step ordering is a correctness requirement, not style.** Two constraints:
@@ -410,21 +421,26 @@ Five levers:
 | `system_id` mismatch | `403` | do not retry |
 | invalid credentials | `401` | do not retry |
 | validator unreachable, no cache hit | `503` | retry with backoff |
-| Redpanda produce failure | `503` | retry with backoff |
+| queue saturated (`QUEUE_SIZE` full) | `503` | retry with backoff |
 | duplicate window | `200 {"duplicate": true}` | treat as success |
 
 ### 9.2 Analyzer
 
 | Condition | Action |
 |---|---|
-| LLM `4xx` (bad request, schema rejection) | DLQ immediately — deterministic, retry cannot help |
-| LLM `429` / `5xx` / timeout | retry with exponential backoff, max 5, then DLQ |
-| response parse or schema-validation failure | retry once, then DLQ |
-| store write failure | nack, redeliver |
+| LLM `4xx` (bad request, schema rejection) | permanent: finalize `analyses` with the error, window closed — deterministic, a retry cannot help |
+| response parse or schema-validation failure | permanent: same as a 4xx — the model's own output is what's wrong |
+| LLM `429` / `5xx` / timeout | transient: record the attempt (`analyses.error`), leave the window claimable |
+| store write failure | surfaced to the caller; the bundle is not marked processed |
 | SQLite busy | `busy_timeout` then bounded retry |
 
-Every DLQ message carries the failure reason and the original bundle. A
-non-empty DLQ is an operational alert, not a normal state.
+There is no dead-letter queue. A permanently-failed window's reason lives in
+`analyses.error`, queryable like any other row, and there is nothing to
+redeliver it to. A transient failure's only path to recovery is the edge
+producing overlapping data for the same window in a later bundle — the
+analyzer does not retry the LLM call on its own. That gap is accepted for
+now; an internal retry or an explicit re-queue is future work, independent of
+the queue-backend decision in §3.1.
 
 ### 9.3 Thundering herd
 
@@ -436,15 +452,16 @@ every one.
 
 Three defences, all required:
 
-- **Global LLM concurrency cap** (`LLM_MAX_CONCURRENCY`). The analyzer is one
-  consumer group; excess work waits in the topic, which is what the topic is
-  for.
+- **Global LLM concurrency cap** (`LLM_MAX_CONCURRENCY`). Excess work waits in
+  the in-memory queue, bounded by `QUEUE_SIZE`; once it is full, ingest
+  answers `503` and the edge backs off (§9.1) instead of the queue growing
+  without limit.
 - **Daily spend ceiling** (`LLM_DAILY_SPEND_CAP_USD`) computed from the
   `analyses` cost ledger. On breach, the gate degrades to
   security-category-only and logs loudly. Degraded is better than a surprise
   invoice, and better than silence.
 - **Per-system ingest rate limit** — roughly 10 bundles/hour burst, so one
-  misbehaving node cannot flood the topic.
+  misbehaving node cannot fill the queue on its own.
 
 ### 9.4 Degradation summary
 
@@ -455,9 +472,9 @@ run:
 |---|---|
 | edge metric query fails | server EWMA covers the deviation gate (§6.1) |
 | validator down | ingestion pauses, edge retries within the 6 h window |
-| LLM provider down | bundles accumulate in the topic, analysed on recovery |
+| LLM provider down | bundles accumulate in the in-memory queue (bounded by `QUEUE_SIZE`), analysed on recovery; if it fills before recovery, ingest returns `503` until it drains |
 | spend cap hit | gate narrows to security only |
-| Redpanda restart | s6 restarts it; ingest returns 503 meanwhile |
+| server process crash or restart | buffered-but-unprocessed bundles are lost (§3.1); the edge's next 15-minute bundle for the same window fills the gap if the condition persists |
 
 ## 10. Data protection
 
@@ -467,8 +484,9 @@ minimal:
 - The edge scrubs before shipping (existing `SCRUB_RULES` in
   `imageroot/bin/anomaly-detector`) and masks lines to templates.
 - The server persists **only** template text, counts, digests and findings.
-- Representative raw `samples` exist only in the `bundles` topic under 48-hour
-  retention and are **never** copied into the database.
+- Representative raw `samples` exist only in the bundle in flight — held in
+  memory for one queue-and-analyze cycle — and are **never** copied into the
+  database or held anywhere durable.
 - Secrets (`LLM_API_KEY`, `AUTH_PEPPER`) come from the environment, are never
   written to the database, and are never logged.
 - The auth cache stores credential HMACs, never secrets (§4).
@@ -506,7 +524,9 @@ window is incompatible with 15-minute detection latency.
 | `AUTH_PEPPER` | HMAC pepper for cache keys — secret |
 | `DB_DRIVER` | `sqlite` or `postgres` |
 | `DB_DSN` | connection string |
-| `REDPANDA_BROKERS`, `TOPIC_BUNDLES`, `TOPIC_DLQ` | queue wiring |
+| `QUEUE_SIZE` | bundles buffered before ingest answers `503` |
+| `QUEUE_WORKERS` | concurrent analyses |
+| `ANALYSIS_TIMEOUT` | ceiling for one bundle's analysis |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | provider — key is secret |
 | `LLM_MAX_CONCURRENCY` | global inference cap |
 | `LLM_DAILY_SPEND_CAP_USD` | spend ceiling, gate degrades on breach |
@@ -540,8 +560,8 @@ prompt, and an environment variable would let the two drift apart.
   novel — the §7 correctness constraint, asserted directly
 - duplicate `(system_id, window_start)` is idempotent
 
-**Container** — real Redpanda via compose: post bundles with `curl`, assert
-findings through the read API.
+**Container** — build and run the image: post bundles with `curl`, assert
+findings through the read API. No broker to bring up alongside it.
 
 **Migration** — run `golang-migrate` against both SQLite and Postgres in CI, so
 the portability rules in §3.4 are enforced by the build rather than by memory.

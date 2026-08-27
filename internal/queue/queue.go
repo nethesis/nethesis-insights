@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package queue decouples ingest from analysis. The HTTP handler answers as
-// soon as a bundle is durable enough to be accepted -- here, buffered in
-// memory -- so an edge node never waits on an LLM call and never loses a
-// window because its own client timeout fired first.
+// soon as a bundle is accepted onto an in-memory bounded channel, so an edge
+// node never waits on an LLM call and never loses a window because its own
+// client timeout fired first.
 //
-// This is the prototype stand-in for the Redpanda `bundles` topic of the
-// design (Task 11+). The interface is deliberately the subset that survives
-// that swap: Publish returns "accepted" or "rejected", never a result.
+// This is the permanent design, not a stand-in for a durable broker: at this
+// fleet's throughput a broker's durability was evaluated and rejected as not
+// worth its operational cost (see the design spec, §3.1-§3.2). The accepted
+// trade is that nothing here survives a process restart.
 package queue
 
 import (

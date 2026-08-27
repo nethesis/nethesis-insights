@@ -4,9 +4,9 @@
 
 **Goal:** Build `nethesis-insights`, a Go server that receives deduplicated log bundles from NethServer nodes, gates them against novelty and deviation before spending any LLM call, and stores fingerprinted findings that never repeat.
 
-**Architecture:** One container running Redpanda, a static Go binary and SQLite under `s6-overlay`. HTTP ingest authenticates by forwarding Basic credentials to an external validator, then produces to a Redpanda topic. A consumer reads bundles, gates them, calls an OpenAI-compatible LLM only when warranted, and upserts findings keyed by a server-computed fingerprint. All storage goes through a `Store` interface so the SQLite backend can be swapped for Postgres.
+**Architecture:** One container running a static Go binary and SQLite — no supervisor process, because there is nothing else in the container to supervise. HTTP ingest authenticates by forwarding Basic credentials to an external validator, then enqueues onto an in-process, in-memory bounded queue. A worker pool drains it, gates each bundle, calls an OpenAI-compatible LLM only when warranted, and upserts findings keyed by a server-computed fingerprint. All storage goes through a `Store` interface so the SQLite backend can be swapped for Postgres.
 
-**Tech Stack:** Go 1.23, `uptrace/bun` (SQLite + Postgres), `modernc.org/sqlite` (CGO-free), `twmb/franz-go` (Kafka client), `golang-migrate/migrate`, `oklog/ulid`, `golang.org/x/time/rate`, `stretchr/testify`, `s6-overlay`, Redpanda.
+**Tech Stack:** Go 1.23, `uptrace/bun` (SQLite + Postgres), `modernc.org/sqlite` (CGO-free), `golang-migrate/migrate`, `oklog/ulid`, `golang.org/x/time/rate`, `stretchr/testify`. The `bundles` queue is an in-memory Go channel (`internal/queue`) — no broker.
 
 **Spec:** [2026-08-05 Nethesis Insights Design](../specs/2026-08-05-nethesis-insights-design.md)
 
@@ -16,7 +16,7 @@
 
 ## Development environment
 
-**All work happens on the dev machine, not locally.** The operator has a local bandwidth limit, and this project pulls a Go module cache, a Redpanda image and a Postgres image.
+**All work happens on the dev machine, not locally.** The operator has a local bandwidth limit, and this project pulls a Go module cache and a Postgres image.
 
 ```
 host:  root@rl1.leader.default.gs.nethserver.net
@@ -70,7 +70,7 @@ In Go files the header goes **above** the `package` clause, separated by a blank
 
 **Secrets** (spec §10): `LLM_API_KEY` and `AUTH_PEPPER` come from the environment only. Never written to the database. Never logged. The auth cache stores `HMAC(pepper, credential)`, never the credential.
 
-**Data protection** (spec §10): raw `samples` are never written to the database. They exist only in the `bundles` topic.
+**Data protection** (spec §10): raw `samples` are never written to the database. They exist only in the bundle in flight — held in memory for one queue-and-analyze cycle — and are never persisted anywhere.
 
 **Auth** (spec §4): fail **closed**. Validator unreachable with no cache hit → `503`.
 
@@ -82,7 +82,7 @@ In Go files the header goes **above** the `package` clause, separated by a blank
 
 ## Deviations from the spec
 
-Five deliberate refinements. Each is a decision a reviewer should be able to accept or reject on its own.
+Four deliberate refinements. Each is a decision a reviewer should be able to accept or reject on its own.
 
 1. **`internal/prompt` is its own package.** Spec §3.3 folds prompt assembly into `internal/analyzer`, but §13 requires golden-file tests proving byte-identical output — that is a unit with its own contract. Splitting it keeps `analyzer` free of string building.
 
@@ -91,8 +91,6 @@ Five deliberate refinements. Each is a decision a reviewer should be able to acc
 3. **SQLite write serialization uses a mutex, not a dedicated goroutine.** Spec §3.4 says "a single writer goroutine owning all writes". A mutex gives the identical serialization guarantee with no channel lifecycle to leak and no shutdown ordering to get wrong.
 
 4. **Two config keys added:** `LLM_PRICE_INPUT_PER_MTOK` and `LLM_PRICE_OUTPUT_PER_MTOK`. The spec's cost ledger (§6) and daily spend cap (§9.3) compute `cost_micros`, which is impossible without prices. They are configuration rather than constants because provider pricing changes independently of releases.
-
-5. **The container's final stage is the official Fedora-based Redpanda image, not Alpine.** Project container conventions prefer Alpine but name `*-slim`/glibc images as the documented fallback on musl incompatibility. Redpanda requires glibc. Justified in Task 17.
 
 ---
 
@@ -103,11 +101,7 @@ nethesis-insights/
 ├── go.mod  go.sum  Makefile  renovate.json  README.md
 ├── .golangci.yml
 ├── .github/workflows/ci.yml
-├── Containerfile
-├── compose.yaml                        # local dev: Redpanda + server
-├── s6/                                 # s6-overlay service definitions
-│   ├── redpanda/{type,run,notification-fd}
-│   └── insightsd/{type,run,dependencies.d/redpanda}
+├── Containerfile                       # single-stage Alpine, no supervisor
 ├── cmd/insightsd/main.go               # wiring, config, graceful shutdown
 └── internal/
     ├── model/          bundle.go  finding.go  severity.go       # shared types, no deps
@@ -118,7 +112,7 @@ nethesis-insights/
     ├── prompt/         prompt.go  schema.go  testdata/*.golden   # pure
     ├── llm/            llm.go  openai.go  stub.go
     ├── budget/         budget.go                                 # concurrency + spend cap
-    ├── queue/          queue.go  franz.go  fake.go
+    ├── queue/          queue.go                                  # in-memory bounded channel, no broker
     ├── auth/           auth.go  forwarder.go  cache.go
     ├── ingest/         ingest.go  validate.go  ratelimit.go
     ├── api/            api.go
@@ -126,7 +120,7 @@ nethesis-insights/
     └── maint/          maint.go
 ```
 
-**Responsibility boundaries.** `model` has no dependencies and is imported by everything. `fingerprint`, `gate` and `prompt` are pure — no network, no disk, no clock beyond an injected `now` — so they carry the correctness and cost logic in the most testable form available. `store`, `queue`, `llm` and `auth` are interfaces with a real and a fake implementation each, which is what lets `analyzer` be tested end-to-end with no container running.
+**Responsibility boundaries.** `model` has no dependencies and is imported by everything. `fingerprint`, `gate` and `prompt` are pure — no network, no disk, no clock beyond an injected `now` — so they carry the correctness and cost logic in the most testable form available. `store`, `queue`, `llm` and `auth` are interfaces with a real and a stub implementation each, which is what lets `analyzer` be tested end-to-end with no container running.
 
 ---
 
@@ -339,7 +333,7 @@ tidy:
 	go mod tidy
 ```
 
-`CGO_ENABLED=0` is required: the binary must be static so it can be copied into the Redpanda base image in Task 17 without dragging a libc dependency.
+`CGO_ENABLED=0` is required: the binary must be static so it can be copied into a minimal Alpine runtime stage without dragging a libc dependency.
 
 - [ ] **Step 11: Add the lint configuration**
 
@@ -3957,8 +3951,8 @@ import (
 	"time"
 )
 
-// Limiter caps concurrent LLM calls. Excess work waits in the Redpanda topic,
-// which is what the topic is for.
+// Limiter caps concurrent LLM calls. Excess work waits in the in-memory
+// queue, which is what the queue is for.
 type Limiter struct {
 	sem chan struct{}
 }

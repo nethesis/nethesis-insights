@@ -25,24 +25,38 @@ Read the spec before changing gating, fingerprinting, the wire protocol, or the 
 order — those sections explain *why* each rule exists, and the reasons are not
 reconstructible from the code.
 
+A related, separate design also lives here: `docs/specs/2026-07-28-threat-shield-design.md`
+and `docs/plans/2026-08-07-threat-shield-server.md` (server-side fleet-wide CrowdSec ban
+sharing). It is not part of the ingest/gate/LLM pipeline above and does not change any
+rule in this section — treat it as a distinct feature landing in the same repo, not as
+context for changes to bundles, gating or findings.
+
+`docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
+scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
+setup from memory.
+
 ## Current state: prototype, not the designed system
 
-One commit. The prototype does a full round trip — authenticated ingest → gate →
+The prototype does a full round trip — authenticated ingest → queue → gate →
 LLM → fingerprint → read API — but takes deliberate shortcuts. Know which parts
 of the spec are **not** built before assuming a bug:
 
 | Area | Prototype (built) | Design (Task 11+) |
 |---|---|---|
-| Ingest → analysis | synchronous, inside the HTTP request | Redpanda topic `bundles`, consumer group `analyzer` |
+| Ingest → analysis | asynchronous: `internal/queue`, an in-memory bounded channel — this is the permanent design | same |
 | Auth | `api.StaticAuth` — one hardcoded `AUTH_SYSTEM_ID`/`AUTH_SECRET` pair | `internal/auth`: forward-auth to `AUTH_VALIDATE_URL`, TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 |
 | Schema | `CREATE TABLE IF NOT EXISTS` in `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
 | Backends | SQLite only | `Store` iface already in place; `pgStore` added later |
 | Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
-| Missing packages | — | `queue`, `auth`, `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
-| Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `renovate.json`, `Containerfile`, `compose.yaml`, `s6/` |
+| Missing packages | — | `auth`, `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
+| Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.
+
+`internal/queue`'s in-memory bounded channel is the permanent queue design, not
+a placeholder. The traded risk — a crash drops whatever is buffered, bounded by
+`QUEUE_SIZE` — is accepted and documented in spec §3.1/§3.2/§9.4.
 
 ## Commands
 
@@ -217,10 +231,11 @@ successful no-op, not an error.
 
 The plan runs all work on `root@rl1.leader.default.gs.nethserver.net` (Rocky 9),
 under `/root/nethesis-insights`, because the operator has a local bandwidth limit
-and this project pulls a Go module cache plus Redpanda and Postgres images.
+and this project pulls a Go module cache plus a Postgres image.
 `rl1` is a **shared live NS8 cluster** — other modules (`nethvoice2`, `crowdsec1`,
 `samba2`, `metrics1`, `traefik1`) run on it. Never restart another module's
-services; bind containers to high ports.
+services; bind containers to high ports. If the machine has been torn down,
+`docs/runbooks/dev-machine-rl1.md` rebuilds it end to end.
 
 ## Open questions from the spec
 
