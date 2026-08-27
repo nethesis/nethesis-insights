@@ -11,8 +11,8 @@ an OpenAI-compatible LLM call, server-computed finding identity, and a read
 API — against a single SQLite file. Ingest is asynchronous: `POST /v1/bundles`
 validates the bundle, puts it on an in-memory queue and answers `202` right
 away, so an edge node's HTTP timeout can never abort an analysis in flight.
-The production design replaces that queue with Redpanda as a durable buffer,
-and adds an external forward-auth validator and an optional Postgres backend.
+That in-memory queue is the permanent design. The production design still
+adds an external forward-auth validator and an optional Postgres backend.
 See the design doc referenced below.
 
 Because analysis is asynchronous, the ingest response says only whether the
