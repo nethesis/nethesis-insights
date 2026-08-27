@@ -6,6 +6,8 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -146,36 +148,50 @@ func TestDuplicateWindowInFlightIsNotAnalyzedTwice(t *testing.T) {
 
 // Once the analysis is done the window is claimable again: a later resend is
 // the store's duplicate-window case, not the queue's.
+//
+// The claim is released in a defer that runs *after* the handler returns, so
+// the handler signalling its own entry is not a barrier past the release.
+// With exactly one worker, a sentinel window on a different key cannot begin
+// until process() for the first window has fully returned -- which is
+// precisely when the claim was dropped. Waiting for the sentinel is therefore
+// a deterministic barrier, with no sleep and no retry loop.
 func TestWindowIsClaimableAgainAfterTheAnalysisFinishes(t *testing.T) {
 	var mu sync.Mutex
-	calls := 0
-	done := make(chan struct{}, 2)
+	var seen []string
+	done := make(chan struct{}, 3)
 
 	q := New(4, time.Minute, func(ctx context.Context, b model.Bundle) error {
 		mu.Lock()
-		calls++
+		seen = append(seen, fmt.Sprintf("%s/%d", b.SystemID, b.Window.Start))
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
 	})
 	q.Start(1)
 
-	for round := 1; round <= 2; round++ {
-		if err := q.Publish(bundle("s1", 100)); err != nil {
-			t.Fatalf("publish round %d: %v", round, err)
+	publishAndWait := func(what string, b model.Bundle) {
+		t.Helper()
+		if err := q.Publish(b); err != nil {
+			t.Fatalf("publish %s: %v", what, err)
 		}
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("round %d never ran -- the window stayed claimed after completion", round)
+			t.Fatalf("%s never ran -- the window stayed claimed after completion", what)
 		}
 	}
+
+	publishAndWait("the first analysis", bundle("s1", 100))
+	publishAndWait("the barrier window", bundle("s2", 999))
+	publishAndWait("the resend after completion", bundle("s1", 100))
+
 	q.Stop()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("handler ran %d times, want 2", calls)
+	want := []string{"s1/100", "s2/999", "s1/100"}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("handler saw %v, want %v", seen, want)
 	}
 }
 
