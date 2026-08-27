@@ -226,7 +226,7 @@ Whole suite must stay green under `go test ./... -race -count=1`.
    ```
 3. Sanitizer proof by hand: post a batch mixing `10.0.0.5`, `100.64.1.1`,
    `169.254.169.254` and one public IP → only the public one is stored
-   (`hack/insights-sql.sh sql "SELECT attacker_ip FROM threat_events;"`).
+   (`scripts/insights-sql.sh sql "SELECT attacker_ip FROM threat_events;"`).
 4. Deploy to rl1 the established way (push to `main`, CI publishes, `podman pull` +
    `systemctl restart insights`), keep `BLOCKLIST_PUBLISHED=false` there so the feed
    stays dark, and confirm with `journalctl -u insights` that the consensus ticker runs

@@ -128,7 +128,7 @@ nethesis-insights/
 
 **Files:**
 - Create: `LICENSE`, `go.mod`, `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `renovate.json`, `README.md`, `.gitignore`
-- Create: `hack/check-license-headers.sh`
+- Create: `scripts/check-license-headers.sh`
 - Create: `internal/version/version.go`
 - Test: `internal/version/version_test.go`
 
@@ -202,7 +202,7 @@ git config user.name  "Giacomo Sanchietti"
 git config user.email "giacomo.sanchietti@nethesis.it"
 git checkout -b feat/server-scaffold
 go mod init github.com/nethesis/nethesis-insights
-mkdir -p cmd/insightsd internal/version hack
+mkdir -p cmd/insightsd internal/version scripts
 ```
 
 Cloning an empty repository warns `you appear to have cloned an empty repository` and leaves no branch checked out; `git checkout -b` is what establishes the first one. The default branch becomes `main` on first push (Step 12).
@@ -215,7 +215,7 @@ Fetch the canonical text rather than hand-writing it:
 curl -fsSL https://www.gnu.org/licenses/gpl-3.0.txt -o LICENSE
 ```
 
-Create `hack/check-license-headers.sh`:
+Create `scripts/check-license-headers.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -246,7 +246,7 @@ echo "license headers OK"
 ```
 
 ```bash
-chmod +x hack/check-license-headers.sh
+chmod +x scripts/check-license-headers.sh
 ```
 
 Create `.gitignore`:
@@ -325,7 +325,7 @@ lint:
 	golangci-lint run
 
 license-check:
-	./hack/check-license-headers.sh
+	./scripts/check-license-headers.sh
 
 check: license-check lint test
 
@@ -3142,7 +3142,7 @@ cat internal/prompt/testdata/render.golden
 
 Expected: PASS, and the golden file reads as a sorted digest, sorted templates, a sampling block naming `traefik1 3200`, and `ALREADY KNOWN\nnone`.
 
-The golden file needs no license header — `.golden` is excluded by `hack/check-license-headers.sh`.
+The golden file needs no license header — `.golden` is excluded by `scripts/check-license-headers.sh`.
 
 - [ ] **Step 5: Write the failing parser tests**
 

@@ -208,23 +208,27 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://controller.gs.nethserver.net/i
 ## 6. Host tooling
 
 ```bash
-dnf install -y sqlite      # not present on a fresh Rocky 9; hack/insights-sql.sh needs it
+dnf install -y sqlite      # not present on a fresh Rocky 9; scripts/insights-sql.sh needs it
 ```
 
 Copy the inspection helper from a checkout of this repository:
 
 ```bash
-scp hack/insights-sql.sh root@rl1.leader.default.gs.nethserver.net:/root/insights-sql.sh
+scp scripts/insights-sql.sh root@rl1.leader.default.gs.nethserver.net:/root/insights-sql.sh
 ```
 
 **Check:** `bash /root/insights-sql.sh counts` prints the table row counts (all zero on a
 fresh database).
 
-`hack/insights-api.sh` runs from the workstation, not the node:
+`scripts/insights-api.sh` runs from the workstation, not the node. It defaults to
+`http://localhost:9595`, so hitting the node over the Traefik route from step 5 needs
+`INSIGHTS_URL` set explicitly:
 
 ```bash
+export INSIGHTS_URL="https://controller.gs.nethserver.net/insights"
 export INSIGHTS_CRED="<system_id>:<auth_token>"
-./hack/insights-api.sh health
+export INSIGHTS_CURL="-k"    # the route serves a self-signed cert (step 5)
+./scripts/insights-api.sh health
 ```
 
 ## 7. Point the edge at the server

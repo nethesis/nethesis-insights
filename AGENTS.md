@@ -73,16 +73,20 @@ Once Task 1's tooling lands, prefer `make check` (license headers + lint + tests
 `sqlclosecheck`, `rowserrcheck` and `gosec` enabled — HTTP bodies and DB rows are
 where the real leaks are in this codebase.
 
-Manual round trip against a fake provider:
+Manual round trip against a real model (README has the full OpenRouter/NVIDIA
+free-tier walkthrough):
 
 ```bash
-go run ./hack/stubserver &                          # OpenAI-compatible stub on :8081
-LLM_BASE_URL=http://127.0.0.1:8081 LLM_MODEL=stub-model LLM_API_KEY=x \
+LLM_BASE_URL=https://openrouter.ai/api/v1 LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free \
+LLM_API_KEY=<an OpenRouter API key> \
 AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
   go run ./cmd/insightsd
 curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
 curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
 ```
+
+`scripts/insights-api.sh` wraps the same calls (`health`, `findings`, `open`,
+`post <bundle.json>`, `raw <path>`); it defaults to `http://localhost:9595`.
 
 Environment variables are documented in `README.md` — do not duplicate that table
 here.
@@ -171,7 +175,7 @@ after:
 // SPDX-License-Identifier: GPL-3.0-or-later
 ```
 
-`#`-comment form for SQL, YAML, Makefile and shell. `hack/check-license-headers.sh`
+`#`-comment form for SQL, YAML, Makefile and shell. `scripts/check-license-headers.sh`
 fails the build on any miss (Task 1).
 
 **Schema portability** — SQLite today, Postgres later, so from day one:

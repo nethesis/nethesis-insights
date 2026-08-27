@@ -31,19 +31,8 @@ Design documents live in this repository:
     go vet ./...
     go test ./... -race -count=1
 
-Manual round trip against a stub provider:
-
-    go run ./hack/stubserver &                     # OpenAI-compatible stub on :8081
-    LLM_BASE_URL=http://127.0.0.1:8081 LLM_MODEL=stub-model LLM_API_KEY=x \
-    AUTH_SYSTEM_ID=abc123 AUTH_SECRET=s3cret DB_PATH=/tmp/insights.db \
-      go run ./cmd/insightsd
-
-    curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
-    curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
-
 Manual round trip against a real model, free of charge, using an OpenRouter
-account and its free NVIDIA Nemotron tier — useful when the stub's canned
-response isn't enough and a paid key isn't warranted:
+account and its free NVIDIA Nemotron tier:
 
     LLM_BASE_URL=https://openrouter.ai/api/v1 \
     LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free \
@@ -54,8 +43,8 @@ response isn't enough and a paid key isn't warranted:
     curl -u abc123:s3cret -X POST localhost:9595/v1/bundles -d @bundle.json
     curl -u abc123:s3cret 'localhost:9595/v1/findings?since=0'
 
-The provider is OpenAI-compatible, so no code change is needed — only the
-three `LLM_*` variables differ from the stub round trip above. Two things to
+The provider is OpenAI-compatible, so no code change is needed — set the
+three `LLM_*` variables above and run `insightsd` as usual. Two things to
 know before assuming a bug:
 
 - **It is slow, not hung.** The free model returns HTTP response headers
