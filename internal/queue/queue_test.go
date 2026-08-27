@@ -72,6 +72,13 @@ func TestPublishReportsFullInsteadOfBlocking(t *testing.T) {
 	}
 }
 
+func TestCapReportsConfiguredSize(t *testing.T) {
+	q := New(7, time.Minute, func(ctx context.Context, b model.Bundle) error { return nil })
+	if got := q.Cap(); got != 7 {
+		t.Fatalf("cap: got %d, want 7", got)
+	}
+}
+
 func TestStopDrainsAcknowledgedBundles(t *testing.T) {
 	var mu sync.Mutex
 	var seen []int64

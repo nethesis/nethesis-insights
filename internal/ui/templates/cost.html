@@ -1,0 +1,31 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Cost</h1>
+<p><small>Spend and token totals per UTC day and model.</small></p>
+<table>
+<thead>
+<tr>
+<th>Day</th><th>Model</th><th class="num">Windows</th><th class="num">LLM calls</th>
+<th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost</th>
+</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr>
+<td class="mono">{{.Day}}</td>
+<td class="mono">{{.Model}}</td>
+<td class="num">{{.Windows}}</td>
+<td class="num">{{.LLMCalls}}</td>
+<td class="num">{{.InputTokens}}</td>
+<td class="num">{{.OutputTokens}}</td>
+<td class="num">{{fmtCost .CostMicros}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7">no spend yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

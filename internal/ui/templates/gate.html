@@ -1,0 +1,26 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Gate</h1>
+<p><small>How often each gate-reason set fired &mdash; the answer to "why are we paying".</small></p>
+<table>
+<thead>
+<tr><th>Reasons</th><th class="num">Windows</th><th class="num">LLM calls</th><th class="num">Cost</th></tr>
+</thead>
+<tbody>
+{{range .Rows}}
+{{$reasons := reasonsOrNone .Reasons}}
+<tr>
+<td class="mono truncate" title="{{$reasons}}">{{truncate $reasons 70}}</td>
+<td class="num">{{.Windows}}</td>
+<td class="num">{{.LLMCalls}}</td>
+<td class="num">{{fmtCost .CostMicros}}</td>
+</tr>
+{{else}}
+<tr><td colspan="4">no analyses yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

@@ -1,0 +1,38 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Templates</h1>
+<p><small>What the server already considers known for a system. A template listed here will not trigger the novelty gate again.</small></p>
+<form method="get">
+<fieldset role="group">
+<input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<table>
+<thead>
+<tr>
+<th>System</th><th>Module</th><th class="num">Priority</th><th>Category</th>
+<th class="num">Count</th><th>Template</th><th>Last seen</th>
+</tr>
+</thead>
+<tbody>
+{{range .Templates}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{moduleLabel .ModuleID}}</td>
+<td class="num">{{.Priority}}</td>
+<td>{{.Category}}</td>
+<td class="num">{{.TotalCount}}</td>
+<td class="mono truncate" title="{{.Template}}">{{truncate .Template 60}}</td>
+<td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7">no templates yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

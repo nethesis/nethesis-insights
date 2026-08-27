@@ -1,0 +1,85 @@
+/*
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/* Overrides layered on top of vendored Pico CSS (static/pico.min.css, MIT).
+   Pico is classless/semantic and already provides light+dark theming, a
+   system font stack, table/form/<details> styling, nav and spacing -- none
+   of that is repeated here. This file adds only what Pico does not: data
+   monospacing, tabular numerals, sticky table headers, ellipsis truncation,
+   severity/status chips, and the active-nav-link mark. Colours below are
+   Pico's own custom properties so both themes stay correct automatically. */
+
+.mono, td.mono, th.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+td.num, th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--pico-background-color);
+}
+
+.truncate {
+  display: inline-block;
+  max-width: 40ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+nav a.active {
+  text-decoration: underline;
+  font-weight: 700;
+}
+
+/* Two severity hues Pico has no ready-made variable for; critical/low reuse
+   Pico's own --pico-del-color/--pico-ins-color, which already ship correct
+   light and dark values. */
+:root {
+  --sev-high: #96471a;
+  --sev-medium: #8a6d10;
+}
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sev-high: #f0b57a;
+    --sev-medium: #ecd27a;
+  }
+}
+:root[data-theme="dark"] {
+  --sev-high: #f0b57a;
+  --sev-medium: #ecd27a;
+}
+
+.chip, .pill {
+  display: inline-block;
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  border: var(--pico-border-width) solid currentColor;
+}
+
+.chip[data-severity="critical"] { color: var(--pico-del-color); }
+.chip[data-severity="high"]     { color: var(--sev-high); }
+.chip[data-severity="medium"]   { color: var(--sev-medium); }
+.chip[data-severity="low"]      { color: var(--pico-ins-color); }
+
+.pill[data-status="open"],
+.pill[data-status="gated"],
+.pill[data-status="llm-called"] {
+  color: var(--pico-primary);
+}
+.pill[data-status="stale"],
+.pill[data-status="not-gated"],
+.pill[data-status="skipped"] {
+  color: var(--pico-muted-color);
+}

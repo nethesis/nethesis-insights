@@ -1,0 +1,33 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Baselines</h1>
+<p><small>EWMA rates &mdash; the gate's fallback when a bundle carries no <code>expected</code>.</small></p>
+<form method="get">
+<fieldset role="group">
+<input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<table>
+<thead>
+<tr><th>System</th><th>Module</th><th class="num">Priority</th><th class="num">EWMA rate</th><th>Updated</th></tr>
+</thead>
+<tbody>
+{{range .Baselines}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{moduleLabel .ModuleID}}</td>
+<td class="num">{{.Priority}}</td>
+<td class="num">{{printf "%.2f" .EWMARate}}</td>
+<td class="mono" title="{{fmtTime .UpdatedAt}}">{{fmtAgo .UpdatedAt}}</td>
+</tr>
+{{else}}
+<tr><td colspan="5">no baselines yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

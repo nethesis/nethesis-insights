@@ -1,0 +1,46 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Analyses</h1>
+<p><small>The cost ledger: why each window did or did not spend money.</small></p>
+<form method="get">
+<fieldset role="group">
+<input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<input type="number" name="limit" min="1" max="500" value="{{.Limit}}">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<table>
+<thead>
+<tr>
+<th>ID</th><th>System</th><th>Window start</th>
+<th>Gated</th><th>LLM</th><th>Completed</th>
+<th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost</th><th class="num">ms</th>
+<th>Gate reasons</th><th>Error</th>
+</tr>
+</thead>
+<tbody>
+{{range .Analyses}}
+<tr>
+<td class="mono">{{short .ID 8}}</td>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{fmtTime .WindowStart}}</td>
+<td><span class="pill" data-status="{{if .Gated}}gated{{else}}not-gated{{end}}">{{if .Gated}}gated{{else}}not gated{{end}}</span></td>
+<td><span class="pill" data-status="{{if .LLMCalled}}llm-called{{else}}skipped{{end}}">{{if .LLMCalled}}llm_called{{else}}skipped{{end}}</span></td>
+<td>{{if .Completed}}yes{{else}}no{{end}}</td>
+<td class="num">{{.InputTokens}}</td>
+<td class="num">{{.OutputTokens}}</td>
+<td class="num">{{fmtCost .CostMicros}}</td>
+<td class="num">{{.DurationMs}}</td>
+<td class="mono truncate" title="{{join .GateReasons ", "}}">{{truncate (join .GateReasons ", ") 40}}</td>
+<td class="truncate" title="{{.Error}}">{{truncate .Error 30}}</td>
+</tr>
+{{else}}
+<tr><td colspan="12">no analyses yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

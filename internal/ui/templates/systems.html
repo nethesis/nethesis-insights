@@ -1,0 +1,35 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Systems</h1>
+<table>
+<thead>
+<tr>
+<th>System</th><th>Tenant</th><th>Collector</th><th>First seen</th><th>Last seen</th>
+<th class="num">Templates</th><th class="num">Open</th><th class="num">Findings</th>
+<th class="num">Windows</th><th class="num">LLM calls</th><th class="num">Cost</th>
+</tr>
+</thead>
+<tbody>
+{{range .Systems}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td>{{.TenantID}}</td>
+<td>{{.CollectorVersion}}</td>
+<td class="mono">{{fmtTime .FirstSeen}}</td>
+<td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
+<td class="num">{{.Templates}}</td>
+<td class="num">{{.OpenFindings}}</td>
+<td class="num">{{.Findings}}</td>
+<td class="num">{{.Windows}}</td>
+<td class="num">{{.LLMCalls}}</td>
+<td class="num">{{fmtCost .CostMicros}}</td>
+</tr>
+{{else}}
+<tr><td colspan="11">no systems yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

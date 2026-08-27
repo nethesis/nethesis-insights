@@ -176,3 +176,6 @@ func (q *Queue) Stop() {
 
 // Depth reports how many bundles are waiting. Exposed for logging and tests.
 func (q *Queue) Depth() int { return len(q.ch) }
+
+// Cap reports the configured buffer size. Exposed for logging and tests.
+func (q *Queue) Cap() int { return cap(q.ch) }

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	"github.com/nethesis/nethesis-insights/internal/store"
+	"github.com/nethesis/nethesis-insights/internal/ui"
 )
 
 // defaultAuthValidateURL is Nethesis's own subscription/auth endpoint. It
@@ -86,11 +88,71 @@ func randomPepper() string {
 	return hex.EncodeToString(b)
 }
 
+// secretState reduces a secret to its mere presence. The status page and the
+// logs get this, never the value.
+func secretState(set bool) string {
+	if set {
+		return "set"
+	}
+	return "unset"
+}
+
+// newUIServer builds the operator UI's own listener, or nil when
+// UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly turns
+// it on. Split out of main so that off-by-default behaviour is testable
+// without booting the process.
+//
+// It gets its own http.Server, deliberately: the public ingest socket must
+// never serve an unauthenticated fleet-wide page, so a reverse-proxy or
+// firewall mistake on :9595 cannot expose it.
+func newUIServer(addr string, r ui.Reader, rt ui.Runtime, info ui.Info) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           ui.NewServer(r, rt, info),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+}
+
+// isLoopbackBind reports whether addr binds a loopback address only. It is
+// deliberately strict: anything that is not a literal loopback IP -- an empty
+// host (":9596", which binds every interface), a name, an unparseable value --
+// is treated as a wider bind, because the failure mode of a false "yes" is a
+// silently exposed fleet-wide page.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnIfNotLoopback warns when the operator UI is bound anywhere other than a
+// loopback address. The UI is unauthenticated and fleet-wide -- every tenant's
+// findings, templates and spend -- so a wider bind must never happen silently.
+// insightsd does not refuse it: the operator asked for the choice to be theirs.
+func warnIfNotLoopback(addr string) {
+	if isLoopbackBind(addr) {
+		return
+	}
+	slog.Warn("the operator UI is unauthenticated and fleet-wide but is not bound to a loopback address; "+
+		"bind it to 127.0.0.1 or a trusted management network",
+		"ui_listen_addr", addr)
+}
+
 func main() {
+	startedAt := time.Now().UnixMilli()
+
 	logLevel := getenv("LOG_LEVEL", "info")
 	setupLogger(logLevel)
 
 	listenAddr := getenv("LISTEN_ADDR", ":9595")
+	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
+	// enabling it is one explicit operator act, never a default.
+	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
 	dbPath := getenv("DB_PATH", "/var/lib/insights/insights.db")
 	llmBaseURL := getenv("LLM_BASE_URL", "")
 	llmModel := getenv("LLM_MODEL", "")
@@ -148,6 +210,9 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 
+	// Captured before the fallback below overwrites authPepper, so the status
+	// page can distinguish an operator-supplied pepper from a generated one.
+	authPepperSupplied := authPepper != ""
 	if authPepper == "" {
 		// A pepper is only defense in depth here -- the cache it keys never
 		// leaves memory (spec §10) -- so an unset AUTH_PEPPER gets a random
@@ -165,8 +230,50 @@ func main() {
 		Handler: handler,
 	}
 
+	// The status page's configuration table, built here field by field and
+	// never by iterating os.Environ(): an accidental new secret in the
+	// environment must not appear on an unauthenticated page just because it
+	// was set. This mirrors the slog.Debug("configuration", ...) block below,
+	// including its treatment of LLM_API_KEY, extended to AUTH_PEPPER.
+	authPepperState := "set (ephemeral)"
+	if authPepperSupplied {
+		authPepperState = "set"
+	}
+	cfgItems := []ui.ConfigItem{
+		{Name: "LISTEN_ADDR", Value: listenAddr},
+		{Name: "UI_LISTEN_ADDR", Value: uiListenAddr},
+		{Name: "DB_PATH", Value: dbPath},
+		{Name: "LOG_LEVEL", Value: logLevel},
+		{Name: "LLM_BASE_URL", Value: llmBaseURL},
+		{Name: "LLM_MODEL", Value: llmModel},
+		{Name: "LLM_API_KEY", Value: secretState(llmAPIKey != "")},
+		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
+		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
+		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
+		{Name: "AUTH_VALIDATE_URL", Value: authValidateURL},
+		{Name: "AUTH_PEPPER", Value: authPepperState},
+		{Name: "AUTH_CACHE_TTL", Value: authCacheTTL.String()},
+		{Name: "AUTH_NEG_CACHE_TTL", Value: authNegCacheTTL.String()},
+		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
+		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
+		{Name: "STALE_AFTER", Value: staleAfter.String()},
+		{Name: "EWMA_ALPHA", Value: strconv.FormatFloat(ewmaAlpha, 'f', -1, 64)},
+		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
+		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
+		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
+	}
+
+	// BuildInfo reads runtime/debug once here, not per request.
+	uiServer := newUIServer(uiListenAddr, s, q, ui.Info{
+		StartedAt: startedAt,
+		Workers:   queueWorkers,
+		Build:     ui.BuildInfo(),
+		Config:    cfgItems,
+	})
+
 	// NEVER log the API key, the pepper, or any credential.
-	slog.Info("starting insightsd", "listen_addr", listenAddr, "model", llmModel, "db_path", dbPath,
+	slog.Info("starting insightsd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,
+		"model", llmModel, "db_path", dbPath,
 		"log_level", logLevel, "queue_size", queueSize, "queue_workers", queueWorkers,
 		"auth_validate_url", authValidateURL)
 	slog.Debug("configuration",
@@ -192,6 +299,17 @@ func main() {
 		}
 	}()
 
+	if uiServer != nil {
+		warnIfNotLoopback(uiListenAddr)
+		slog.Info("operator UI enabled", "ui_listen_addr", uiListenAddr)
+		go func() {
+			if err := uiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("ui server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -201,6 +319,11 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown failed", "error", err)
+	}
+	if uiServer != nil {
+		if err := uiServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error("ui graceful shutdown failed", "error", err)
+		}
 	}
 
 	// Stop accepting first, then drain: every queued bundle was already

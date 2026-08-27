@@ -1,0 +1,47 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Status</h1>
+
+<article>
+<h2>Row counts</h2>
+<table>
+<thead><tr><th>Table</th><th class="num">Count</th></tr></thead>
+<tbody>
+<tr><td>systems</td><td class="num">{{.Counts.Systems}}</td></tr>
+<tr><td>system_templates</td><td class="num">{{.Counts.Templates}}</td></tr>
+<tr><td>module_baselines</td><td class="num">{{.Counts.Baselines}}</td></tr>
+<tr><td>findings</td><td class="num">{{.Counts.Findings}}</td></tr>
+<tr><td>analyses</td><td class="num">{{.Counts.Analyses}}</td></tr>
+</tbody>
+</table>
+</article>
+
+<article>
+<h2>Queue</h2>
+{{if .HasQueue}}
+<table>
+<thead><tr><th class="num">Depth</th><th class="num">Capacity</th><th class="num">Workers</th></tr></thead>
+<tbody>
+<tr><td class="num">{{.QueueDepth}}</td><td class="num">{{.QueueCap}}</td><td class="num">{{.Workers}}</td></tr>
+</tbody>
+</table>
+{{else}}
+<p>n/a &mdash; no queue attached to this process.</p>
+{{end}}
+</article>
+
+<article>
+<h2>Configuration</h2>
+<p><small>Secrets are reported as <code>set</code> / <code>unset</code> only; this page never renders a secret value.</small></p>
+<table>
+<thead><tr><th>Name</th><th>Value</th></tr></thead>
+<tbody>
+{{range .Config}}<tr><td class="mono">{{.Name}}</td><td class="mono">{{.Value}}</td></tr>{{end}}
+{{if not .Config}}<tr><td colspan="2">no configuration reported</td></tr>{{end}}
+</tbody>
+</table>
+</article>
+{{end}}

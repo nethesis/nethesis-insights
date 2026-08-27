@@ -67,6 +67,17 @@ type Store interface {
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
 	ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error)
+
+	// Cross-system, read-only paths for the operator UI (internal/ui).
+	// Every one takes an explicit limit and never returns raw samples.
+	Counts(ctx context.Context) (Counts, error)
+	ListSystems(ctx context.Context) ([]SystemRow, error)
+	ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error)
+	GateRollup(ctx context.Context) ([]GateRow, error)
+	CostRollup(ctx context.Context) ([]CostRow, error)
+	ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error)
+	ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error)
+	ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error)
 }
 
 type SQLiteStore struct {

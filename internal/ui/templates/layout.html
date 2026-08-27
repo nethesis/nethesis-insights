@@ -1,0 +1,37 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>insightsd operator UI</title>
+<link rel="stylesheet" href="/static/pico.min.css">
+<link rel="stylesheet" href="/static/style.css">
+{{if gt .Refresh 0}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
+</head>
+<body>
+<header class="container">
+<nav>
+<ul><li><strong>insightsd</strong></li></ul>
+<ul>
+{{range .Nav}}<li><a href="{{.Path}}"{{if .Active}} class="active"{{end}}>{{.Label}}</a></li>{{end}}
+</ul>
+<ul>
+<li><small>auto-refresh:</small></li>
+<li><a href="{{.RefreshOff}}"{{if eq .Refresh 0}} class="active"{{end}}>off</a></li>
+<li><a href="{{.Refresh10}}"{{if eq .Refresh 10}} class="active"{{end}}>10s</a></li>
+<li><a href="{{.Refresh30}}"{{if eq .Refresh 30}} class="active"{{end}}>30s</a></li>
+</ul>
+</nav>
+</header>
+<main class="container">
+{{template "content" .}}
+</main>
+<footer class="container">
+<small>insightsd operator UI &middot; build {{.Build}} &middot; up {{.Uptime}} &middot; read-only, unauthenticated, fleet-wide</small>
+</footer>
+</body>
+</html>

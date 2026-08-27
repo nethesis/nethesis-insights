@@ -1,0 +1,65 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Findings</h1>
+<form method="get">
+<fieldset role="group">
+<input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<select name="status">
+<option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
+<option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>
+<option value="stale"{{if eq .Status "stale"}} selected{{end}}>stale</option>
+</select>
+<select name="severity">
+<option value=""{{if eq .Severity ""}} selected{{end}}>any severity</option>
+{{$sev := .Severity}}
+{{range .Severities}}<option value="{{.}}"{{if eq $sev .}} selected{{end}}>{{.}}</option>{{end}}
+</select>
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<table>
+<thead>
+<tr>
+<th>ID</th><th>System</th><th>Severity</th><th>Status</th>
+<th class="num">Occurrences</th><th>Title</th><th>Last seen</th>
+</tr>
+</thead>
+<tbody>
+{{range .Findings}}
+<tr>
+<td class="mono">{{short .ID 8}}</td>
+<td class="mono">{{.SystemID}}</td>
+<td><span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span></td>
+<td><span class="pill" data-status="{{.Status}}">{{.Status}}</span></td>
+<td class="num">{{.OccurrenceCount}}</td>
+<td>
+<details>
+<summary class="truncate" title="{{.Title}}">{{truncate .Title 80}}</summary>
+<dl>
+<dt>Summary</dt><dd>{{.Summary}}</dd>
+<dt>Evidence</dt>
+<dd>{{range .Evidence}}<div class="mono">{{.}}</div>{{else}}&mdash;{{end}}</dd>
+<dt>Suggested action</dt><dd>{{.SuggestedAction}}</dd>
+<dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>
+<dt>Occurrence count</dt><dd>{{.OccurrenceCount}}</dd>
+<dt>First seen</dt><dd class="mono">{{fmtTime .FirstSeen}}</dd>
+<dt>Last seen</dt><dd class="mono">{{fmtTime .LastSeen}}</dd>
+<dt>Reopened at</dt><dd class="mono">{{fmtOptTime .ReopenedAt}}</dd>
+<dt>LLM model</dt><dd class="mono">{{.LLMModel}}</dd>
+<dt>Prompt version</dt><dd class="mono">{{.PromptVersion}}</dd>
+</dl>
+</details>
+</td>
+<td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7">no findings match this filter</td></tr>
+{{end}}
+</tbody>
+</table>
+<p><small>Rows are the {{len .Findings}} most-recently-seen findings matching this filter (capped server-side), ordered severity-first within that page &mdash; not a global top-N by severity.</small></p>
+{{end}}
