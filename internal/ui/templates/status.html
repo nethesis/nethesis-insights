@@ -15,8 +15,32 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <tr><td>module_baselines</td><td class="num">{{.Counts.Baselines}}</td></tr>
 <tr><td>findings</td><td class="num">{{.Counts.Findings}}</td></tr>
 <tr><td>analyses</td><td class="num">{{.Counts.Analyses}}</td></tr>
+<tr><td>threat_events</td><td class="num">{{.Counts.ThreatEvents}}</td></tr>
+<tr><td>threat_blocklist</td><td class="num">{{.Counts.BlocklistEntries}}</td></tr>
 </tbody>
 </table>
+</article>
+
+<article>
+<h2>Blocklist feed</h2>
+{{if not .Feed.Present}}
+<p>n/a &mdash; the threat pipeline is not wired into this process.</p>
+{{else if not .Feed.Ready}}
+<p>Not generated yet &mdash; the feed answers <code>503</code> until the first
+successful consensus pass, because an empty body would read as
+&ldquo;no threats&rdquo;.</p>
+{{else}}
+<table>
+<thead><tr><th class="num">Entries</th><th>Generated</th><th>ETag</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">{{.Feed.Entries}}</td>
+<td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td>
+<td class="mono">{{.Feed.ETag}}</td>
+</tr>
+</tbody>
+</table>
+{{end}}
 </article>
 
 <article>

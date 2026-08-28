@@ -1,0 +1,109 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Blocklist</h1>
+<p><small>What the fleet currently agrees on. An address is promoted once enough
+distinct systems independently report it inside the consensus window, and it
+expires when nobody has reported it for the TTL.</small></p>
+
+<article>
+<header><strong>Served snapshot</strong></header>
+{{if not .Feed.Present}}
+<p>n/a &mdash; the threat pipeline is not wired into this process.</p>
+{{else if not .Feed.Ready}}
+<p>Not generated yet &mdash; <code>GET /v1/blocklist</code> answers <code>503</code>
+until the first successful consensus pass. An empty body would mean
+&ldquo;no threats&rdquo; to every client that imports it.</p>
+{{else}}
+<table>
+<tbody>
+<tr><th scope="row">Entries served</th><td class="num">{{.Feed.Entries}}</td></tr>
+<tr><th scope="row">Generated</th><td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td></tr>
+<tr><th scope="row">ETag</th><td class="mono">{{.Feed.ETag}}</td></tr>
+</tbody>
+</table>
+{{end}}
+</article>
+
+<h2>Promoted entries</h2>
+<table>
+<thead>
+<tr><th>Attacker IP</th><th>Categories</th><th class="num">Systems</th>
+<th>First listed</th><th>Last seen</th><th>Expires</th><th>Evidence</th></tr>
+</thead>
+<tbody>
+{{range .Entries}}
+<tr>
+<td class="mono">{{.AttackerIP}}</td>
+<td>{{join .Categories ", "}}</td>
+<td class="num">{{.DistinctSystems}}</td>
+<td class="mono" title="{{fmtTime .FirstListedAt}}">{{fmtAgo .FirstListedAt}}</td>
+<td class="mono" title="{{fmtTime .LastSeenAt}}">{{fmtAgo .LastSeenAt}}</td>
+<td class="mono" title="{{fmtTime .ExpiresAt}}">{{if le .ExpiresAt $.Now}}expired{{else}}{{fmtTime .ExpiresAt}}{{end}}</td>
+<td>
+<details>
+<summary>why</summary>
+<p><small>Snapshotted when the address was promoted, because the raw events
+behind it are pruned long before anyone asks.</small></p>
+<ul>
+<li>rule <code>{{.Reason.Rule}}</code>: {{.Reason.MinSystems}} systems / {{.Reason.WindowMinutes}}m window</li>
+<li>{{.Reason.Systems}} distinct systems, {{.Reason.Hits}} hits</li>
+<li>categories: {{join .Reason.Categories ", "}}</li>
+<li>decided {{fmtTime .Reason.DecidedAt}}</li>
+</ul>
+</details>
+</td>
+</tr>
+{{else}}
+<tr><td colspan="7">nothing promoted yet</td></tr>
+{{end}}
+</tbody>
+</table>
+
+<h2>Allowlist</h2>
+<p><small>Applied at promotion, not at read &mdash; adding an entry unlists the
+address on the next pass. There is no admin API for this table by design;
+entries are added out of band.</small></p>
+<table>
+<thead>
+<tr><th>CIDR</th><th>Reason</th><th>Added by</th><th>Created</th><th>Expires</th></tr>
+</thead>
+<tbody>
+{{range .Allowlist}}
+<tr>
+<td class="mono">{{.CIDR}}</td>
+<td>{{.Reason}}</td>
+<td class="mono">{{.CreatedBy}}</td>
+<td class="mono" title="{{fmtTime .CreatedAt}}">{{fmtAgo .CreatedAt}}</td>
+<td class="mono">{{if .ExpiresAt}}{{fmtOptTime .ExpiresAt}}{{else}}permanent{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="5">no allowlist entries</td></tr>
+{{end}}
+</tbody>
+</table>
+
+<h2>Fleet egress</h2>
+<p><small>Addresses reporters were seen connecting from. Never promoted: this is
+what stops one misconfigured appliance getting the fleet's own WAN address
+listed. Behind a reverse proxy this records the proxy, and the exclusion stops
+being useful.</small></p>
+<table>
+<thead>
+<tr><th>System</th><th>Source IP</th><th>Updated</th></tr>
+</thead>
+<tbody>
+{{range .Egress}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{.SourceIP}}</td>
+<td class="mono" title="{{fmtTime .UpdatedAt}}">{{fmtAgo .UpdatedAt}}</td>
+</tr>
+{{else}}
+<tr><td colspan="3">no reporters seen yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

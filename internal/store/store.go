@@ -78,6 +78,31 @@ type Store interface {
 	ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error)
+
+	// Threat Shield ingest and consensus (internal/api, internal/blocklist).
+	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)
+	RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error
+	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
+	RecordUnknownScenarios(ctx context.Context, scenarios map[string]int, now int64) error
+	ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error)
+	ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error)
+	UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error
+	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
+	EgressIPs(ctx context.Context) ([]string, error)
+	UpsertBlocklistEntries(ctx context.Context, rows []BlocklistRow) error
+	ExpireBlocklist(ctx context.Context, now int64) (int, error)
+	ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error)
+	RollupThreatDailyStats(ctx context.Context) error
+	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
+
+	// Threat Shield cross-system reads for the operator UI.
+	ListBlocklistEntries(ctx context.Context, limit int) ([]BlocklistRow, error)
+	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error)
+	ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error)
+	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
+	UnknownScenarios(ctx context.Context, limit int) ([]UnknownScenarioRow, error)
+	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
+	ListSystemEgress(ctx context.Context) ([]EgressRow, error)
 }
 
 type SQLiteStore struct {
@@ -169,6 +194,90 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			created_at INTEGER
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_analyses_system_window ON analyses(system_id, window_start)`,
+
+		// --- Threat Shield ---
+		//
+		// A separate pipeline from everything above: CrowdSec ban decisions in,
+		// fleet-consensus blocklist out, no LLM and no fingerprint anywhere in
+		// it. attacker_ip is always a normalized netip.Addr.String(), which is
+		// what lets a portable TEXT column behave like Postgres INET: text
+		// equality is address identity.
+		`CREATE TABLE IF NOT EXISTS threat_events (
+			id TEXT PRIMARY KEY,
+			system_id TEXT,
+			attacker_ip TEXT,
+			category TEXT,
+			observed_at INTEGER,
+			hit_count INTEGER,
+			metadata TEXT
+		)`,
+		// Redelivery idempotency: a reporter that retries a batch must not be
+		// able to inflate hit_count and manufacture its own consensus.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_events_dedup
+			ON threat_events(system_id, attacker_ip, category, observed_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_events_ip ON threat_events(attacker_ip, observed_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_events_observed ON threat_events(observed_at)`,
+		`CREATE TABLE IF NOT EXISTS threat_blocklist (
+			attacker_ip TEXT PRIMARY KEY,
+			first_listed_at INTEGER,
+			last_seen_at INTEGER,
+			expires_at INTEGER,
+			distinct_systems INTEGER,
+			categories TEXT,
+			listing_reason TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_blocklist_expires ON threat_blocklist(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS threat_allowlist (
+			cidr TEXT PRIMARY KEY,
+			reason TEXT,
+			created_by TEXT,
+			created_at INTEGER,
+			expires_at INTEGER
+		)`,
+		// Rolled up before the raw events are pruned, so the long-term trend
+		// asset survives the retention window at a few rows per day.
+		`CREATE TABLE IF NOT EXISTS threat_daily_stats (
+			day TEXT,
+			category TEXT,
+			distinct_ips INTEGER,
+			total_hits INTEGER,
+			PRIMARY KEY (day, category)
+		)`,
+		// Fleet self-protection: the union of observed reporter source
+		// addresses is an automatic promotion exclusion, so one customer's
+		// misconfigured appliance cannot get the fleet's own WAN address
+		// listed.
+		`CREATE TABLE IF NOT EXISTS system_egress (
+			system_id TEXT PRIMARY KEY,
+			source_ip TEXT,
+			updated_at INTEGER
+		)`,
+		// Ingest accounting. Without it, "this node contributes nothing and
+		// here is which rule is dropping it" is answerable only from logs.
+		`CREATE TABLE IF NOT EXISTS threat_ingest_daily (
+			day TEXT,
+			system_id TEXT,
+			accepted INTEGER,
+			duplicates INTEGER,
+			dropped_type INTEGER,
+			dropped_scope INTEGER,
+			dropped_origin INTEGER,
+			dropped_bad_ip INTEGER,
+			dropped_private_ip INTEGER,
+			dropped_scenario INTEGER,
+			dropped_time INTEGER,
+			truncated INTEGER,
+			PRIMARY KEY (day, system_id)
+		)`,
+		// The worklist for the next release's category map: an unknown
+		// scenario is dropped by design, and this is how an operator finds out
+		// which one to add.
+		`CREATE TABLE IF NOT EXISTS threat_unknown_scenarios (
+			scenario TEXT PRIMARY KEY,
+			count INTEGER,
+			first_seen INTEGER,
+			last_seen INTEGER
+		)`,
 	}
 
 	for _, stmt := range stmts {

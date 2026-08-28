@@ -51,6 +51,15 @@ type Reader interface {
 	ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error)
+
+	// Threat Shield.
+	ListBlocklistEntries(ctx context.Context, limit int) ([]store.BlocklistRow, error)
+	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]store.ThreatEventRow, error)
+	ThreatDailyStats(ctx context.Context, limit int) ([]store.ThreatDailyRow, error)
+	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
+	UnknownScenarios(ctx context.Context, limit int) ([]store.UnknownScenarioRow, error)
+	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
+	ListSystemEgress(ctx context.Context) ([]store.EgressRow, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -59,6 +68,18 @@ type Reader interface {
 type Runtime interface {
 	Depth() int
 	Cap() int
+}
+
+// Feed reports the state of the rendered blocklist snapshot.
+// *blocklist.Snapshot satisfies it. Like Runtime it may be nil -- tests, and
+// a deployment with the threat pipeline off -- in which case the pages render
+// "n/a" rather than panicking. Only the snapshot's *state* crosses this
+// boundary, never its body: the UI does not serve the feed.
+type Feed interface {
+	Ready() bool
+	Entries() int
+	GeneratedAt() int64
+	ETag() string
 }
 
 // ConfigItem is one row of the status page's configuration table. The
@@ -87,6 +108,10 @@ const (
 	templatesLimit     = 200
 	analysesDefaultLim = 50
 	analysesMaxLimit   = 500
+	blocklistLimit     = 500
+	threatEventsDefLim = 50
+	threatEventsMaxLim = 500
+	threatStatsLimit   = 200
 )
 
 type navPage struct {
@@ -102,6 +127,9 @@ var navPages = []navPage{
 	{"cost", "/cost", "Cost"},
 	{"templates", "/templates", "Templates"},
 	{"baselines", "/baselines", "Baselines"},
+	{"blocklist", "/blocklist", "Blocklist"},
+	{"threat-events", "/threat-events", "Threat events"},
+	{"threat-stats", "/threat-stats", "Threat stats"},
 }
 
 type navItem struct {
@@ -125,13 +153,14 @@ type pageData struct {
 type server struct {
 	reader Reader
 	rt     Runtime
+	feed   Feed
 	info   Info
 	tmpl   map[string]*template.Template
 	static http.Handler
 }
 
-// NewServer builds the operator UI handler. rt may be nil.
-func NewServer(r Reader, rt Runtime, info Info) http.Handler {
+// NewServer builds the operator UI handler. rt and feed may be nil.
+func NewServer(r Reader, rt Runtime, feed Feed, info Info) http.Handler {
 	staticFS, err := fs.Sub(assets, "static")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -143,6 +172,7 @@ func NewServer(r Reader, rt Runtime, info Info) http.Handler {
 	srv := &server{
 		reader: r,
 		rt:     rt,
+		feed:   feed,
 		info:   info,
 		tmpl:   parseTemplates(),
 		static: http.FileServer(http.FS(staticFS)),
@@ -165,6 +195,7 @@ func NewServer(r Reader, rt Runtime, info Info) http.Handler {
 var pages = []string{
 	"status.html", "systems.html", "findings.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html",
+	"blocklist.html", "threat-events.html", "threat-stats.html",
 }
 
 func parseTemplates() map[string]*template.Template {
@@ -207,6 +238,12 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplates(w, r)
 	case "/baselines":
 		s.handleBaselines(w, r)
+	case "/blocklist":
+		s.handleBlocklist(w, r)
+	case "/threat-events":
+		s.handleThreatEvents(w, r)
+	case "/threat-stats":
+		s.handleThreatStats(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and
@@ -338,6 +375,30 @@ func clampLimit(v string, def, max int) int {
 
 // --- handlers ---
 
+// feedState is the snapshot half of the status and blocklist pages. It is a
+// value rather than the Feed itself so a nil feed renders as "off" instead of
+// panicking in the template.
+type feedState struct {
+	Present     bool
+	Ready       bool
+	Entries     int
+	GeneratedAt int64
+	ETag        string
+}
+
+func (s *server) feedState() feedState {
+	if s.feed == nil {
+		return feedState{}
+	}
+	return feedState{
+		Present:     true,
+		Ready:       s.feed.Ready(),
+		Entries:     s.feed.Entries(),
+		GeneratedAt: s.feed.GeneratedAt(),
+		ETag:        s.feed.ETag(),
+	}
+}
+
 type statusPageData struct {
 	pageData
 	Counts     store.Counts
@@ -345,6 +406,7 @@ type statusPageData struct {
 	QueueDepth int
 	QueueCap   int
 	Workers    int
+	Feed       feedState
 	Config     []ConfigItem
 }
 
@@ -359,6 +421,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Counts:   counts,
 		HasQueue: s.rt != nil,
 		Workers:  s.info.Workers,
+		Feed:     s.feedState(),
 		Config:   s.info.Config,
 	}
 	if s.rt != nil {
@@ -511,6 +574,108 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		pageData:  s.newPageData(r, "baselines"),
 		Baselines: baselines,
 		System:    systemID,
+	})
+}
+
+// --- Threat Shield pages ---
+
+type blocklistPageData struct {
+	pageData
+	Feed      feedState
+	Entries   []store.BlocklistRow
+	Allowlist []store.AllowlistRow
+	Egress    []store.EgressRow
+	Now       int64
+}
+
+// handleBlocklist shows what the fleet currently agrees on, plus the two
+// exclusion sets. "Why is this IP listed" and "why is this IP never listed"
+// are both operator questions, and both are answered on one page.
+func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.reader.ListBlocklistEntries(r.Context(), blocklistLimit)
+	if err != nil {
+		s.storeError(w, "blocklist", err)
+		return
+	}
+	allowlist, err := s.reader.ListThreatAllowlist(r.Context())
+	if err != nil {
+		s.storeError(w, "blocklist", err)
+		return
+	}
+	egress, err := s.reader.ListSystemEgress(r.Context())
+	if err != nil {
+		s.storeError(w, "blocklist", err)
+		return
+	}
+	s.render(w, "blocklist.html", blocklistPageData{
+		pageData:  s.newPageData(r, "blocklist"),
+		Feed:      s.feedState(),
+		Entries:   entries,
+		Allowlist: allowlist,
+		Egress:    egress,
+		Now:       time.Now().UnixMilli(),
+	})
+}
+
+type threatEventsPageData struct {
+	pageData
+	Events []store.ThreatEventRow
+	System string
+	IP     string
+	Limit  int
+}
+
+func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	systemID := q.Get("system")
+	// Not validated as an address on purpose: an unmatched filter returning
+	// nothing is a clearer answer than silently ignoring what was typed. It is
+	// a bind parameter either way.
+	ip := q.Get("ip")
+	limit := clampLimit(q.Get("limit"), threatEventsDefLim, threatEventsMaxLim)
+
+	events, err := s.reader.ListThreatEvents(r.Context(), systemID, ip, limit)
+	if err != nil {
+		s.storeError(w, "threat-events", err)
+		return
+	}
+	s.render(w, "threat-events.html", threatEventsPageData{
+		pageData: s.newPageData(r, "threat-events"),
+		Events:   events,
+		System:   systemID,
+		IP:       ip,
+		Limit:    limit,
+	})
+}
+
+type threatStatsPageData struct {
+	pageData
+	Daily   []store.ThreatDailyRow
+	Ingest  []store.ThreatIngestRow
+	Unknown []store.UnknownScenarioRow
+}
+
+func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
+	daily, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
+	if err != nil {
+		s.storeError(w, "threat-stats", err)
+		return
+	}
+	ingest, err := s.reader.ThreatIngestStats(r.Context(), threatStatsLimit)
+	if err != nil {
+		s.storeError(w, "threat-stats", err)
+		return
+	}
+	unknown, err := s.reader.UnknownScenarios(r.Context(), threatStatsLimit)
+	if err != nil {
+		s.storeError(w, "threat-stats", err)
+		return
+	}
+	s.render(w, "threat-stats.html", threatStatsPageData{
+		pageData: s.newPageData(r, "threat-stats"),
+		Daily:    daily,
+		Ingest:   ingest,
+		Unknown:  unknown,
 	})
 }
 

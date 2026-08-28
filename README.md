@@ -24,10 +24,17 @@ bundle was **accepted**. Analysis outcomes are visible in the findings API and
 in the `analyses` ledger, not in the POST response. A `503` means the queue is
 saturated and the edge should retry the window.
 
+A second, independent pipeline also runs here: **Threat Shield** turns the
+fleet's CrowdSec ban decisions into a consensus IP blocklist served back to the
+nodes. It shares this server's listener and credentials and nothing else — no
+LLM call, no gate, no fingerprint. See [Threat Shield](#threat-shield).
+
 Design documents live in this repository:
 
 - Spec: `docs/specs/2026-08-05-nethesis-insights-design.md`
 - Implementation plan: `docs/plans/2026-08-05-nethesis-insights.md` (Tasks 1–10)
+- Threat Shield design: `docs/specs/2026-07-28-threat-shield-design.md`
+- Threat Shield ingest contract: `docs/specs/2026-08-07-threat-events-ingest-contract.md`
 
 ## Development
 
@@ -111,6 +118,13 @@ locally with `podman build -t nethesis-insights .`.
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
 | `ANALYSIS_TIMEOUT` | ceiling for one bundle's analysis (default `5m`) |
+| `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`) |
+| `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`) |
+| `BLOCKLIST_MIN_SYSTEMS` | distinct systems required to publish an address (default `3`) |
+| `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`) |
+| `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
+| `THREAT_EVENT_RETENTION` | how long raw threat events are kept (default `168h`) |
+| `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request decision cap; over-cap batches are truncated, not rejected (default `500`) |
 
 `LOG_LEVEL=debug` adds request detail, the reason behind every 401/400/403,
 the gate decision and its inputs, prompt size, provider status and timing, and
@@ -139,6 +153,9 @@ It is **off unless you set `UI_LISTEN_ADDR`**:
 | `/cost` | spend and tokens per UTC day and model |
 | `/templates` | what the server already considers known for a system |
 | `/baselines` | the EWMA rates the gate falls back on when a bundle carries no `expected` |
+| `/blocklist` | the consensus feed with its promotion evidence, plus the allowlist and fleet-egress exclusion sets |
+| `/threat-events` | recent sanitized CrowdSec decisions; filter by system or attacker IP |
+| `/threat-stats` | daily threat rollup, per-node ingest accounting, and the unmapped-scenario worklist |
 
 ### Read this before exposing it
 
@@ -182,6 +199,60 @@ Everything else about it is constrained to match that exposure:
 [Pico CSS](https://picocss.com) (MIT) is vendored into the binary, so the page
 fetches nothing from the network at runtime — offline management networks are a
 supported deployment.
+
+## Threat Shield
+
+Each node's CrowdSec bans IPs from what that one node saw; the fleet has no
+shared memory. Threat Shield gives it one: nodes report their ban decisions,
+the server computes cross-system consensus, and every node can fetch the
+resulting high-confidence blocklist.
+
+It is a **separate pipeline** from the bundle path above. No LLM call, no gate,
+no fingerprint, no queue — threat evidence is high-volume factual data, and
+ingest is synchronous.
+
+| Endpoint | |
+|---|---|
+| `POST /v1/threat-events` | an edge reports CrowdSec ban decisions; answers `202` with per-rule drop counters |
+| `GET /v1/blocklist` | an edge fetches the consensus feed as `text/plain`, with `ETag`/`304` and gzip |
+
+Both use the same HTTP Basic credential and the same forward-auth validator as
+`/v1/bundles`. The full wire contract — request and response shapes, the
+scenario→category map, every drop rule — is
+`docs/specs/2026-08-07-threat-events-ingest-contract.md`, which `ns8-crowdsec`
+builds its notification template against.
+
+An address is published once `BLOCKLIST_MIN_SYSTEMS` **distinct systems**
+report it inside `BLOCKLIST_WINDOW`, and the listing expires `BLOCKLIST_TTL`
+after the last sighting. Two exclusions are applied at promotion, so adding to
+either unlists an address on the next pass:
+
+- the `threat_allowlist` table, maintained out of band — this server has no
+  admin auth plane, so there is deliberately no HTTP surface for it;
+- the fleet egress set, every address a reporter has been seen connecting from.
+  This is what stops one misconfigured appliance getting the fleet's own WAN
+  address listed. It is taken from the connection and never from
+  `X-Forwarded-For`, which a client controls; behind a reverse proxy it
+  therefore records the proxy and stops being useful.
+
+Ingest is fail-closed on authentication and fail-open on content: a malformed
+decision is dropped and counted, and the rest of the batch is stored. Private,
+loopback, CGNAT, link-local, multicast and ULA addresses are rejected at ingest,
+so they never reach the database at all. Only `scenario` and `duration_seconds`
+are kept as metadata — nothing free-text, no usernames, no URIs.
+
+`GET /v1/blocklist` answers `503` until the first consensus pass succeeds, and
+after a failed pass it keeps serving the previous snapshot with its original
+`generated:` timestamp. It never serves an empty body, because to a client that
+imports it an empty list means "no threats" and silently disables protection.
+
+Try it locally, with the promotion rule relaxed to a single system:
+
+    BLOCKLIST_MIN_SYSTEMS=1 BLOCKLIST_CONSENSUS_INTERVAL=10s \
+    UI_LISTEN_ADDR=127.0.0.1:9596 DB_PATH=/tmp/insights.db go run ./cmd/insightsd
+
+    scripts/insights-api.sh threat-events decisions.json
+    scripts/insights-api.sh blocklist
 
 ## License
 

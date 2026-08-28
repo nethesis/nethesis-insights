@@ -171,6 +171,84 @@ against Nethesis's own validator, not stored or checked locally) and:
 - **reads** its own findings: `GET /v1/findings` — only ever for its own
   machine, never anyone else's.
 
+## Threat Shield: the fleet as one sensor network
+
+Everything above is about *one machine's* logs. Threat Shield is about
+something the individual machine cannot know.
+
+Every NethServer 8 node runs CrowdSec, which bans IP addresses that misbehave
+against *it*. That works, but each node starts from zero: an attacker scanning
+a thousand customers gets a thousand separate first attempts, because no node
+knows what the others just saw.
+
+Threat Shield gives the fleet a shared memory. It runs on the same server, but
+it is a completely separate pipeline: **no AI is involved anywhere in it**, and
+none of the gating, fingerprinting or cost machinery above applies. This is
+plain factual data — an address did or did not attack a node — so it is simply
+collected, counted and handed back.
+
+### How it works, in four steps
+
+1. **A node reports its bans.** When CrowdSec bans an address, the node posts
+   that decision to `POST /v1/threat-events` using the same subscription
+   credential it uses for log bundles.
+
+2. **The server throws most of it away.** Before anything is stored, every
+   decision goes through a strict filter. Private and internal addresses
+   (`10.x`, `192.168.x`, loopback, and so on) are discarded outright, so
+   customer-internal addressing never reaches the database. Bans that came
+   from CrowdSec's *own community blocklist* rather than the node's own
+   observation are discarded too — otherwise a thousand nodes all repeating
+   the same downloaded list would look like a thousand independent witnesses.
+   Only the address, a category, a timestamp and the scenario name survive.
+   No usernames, no URLs, no free text of any kind.
+
+3. **Consensus decides what is real.** Every few minutes the server asks: which
+   addresses have been reported by at least three *different* machines in the
+   last hour? Three reports from one noisy machine is not consensus — it is one
+   opinion. Addresses that clear that bar are published; they drop off again
+   24 hours after the last sighting, so an address that has been reassigned to
+   somebody innocent does not stay blocked forever.
+
+4. **Nodes fetch the result.** `GET /v1/blocklist` returns a plain list of
+   addresses, which the node imports into CrowdSec. Every subscriber gets the
+   same list.
+
+### The two safety nets
+
+Consensus alone has an obvious failure mode: what if the fleet agrees on
+something it shouldn't? Two exclusions run before anything is published.
+
+- **The allowlist.** A hand-maintained list of addresses and ranges that must
+  never be published, whatever the fleet says — a partner's security scanner, a
+  shared resolver. It is applied when the decision to publish is made, not when
+  the list is read, so adding an entry actually *removes* the address on the
+  next pass rather than just hiding it.
+
+- **Fleet self-protection.** The server remembers the address each reporting
+  node connects from, and never publishes any of them. This closes the worst
+  case: one customer's misconfigured appliance reporting the fleet's own
+  gateway, and the fleet then blocking itself.
+
+### One thing the server refuses to do
+
+If the server has not yet successfully computed a list — it has just started,
+or the database is unhappy — the feed answers "unavailable" rather than
+returning an empty list. This is deliberate: to a node importing the file, an
+empty list does not read as "I don't know," it reads as "there are no threats,"
+which would quietly switch the protection off. For the same reason, if a
+computation fails the server keeps serving the *previous* list, timestamped so
+a node can tell it is stale.
+
+### The honest caveat
+
+This server has no concept of *which customer* a machine belongs to. The
+original design required agreement across at least two different
+organizations, precisely so one customer's misconfiguration could not get an
+address published fleet-wide. That requirement cannot be enforced here yet, so
+three machines belonging to the same customer do count as consensus. The
+allowlist and fleet self-protection above are what stands in for it.
+
 ## The operator UI: looking at what the server knows
 
 The operator UI is a separate, optional, read-only web page built into the
@@ -191,6 +269,9 @@ What each page shows, in plain terms:
 | `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. |
 | `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
+| `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |
+| `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
+| `/threat-stats` | Three things: the day-by-day threat trend, what each machine contributed (and how much of what it sent was discarded, by reason), and the list of CrowdSec scenarios the server didn't recognise — which is the to-do list for the next release. |
 
 Nothing on this UI ever shows a raw, unmasked log line — the server never
 stores those in the first place, so there's nothing to show. And the page

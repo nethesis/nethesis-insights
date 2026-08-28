@@ -33,11 +33,45 @@ Read the spec before changing gating, fingerprinting, the wire protocol, or the 
 order — those sections explain *why* each rule exists, and the reasons are not
 reconstructible from the code.
 
-A related, separate design also lives here: `docs/specs/2026-07-28-threat-shield-design.md`
-and `docs/plans/2026-08-07-threat-shield-server.md` (server-side fleet-wide CrowdSec ban
-sharing). It is not part of the ingest/gate/LLM pipeline above and does not change any
-rule in this section — treat it as a distinct feature landing in the same repo, not as
-context for changes to bundles, gating or findings.
+A related, separate feature also lives here and is **implemented**:
+`docs/specs/2026-07-28-threat-shield-design.md` (rules),
+`docs/plans/2026-08-07-threat-shield-server.md` (this repo's flavour) and
+`docs/specs/2026-08-07-threat-events-ingest-contract.md` (the wire contract
+`ns8-crowdsec` builds against — keep it in step with
+`internal/threat/category.go`). Server-side fleet-wide CrowdSec ban sharing:
+`POST /v1/threat-events` in, `GET /v1/blocklist` out. It is **not** part of the
+ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
+gate, no fingerprint, no queue. Treat it as a distinct pipeline sharing only the
+listener, the `Authenticator` and the SQLite file; do not use it as context for changes
+to bundles, gating or findings, and do not conflate the two when editing either.
+
+Threat Shield rules that are as load-bearing as the gate's:
+
+- `internal/threat` is **pure**, like `gate`/`fingerprint`/`prompt`, for a sharper
+  reason: it decides whether a third party's IP address is stored and published, so a
+  bug there is a data-protection incident. Non-public addresses are dropped **at
+  ingest**, never merely at read.
+- **Local-origin only.** `origin` must be `crowdsec` or `cscli`. Re-reporting CrowdSec's
+  CAPI/community list would manufacture agreement between systems that never
+  independently observed anything, and consensus over manufactured agreement is
+  worthless (spec §7.2).
+- **Distinct systems, not row count.** Promotion counts `COUNT(DISTINCT system_id)`;
+  candidates are therefore grouped down to `system_id` in SQL and folded in Go, because
+  per-category counts do not sum and `ARRAY_AGG`/`GROUP_CONCAT` are not portable.
+- **Allowlist and fleet egress are applied at promotion, not at read**, so adding an
+  entry unlists an address on the next pass instead of hiding it. A malformed allowlist
+  row aborts the pass rather than being skipped — skipping fails open.
+- **Roll up before pruning.** `RollupThreatDailyStats` must precede
+  `PruneThreatEvents`, or the dropped day loses its history permanently.
+- **Never serve blank.** `GET /v1/blocklist` answers 503 before the first successful
+  pass, and a failed pass keeps serving the previous snapshot with its original
+  `generated_at`. An empty body means "no threats" to every client that imports it.
+- **The reporter's source IP comes from `RemoteAddr`, never `X-Forwarded-For`.** It
+  feeds the egress exclusion set and the header is client-controlled. Consequence:
+  behind a reverse proxy the exclusion records the proxy and stops being useful.
+- `threat_allowlist` has **no HTTP surface** — this server has no admin auth plane.
+  `store.UpsertThreatAllowlistEntry` / `DeleteThreatAllowlistEntry` are the supported
+  out-of-band seam.
 
 `docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
 scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
@@ -58,7 +92,8 @@ of the spec are **not** built before assuming a bug:
 | Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
 | Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
-| Operator UI | `internal/ui`: read-only, zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set — unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses). Backed by the cross-system read methods in `internal/store/ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Operator UI | `internal/ui`: read-only, zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set — unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses). Backed by the cross-system read methods in `internal/store/ui.go` and `internal/store/threat_ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Threat Shield | built: `internal/threat` (pure), `internal/store/threat.go`, `internal/blocklist`, `internal/api/threat.go`, three UI pages. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.
@@ -118,8 +153,10 @@ here.
 ```
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
+threat                      PURE — Threat Shield's sanitizer, category map, allowlist
 llm  store                  interfaces, each with a real and a stub impl
-analyzer                    the pipeline; depends on all of the above
+analyzer                    the bundle pipeline; depends on all of the above
+blocklist                   Threat Shield consensus + the served snapshot
 api                         HTTP: ingest + read, auth via the Authenticator iface
 ui                          HTTP: optional operator dashboard, off by default
 cmd/insightsd               env config, wiring, graceful shutdown
@@ -262,6 +299,17 @@ successful no-op, not an error.
   `occurrence_count` without inserting; absence past `STALE_AFTER` marks stale and
   later recurrence reopens with `reopened_at`; an LLM failure leaves templates
   unrecorded so the retry still sees them as novel.
+- `threat`: the deepest table in the repo, because a bug here is a data-protection
+  incident — every IP class (RFC1918, CGNAT, IMDS, multicast, IPv6 ULA, loopback,
+  unspecified, benchmark, IPv4-mapped, the reporter's own address), documentation
+  ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
+  timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
+  truncating rather than rejecting.
+- `blocklist`: temp-file SQLite, not a mock — the grouping *is* the SQL. Boundary
+  fixtures: 2 distinct systems does not promote and 3 does; one system reporting
+  three times does not; one system across two categories is still one system;
+  allowlisted and fleet-egress addresses never promote; `expires_at` refreshes while
+  `first_listed_at` holds; a failed pass keeps the previous snapshot.
 
 ## Conventions
 

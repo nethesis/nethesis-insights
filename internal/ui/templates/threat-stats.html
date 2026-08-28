@@ -1,0 +1,84 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Threat stats</h1>
+
+<h2>Daily rollup</h2>
+<p><small>Rolled up before the raw events are pruned, so the trend survives the
+retention window at a few rows per day.</small></p>
+<table>
+<thead>
+<tr><th>Day (UTC)</th><th>Category</th><th class="num">Distinct IPs</th><th class="num">Hits</th></tr>
+</thead>
+<tbody>
+{{range .Daily}}
+<tr>
+<td class="mono">{{.Day}}</td>
+<td>{{.Category}}</td>
+<td class="num">{{.DistinctIPs}}</td>
+<td class="num">{{.TotalHits}}</td>
+</tr>
+{{else}}
+<tr><td colspan="4">no rollup yet</td></tr>
+{{end}}
+</tbody>
+</table>
+
+<h2>Ingest accounting</h2>
+<p><small>What each node contributed, and what was dropped before storage.
+Ingest is fail-open on content: a malformed decision is dropped and counted,
+never a reason to reject the batch. A node with a high drop count is
+misconfigured, not malicious.</small></p>
+<table>
+<thead>
+<tr><th>Day</th><th>System</th><th class="num">Accepted</th><th class="num">Dup</th>
+<th class="num">Type</th><th class="num">Scope</th><th class="num">Origin</th>
+<th class="num">Bad IP</th><th class="num">Private IP</th><th class="num">Scenario</th>
+<th class="num">Time</th><th class="num">Trunc</th></tr>
+</thead>
+<tbody>
+{{range .Ingest}}
+<tr>
+<td class="mono">{{.Day}}</td>
+<td class="mono">{{.SystemID}}</td>
+<td class="num">{{.Accepted}}</td>
+<td class="num">{{.Duplicates}}</td>
+<td class="num">{{.DroppedType}}</td>
+<td class="num">{{.DroppedScope}}</td>
+<td class="num">{{.DroppedOrigin}}</td>
+<td class="num">{{.DroppedBadIP}}</td>
+<td class="num">{{.DroppedPrivateIP}}</td>
+<td class="num">{{.DroppedScenario}}</td>
+<td class="num">{{.DroppedTime}}</td>
+<td class="num">{{.Truncated}}</td>
+</tr>
+{{else}}
+<tr><td colspan="12">no reports ingested yet</td></tr>
+{{end}}
+</tbody>
+</table>
+
+<h2>Unmapped scenarios</h2>
+<p><small>Scenarios the server's category map does not know. They are dropped by
+design &mdash; the v1 category set is fixed, and a catch-all bucket is evidence of
+nothing &mdash; so this is the worklist for the next release.</small></p>
+<table>
+<thead>
+<tr><th>Scenario</th><th class="num">Seen</th><th>First</th><th>Last</th></tr>
+</thead>
+<tbody>
+{{range .Unknown}}
+<tr>
+<td class="mono">{{.Scenario}}</td>
+<td class="num">{{.Count}}</td>
+<td class="mono" title="{{fmtTime .FirstSeen}}">{{fmtAgo .FirstSeen}}</td>
+<td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
+</tr>
+{{else}}
+<tr><td colspan="4">every reported scenario is mapped</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

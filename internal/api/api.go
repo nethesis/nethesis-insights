@@ -80,18 +80,29 @@ type Publisher interface {
 }
 
 type server struct {
-	queue Publisher
-	store store.Store
-	auth  Authenticator
-	mux   *http.ServeMux
+	queue  Publisher
+	store  store.Store
+	auth   Authenticator
+	threat ThreatConfig
+	mux    *http.ServeMux
 }
 
-func NewServer(q Publisher, s store.Store, auth Authenticator) http.Handler {
-	srv := &server{queue: q, store: s, auth: auth}
+// NewServer builds the ingest and read API. tc wires the Threat Shield
+// endpoints, which are a separate pipeline sharing only this listener and the
+// Authenticator; its zero value leaves them unregistered.
+func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig) http.Handler {
+	if tc.Now == nil {
+		tc.Now = func() int64 { return time.Now().UnixMilli() }
+	}
+	srv := &server{queue: q, store: s, auth: auth, threat: tc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
+	if tc.enabled() {
+		mux.HandleFunc("/v1/threat-events", srv.handleThreatEvents)
+		mux.HandleFunc("/v1/blocklist", srv.handleBlocklist)
+	}
 	srv.mux = mux
 	return &loggingHandler{next: mux}
 }

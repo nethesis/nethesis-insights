@@ -63,6 +63,30 @@ post)
         --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/v1/bundles"
     ;;
 
+threat-events)
+    # threat-events <decisions.json>   — report CrowdSec ban decisions
+    need_cred
+    file=${1:?usage: threat-events <decisions.json>}
+    # shellcheck disable=SC2086
+    curl -s $CURL_OPTS -u "$CRED" -X POST -H 'Content-Type: application/json' \
+        --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/v1/threat-events"
+    ;;
+
+blocklist)
+    # blocklist [etag]   — fetch the consensus feed; with an etag, expect 304
+    need_cred
+    etag=${1:-}
+    if [ -n "$etag" ]; then
+        # shellcheck disable=SC2086
+        curl -s $CURL_OPTS -u "$CRED" -H "If-None-Match: $etag" \
+            -o /dev/null -w 'HTTP %{http_code}\n' "$URL/v1/blocklist"
+    else
+        # -D- so the ETag, which the next poll needs, is visible.
+        # shellcheck disable=SC2086
+        curl -s $CURL_OPTS -u "$CRED" -D- "$URL/v1/blocklist"
+    fi
+    ;;
+
 raw)
     # raw <path> [curl args...]   — anything else, e.g. raw '/v1/findings?since=0'
     need_cred
@@ -75,7 +99,8 @@ raw)
 *)
     sed -n '7,13p' "$0"
     echo
-    echo "commands: health | findings [since] | open | post <bundle.json> | raw <path>"
+    echo "commands: health | findings [since] | open | post <bundle.json>"
+    echo "          threat-events <decisions.json> | blocklist [etag] | raw <path>"
     exit 2
     ;;
 esac

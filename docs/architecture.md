@@ -21,37 +21,48 @@ For *why* each design decision was made, read
 ## System context
 
 ```
- edge node (ns8-loki collector)
-        │  POST /v1/bundles  (HTTP Basic auth)
-        ▼
+ edge node (ns8-loki collector)        edge node (ns8-crowdsec)
+        │  POST /v1/bundles                    │  POST /v1/threat-events
+        ▼                                      ▼
  ┌───────────────────────────────────────────────────────────┐
  │                        insightsd                          │
  │                                                             │
  │  api ── auth.ForwardAuth ──► AUTH_VALIDATE_URL (external)  │
- │   │                                                         │
- │   ▼                                                         │
- │  queue (in-memory bounded channel)                         │
- │   │                                                         │
- │   ▼                                                         │
- │  analyzer ── gate ── fingerprint ── prompt ── llm ── store  │
- │                                                     (SQLite)│
+ │   │                                  │                      │
+ │   ▼                                  ▼                      │
+ │  queue (in-memory bounded channel)  threat (pure sanitizer) │
+ │   │                                  │                      │
+ │   ▼                                  ▼                      │
+ │  analyzer ── gate ── fingerprint ── store ◄── blocklist      │
+ │              prompt ── llm          (SQLite)   consensus     │
+ │                                                + snapshot    │
  │  ui (optional, read-only, own listener)                    │
  └───────────────────────────────────────────────────────────┘
-        ▲
-        │  GET /v1/findings  (same auth)
- edge node / operator
+        ▲                                      ▲
+        │  GET /v1/findings  (same auth)       │  GET /v1/blocklist
+ edge node / operator                    edge node
 ```
 
 One edge node ships one bundle per 15-minute window. The server never
 initiates contact with a node.
+
+**Two independent pipelines share this process, and only this process.** The
+bundle path (left) spends money per call, so everything in it exists to avoid
+spending it. The Threat Shield path (right) is high-volume factual data with no
+LLM anywhere in it: ingest is synchronous, there is no gate and no fingerprint,
+and the only shared components are the listener, the `Authenticator` and the
+SQLite file. They are described separately throughout this document for that
+reason.
 
 ## Package layering
 
 ```
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
+threat                      PURE — the Threat Shield sanitizer and category map
 llm  store                  interfaces, each with a real and a stub impl
-analyzer                    the pipeline; depends on all of the above
+analyzer                    the bundle pipeline; depends on all of the above
+blocklist                   Threat Shield consensus + the served snapshot
 api                         HTTP: ingest + read, auth via the Authenticator iface
 ui                          HTTP: optional operator dashboard, off by default
 cmd/insightsd                env config, wiring, graceful shutdown
@@ -71,14 +82,26 @@ and `ui` does not import `api` or `analyzer`.
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties gate, fingerprint, prompt, llm and store together for one bundle. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. |
 | `internal/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. |
-| `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz`. |
+| `internal/threat` | Threat Shield's pure half: `CategoryFor` (the scenario→category map), `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). |
+| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
+| `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `/healthz`. |
 | `internal/ui` | Optional, read-only, zero-JavaScript operator dashboard on its own listener. |
-| `cmd/insightsd` | Reads environment config, wires every package together, runs graceful shutdown. |
+| `cmd/insightsd` | Reads environment config, wires every package together, runs the consensus ticker, runs graceful shutdown. |
 
 The purity of `gate`, `fingerprint` and `prompt` is deliberate: they hold all
 the correctness and all the cost logic, and are table-driven-testable with no
 fixtures, no clock, no I/O. `llm` and `store` being interfaces is what lets
 `analyzer_test.go` run the whole pipeline end to end with nothing running.
+
+`internal/threat` is pure for a sharper reason than cost: everything deciding
+whether a third party's IP address is stored and published lives there, so a
+bug in it is a data-protection incident rather than a wrong answer.
+
+`internal/blocklist` and `internal/api` each declare their own narrow interface
+over the store (`blocklist.Reader`, `api.ThreatStore`, `api.Feed`) rather than
+taking `store.Store`, so both stay testable with a small fake and the layering
+stays a DAG. `ui.Feed` does the same for the snapshot's state — `ui` learns how
+many entries are served and when, never the body.
 
 ## Request flow
 
@@ -145,13 +168,80 @@ Authenticates the same way as ingest, then `store.ListFindings` returns that
 system's findings (optionally filtered by `since`/`status`), sorted by
 `model.SortFindings` — severity descending, then most-recently-seen first.
 
+### Threat ingest: `POST /v1/threat-events`
+
+Synchronous end to end — no queue, because there is no LLM call to outlive the
+client's timeout.
+
+1. `api.handleThreatEvents` authenticates exactly as ingest does.
+2. The body is decoded (gzip-aware, 8 MiB cap) into a `model.ThreatReport` and
+   checked for `schema_version`, plus the same "body `system_id` must match the
+   credential when present" rule as bundles.
+3. `threat.Sanitize` turns raw CrowdSec decisions into `model.ThreatEvent`s,
+   dropping and counting anything that fails a rule. The reporter's own source
+   address is passed in and excluded.
+4. `RecordSystemEgress` remembers the peer address, `InsertThreatEvents` stores
+   the batch, and the per-day counters and unmapped scenarios are recorded.
+5. `202` with `stored`, `duplicates` and the full drop accounting.
+
+**Fail-closed on authentication, fail-open on content.** Only a store failure
+turns into a `503`; accounting failures are logged and the `202` still goes
+out, because the evidence is already committed and losing the reporter's
+watermark would cost more than the counters are worth.
+
+The source address comes from `r.RemoteAddr` and never from
+`X-Forwarded-For`. That value feeds the fleet-egress exclusion set, and the
+header is client-controlled: honouring it would let an authenticated edge keep
+any address off the blocklist permanently. Behind a reverse proxy this records
+the proxy, which makes the exclusion useless but never wrong.
+
+### Consensus: `blocklist.Runner.Run`
+
+Driven by a ticker in `cmd/insightsd` at `BLOCKLIST_CONSENSUS_INTERVAL`, with
+one pass run immediately at startup so a restart does not leave the feed
+answering `503` while the database is full of live entries. The order is
+load-bearing:
+
+1. `ConsensusCandidates(now - BLOCKLIST_WINDOW)` returns
+   `(attacker_ip, category, system_id)` triples.
+2. Go folds them per address into a distinct-system set, a category set, a hit
+   sum and the latest sighting.
+3. Allowlisted and fleet-egress addresses are dropped — **at promotion, not at
+   read**, so adding to either unlists an address rather than hiding it.
+4. Addresses with at least `BLOCKLIST_MIN_SYSTEMS` distinct systems are
+   upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
+   `listing_reason` snapshot of the evidence.
+5. Expired entries are deleted.
+6. `RollupThreatDailyStats` **then** `PruneThreatEvents` — reversing these two
+   loses the dropped day's history permanently.
+7. The snapshot is regenerated from the live entries.
+
+An error in steps 1–4 or 7 aborts the pass and returns; the rollup and prune
+are logged and skipped instead, because housekeeping must not stop the feed
+reflecting promotions already made. A malformed allowlist row is the one
+housekeeping-shaped thing that *does* abort: skipping it would fail open and
+publish an address someone had explicitly excluded.
+
+### Feed: `GET /v1/blocklist`
+
+`blocklist.Snapshot` holds the body, its gzip encoding and its `ETag`
+(`sha256` of the body) behind an `RWMutex`. Serving never touches the database,
+so the cost of the feed is flat regardless of subscriber count, and only a
+successful generation replaces what is held — a failed pass keeps serving the
+previous list with its original `generated:` timestamp.
+
+Before the first successful pass the snapshot is not ready and the handler
+answers `503`. That distinction matters: to a client importing the list, an
+empty body means "no threats" and silently disables protection.
+
 ### Operator UI
 
 `internal/ui` is a second, independent HTTP server on its own listener
 (`UI_LISTEN_ADDR`, off by default). It depends only on `model` and `store`
 (through a local `Reader` interface) plus a local `Runtime` interface
-(`Depth`/`Cap`, satisfied by `*queue.Queue`) for live process state. It never
-imports `api` or `analyzer`, and it never writes. See `README.md` §
+(`Depth`/`Cap`, satisfied by `*queue.Queue`) and a local `Feed` interface
+(satisfied by `*blocklist.Snapshot`) for live process state. It never imports
+`api`, `analyzer` or `blocklist`, and it never writes. See `README.md` §
 "Operator UI" for routes and exposure guidance, and the "what is a finding /
 template / baseline" explanations in `docs/user-guide.md`.
 
@@ -169,6 +259,17 @@ without a goroutine to leak.
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens, cost, duration, error. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. |
+| `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, category, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
+| `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
+| `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. No HTTP surface — this server has no admin auth plane. |
+| `threat_daily_stats` | Per day and category rollup, written before the prune so the trend outlives the raw events. |
+| `system_egress` | The address each reporter was last seen from: the fleet self-protection exclusion set. |
+| `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
+| `threat_unknown_scenarios` | Scenarios the category map does not know, by count: the worklist for the next release. |
+
+`attacker_ip` is stored as a normalized `netip.Addr.String()`, so text equality
+is address identity — that is what lets a portable `TEXT` column stand in for
+Postgres `INET`.
 
 Schema portability rules (SQLite today, Postgres later — see `CLAUDE.md` §
 Invariants) apply to every table: ULIDs generated in Go rather than
@@ -310,7 +411,10 @@ unauthenticated status page by accident.
 
 Graceful shutdown order: stop accepting HTTP, shut down both HTTP servers,
 *then* drain the queue — buffered bundles were already acknowledged to an
-edge that won't resend them, so they must still be processed before exit.
+edge that won't resend them, so they must still be processed before exit —
+and only then cancel and wait for the consensus loop. The consensus loop goes
+last because it holds no acknowledged work: a cancelled pass simply leaves the
+previous snapshot in place, which is its designed failure mode anyway.
 
 ## Testing strategy
 
@@ -319,3 +423,26 @@ short version: `gate`/`fingerprint`/`prompt` are pure and table/golden-file
 tested with no fixtures; `analyzer` runs the real pipeline against a stub LLM
 and a temp-file SQLite store, and its tests are what encode the step-order
 invariants above as executable checks rather than just comments.
+
+Threat Shield follows the same split. `threat` is pure and carries the deepest
+table in the repository — every IP class, every origin, every malformed field
+— because that is where a bug becomes a data-protection incident. `blocklist`
+is tested against a temp-file SQLite store rather than a mock, because the
+grouping *is* the SQL: the boundary cases (two systems do not promote, three
+do; one system reporting three times does not; one system across two
+categories is still one system) cannot be checked against a fake that
+reimplements the query.
+
+## Known limits
+
+- **Single instance.** The consensus pass takes no distributed lock, so two
+  `insightsd` processes against one database would both generate. The lock
+  question returns with multi-instance deployment.
+- **No organization identity.** Promotion counts distinct systems only; the
+  design's cross-organization requirement (D5) cannot be expressed until the
+  authenticator returns a tenant. Three systems in one fleet therefore count
+  as consensus, and the allowlist plus the fleet-egress exclusion are the
+  compensating controls.
+- **The egress exclusion needs real client IPs.** Behind a reverse proxy every
+  reporter appears to come from the proxy, and fleet self-protection stops
+  protecting anything.

@@ -20,9 +20,11 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	"github.com/nethesis/nethesis-insights/internal/api"
 	"github.com/nethesis/nethesis-insights/internal/auth"
+	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	"github.com/nethesis/nethesis-insights/internal/store"
+	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui"
 )
 
@@ -105,13 +107,13 @@ func secretState(set bool) string {
 // It gets its own http.Server, deliberately: the public ingest socket must
 // never serve an unauthenticated fleet-wide page, so a reverse-proxy or
 // firewall mistake on :9595 cannot expose it.
-func newUIServer(addr string, r ui.Reader, rt ui.Runtime, info ui.Info) *http.Server {
+func newUIServer(addr string, r ui.Reader, rt ui.Runtime, feed ui.Feed, info ui.Info) *http.Server {
 	if addr == "" {
 		return nil
 	}
 	return &http.Server{
 		Addr:              addr,
-		Handler:           ui.NewServer(r, rt, info),
+		Handler:           ui.NewServer(r, rt, feed, info),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }
@@ -171,6 +173,15 @@ func main() {
 	queueSize := getenvInt("QUEUE_SIZE", 256)
 	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
 	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
+	// Threat Shield. Every one has a default, so an existing deployment picks
+	// the pipeline up without being reconfigured.
+	consensusInterval := getenvDuration("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
+	blocklistWindow := getenvDuration("BLOCKLIST_WINDOW", time.Hour)
+	blocklistMinSystems := getenvInt("BLOCKLIST_MIN_SYSTEMS", 3)
+	blocklistTTL := getenvDuration("BLOCKLIST_TTL", 24*time.Hour)
+	blocklistMaxEntries := getenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
+	threatRetention := getenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
+	threatMaxDecisions := getenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
 
 	if dir := filepath.Dir(dbPath); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -223,7 +234,24 @@ func main() {
 	authenticator := auth.New(authValidateURL, authPepper, authTimeout, time.Now)
 	authenticator.PositiveTTL = authCacheTTL
 	authenticator.NegativeTTL = authNegCacheTTL
-	handler := api.NewServer(q, s, authenticator)
+
+	// Threat Shield: a second pipeline sharing this listener and this
+	// authenticator, and nothing else. No LLM, no gate, no queue.
+	snapshot := blocklist.NewSnapshot()
+	consensus := blocklist.New(s, snapshot, blocklist.Config{
+		Window:     blocklistWindow,
+		MinSystems: blocklistMinSystems,
+		TTL:        blocklistTTL,
+		MaxEntries: blocklistMaxEntries,
+		Retention:  threatRetention,
+	})
+
+	handler := api.NewServer(q, s, authenticator, api.ThreatConfig{
+		Store:        s,
+		Feed:         snapshot,
+		MaxDecisions: threatMaxDecisions,
+		Now:          func() int64 { return time.Now().UnixMilli() },
+	})
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
@@ -261,10 +289,17 @@ func main() {
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
+		{Name: "BLOCKLIST_CONSENSUS_INTERVAL", Value: consensusInterval.String()},
+		{Name: "BLOCKLIST_WINDOW", Value: blocklistWindow.String()},
+		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(blocklistMinSystems)},
+		{Name: "BLOCKLIST_TTL", Value: blocklistTTL.String()},
+		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
+		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
+		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
 	}
 
 	// BuildInfo reads runtime/debug once here, not per request.
-	uiServer := newUIServer(uiListenAddr, s, q, ui.Info{
+	uiServer := newUIServer(uiListenAddr, s, q, snapshot, ui.Info{
 		StartedAt: startedAt,
 		Workers:   queueWorkers,
 		Build:     ui.BuildInfo(),
@@ -310,6 +345,13 @@ func main() {
 		}()
 	}
 
+	// The consensus loop is started after the listeners so a slow first pass
+	// cannot delay readiness. The first pass runs immediately rather than one
+	// interval in, so a restart does not leave the feed answering 503 for five
+	// minutes with a database full of promoted entries.
+	consensusCtx, stopConsensus := context.WithCancel(context.Background())
+	consensusDone := runConsensusLoop(consensusCtx, consensus, consensusInterval)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -330,4 +372,34 @@ func main() {
 	// acknowledged to an edge that will not send it again.
 	q.Stop()
 	slog.Info("queue drained")
+
+	// The consensus loop holds no acknowledged work -- a cancelled pass just
+	// leaves the previous snapshot in place -- so it is stopped last and
+	// simply waited on.
+	stopConsensus()
+	<-consensusDone
+	slog.Info("consensus loop stopped")
+}
+
+// runConsensusLoop runs a pass immediately and then every interval until ctx
+// is cancelled. A failed pass is logged and the loop continues: the snapshot
+// it did not replace keeps being served, which is the designed degradation.
+func runConsensusLoop(ctx context.Context, r *blocklist.Runner, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
+				slog.Error("blocklist consensus pass failed", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return done
 }

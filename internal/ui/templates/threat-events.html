@@ -1,0 +1,41 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Threat events</h1>
+<p><small>Sanitized CrowdSec ban decisions as reported by the fleet &mdash; the raw
+material consensus is computed from. Filter by address to answer &ldquo;who
+reported this IP&rdquo;. Rows are pruned once past the retention window.</small></p>
+
+<form method="get">
+<fieldset role="group">
+<input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<input type="text" name="ip" value="{{.IP}}" placeholder="attacker ip, any if blank">
+<input type="number" name="limit" value="{{.Limit}}" min="1" max="500">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<table>
+<thead>
+<tr><th>Observed</th><th>System</th><th>Attacker IP</th><th>Category</th>
+<th class="num">Hits</th><th>Scenario</th><th class="num">Ban</th></tr>
+</thead>
+<tbody>
+{{range .Events}}
+<tr>
+<td class="mono" title="{{fmtTime .ObservedAt}}">{{fmtAgo .ObservedAt}}</td>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{.AttackerIP}}</td>
+<td>{{.Category}}</td>
+<td class="num">{{.HitCount}}</td>
+<td class="mono">{{with index .Metadata "scenario"}}{{.}}{{else}}&mdash;{{end}}</td>
+<td class="num">{{with index .Metadata "duration_seconds"}}{{.}}s{{else}}&mdash;{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7">no threat events</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

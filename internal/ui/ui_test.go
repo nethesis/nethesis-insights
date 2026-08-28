@@ -29,6 +29,14 @@ type fakeReader struct {
 	templates []store.TemplateRow
 	baselines []store.BaselineRow
 
+	blocklist    []store.BlocklistRow
+	threatEvents []store.ThreatEventRow
+	threatDaily  []store.ThreatDailyRow
+	threatIngest []store.ThreatIngestRow
+	unknown      []store.UnknownScenarioRow
+	allowlist    []store.AllowlistRow
+	egress       []store.EgressRow
+
 	err error // when set, every method returns this error instead
 }
 
@@ -183,7 +191,12 @@ func seededReader() *fakeReader {
 
 func newTestServer(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	return NewServer(r, rt, Info{
+	return newTestServerWithFeed(t, r, rt, nil)
+}
+
+func newTestServerWithFeed(t *testing.T, r Reader, rt Runtime, feed Feed) http.Handler {
+	t.Helper()
+	return NewServer(r, rt, feed, Info{
 		StartedAt: 1700000000000,
 		Workers:   4,
 		Build:     "test-build",
@@ -215,6 +228,9 @@ var routes = []struct {
 	{"/cost", "<h1>Cost</h1>"},
 	{"/templates", "<h1>Templates</h1>"},
 	{"/baselines", "<h1>Baselines</h1>"},
+	{"/blocklist", "<h1>Blocklist</h1>"},
+	{"/threat-events", "<h1>Threat events</h1>"},
+	{"/threat-stats", "<h1>Threat stats</h1>"},
 }
 
 func TestRoutesOK(t *testing.T) {
@@ -413,7 +429,7 @@ func TestNoJavaScript(t *testing.T) {
 func TestSecretRedaction(t *testing.T) {
 	const decoySecret = "sk-live-do-not-leak-1234567890"
 
-	h := NewServer(seededReader(), fakeRuntime{}, Info{
+	h := NewServer(seededReader(), fakeRuntime{}, nil, Info{
 		StartedAt: 1700000000000,
 		Workers:   2,
 		Build:     "test-build",

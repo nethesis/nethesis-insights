@@ -35,7 +35,7 @@ const (
 )
 
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret})
+	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{})
 }
 
 func validBundle() string {
