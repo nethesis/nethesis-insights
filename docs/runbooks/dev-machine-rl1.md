@@ -227,6 +227,34 @@ ssh -N -L 9596:127.0.0.1:9596 root@rl1.leader.default.gs.nethserver.net
 zero on a fresh database. The UI is unauthenticated and fleet-wide — never bind it to
 `0.0.0.0` on this machine (`insightsd` warns but will not stop you).
 
+### Deviation in force on rl1: the UI is published worldwide
+
+As of 2026-08-27 the operator has deliberately overridden the paragraph above on this
+dev box. `UI_LISTEN_ADDR` is `0.0.0.0:9596`, the container publishes `9596:9596` on all
+interfaces, and `9596/tcp` is open to any source. This is a conscious exception for
+convenience on a throwaway machine, not a pattern to copy — it contradicts spec §2 and
+the README, both of which still say localhost or a trusted network.
+
+What that means while it is in force, so nobody is surprised by it:
+
+- Anyone who scans the host can read, with no credential, every `system_id` reporting to
+  this server, its masked log templates, its EWMA baselines, the LLM spend, and the
+  **security-category findings** — i.e. a ranked list of which nodes have security
+  anomalies and what they are.
+- `rl1` is a shared live cluster. The firewall change is host-wide, on a node that also
+  runs `nethvoice2`, `samba2`, `crowdsec1` and `metrics1`.
+- `tofu destroy` is the fastest way to make the exposure go away, since the box is
+  provisioned on demand.
+
+To revert without destroying the machine:
+
+```bash
+firewall-cmd --permanent --remove-port=9596/tcp && firewall-cmd --reload
+sed -i 's/^UI_LISTEN_ADDR=.*/UI_LISTEN_ADDR=127.0.0.1:9596/' /etc/insights.env
+sed -i '/^PublishPort=9596:9596$/d' /etc/containers/systemd/insights.container
+systemctl daemon-reload && systemctl restart insights.service
+```
+
 `scripts/insights-api.sh` runs from the workstation, not the node. It defaults to
 `http://localhost:9595`, so hitting the node over the Traefik route from step 5 needs
 `INSIGHTS_URL` set explicitly:

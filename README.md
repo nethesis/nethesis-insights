@@ -113,7 +113,7 @@ locally with `podman build -t nethesis-insights .`.
 | `GATE_TOLERANCE` | deviation ratio threshold (default `3.0`) |
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |
 | `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |
-| `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices (default `0`) |
+| `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices (default `0`); e.g. gpt-4o-mini standard tier: `0.15`, `0.60` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` (default `info`) |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
