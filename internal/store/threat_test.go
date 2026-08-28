@@ -35,9 +35,6 @@ func TestThreatMethodsOnEmptyDatabase(t *testing.T) {
 	if rows, err := s.ThreatAllowlist(ctx, now); err != nil || len(rows) != 0 {
 		t.Fatalf("ThreatAllowlist: %v, %d rows", err, len(rows))
 	}
-	if ips, err := s.EgressIPs(ctx); err != nil || len(ips) != 0 {
-		t.Fatalf("EgressIPs: %v, %d rows", err, len(ips))
-	}
 	if rows, err := s.ListBlocklist(ctx, now, 0); err != nil || len(rows) != 0 {
 		t.Fatalf("ListBlocklist: %v, %d rows", err, len(rows))
 	}
@@ -55,9 +52,6 @@ func TestThreatMethodsOnEmptyDatabase(t *testing.T) {
 	}
 	if rows, err := s.ListThreatAllowlist(ctx); err != nil || len(rows) != 0 {
 		t.Fatalf("ListThreatAllowlist: %v, %d rows", err, len(rows))
-	}
-	if rows, err := s.ListSystemEgress(ctx); err != nil || len(rows) != 0 {
-		t.Fatalf("ListSystemEgress: %v, %d rows", err, len(rows))
 	}
 	if err := s.RollupThreatDailyStats(ctx); err != nil {
 		t.Fatalf("RollupThreatDailyStats: %v", err)
@@ -313,38 +307,6 @@ func TestThreatAllowlistHonoursExpiry(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("operator allowlist listing: got %d, want 2 (expired entries stay visible)", len(all))
-	}
-}
-
-func TestRecordSystemEgress(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.RecordSystemEgress(ctx, "sys-a", "203.0.113.1", 1000); err != nil {
-		t.Fatalf("RecordSystemEgress: %v", err)
-	}
-	if err := s.RecordSystemEgress(ctx, "sys-a", "203.0.113.2", 2000); err != nil {
-		t.Fatalf("re-record: %v", err)
-	}
-	if err := s.RecordSystemEgress(ctx, "sys-b", "203.0.113.3", 2000); err != nil {
-		t.Fatalf("second system: %v", err)
-	}
-	// An empty address must not create a row that would exclude "" forever.
-	if err := s.RecordSystemEgress(ctx, "sys-c", "", 2000); err != nil {
-		t.Fatalf("empty source ip: %v", err)
-	}
-
-	rows, _ := s.ListSystemEgress(ctx)
-	if len(rows) != 2 {
-		t.Fatalf("egress rows: got %d, want 2", len(rows))
-	}
-	if rows[0].SourceIP != "203.0.113.2" {
-		t.Fatalf("sys-a egress: got %q, want the latest 203.0.113.2", rows[0].SourceIP)
-	}
-
-	ips, _ := s.EgressIPs(ctx)
-	if len(ips) != 2 {
-		t.Fatalf("egress ips: got %v, want 2", ips)
 	}
 }
 

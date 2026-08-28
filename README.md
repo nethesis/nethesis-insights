@@ -155,7 +155,7 @@ It is **off unless you set `UI_LISTEN_ADDR`**:
 | `/cost` | spend and tokens per UTC day and model |
 | `/templates` | what the server already considers known for a system |
 | `/baselines` | the EWMA rates the gate falls back on when a bundle carries no `expected` |
-| `/blocklist` | the consensus feed with its promotion evidence, plus the allowlist and fleet-egress exclusion sets |
+| `/blocklist` | the consensus feed with its promotion evidence, plus the allowlist exclusion set |
 | `/threat-events` | recent sanitized CrowdSec decisions; filter by system or attacker IP |
 | `/threat-stats` | daily threat rollup per scenario, and per-node ingest accounting |
 | `/allowlist-requests` | the review queue: what customers asked to have exempted, ranked by how many distinct systems asked |
@@ -240,16 +240,9 @@ builds its notification template against.
 
 An address is published once `BLOCKLIST_MIN_SYSTEMS` **distinct systems**
 report it inside `BLOCKLIST_WINDOW`, and the listing expires `BLOCKLIST_TTL`
-after the last sighting. Two exclusions are applied at promotion, so adding to
-either unlists an address on the next pass:
-
-- the `threat_allowlist` table, maintained out of band — this server has no
-  admin auth plane, so there is deliberately no HTTP surface for it;
-- the fleet egress set, every address a reporter has been seen connecting from.
-  This is what stops one misconfigured appliance getting the fleet's own WAN
-  address listed. It is taken from the connection and never from
-  `X-Forwarded-For`, which a client controls; behind a reverse proxy it
-  therefore records the proxy and stops being useful.
+after the last sighting. The `threat_allowlist` table is applied at promotion,
+so adding an entry unlists an address on the next pass; it is maintained
+through the admin API (`internal/admin`) and the operator UI.
 
 Ingest is fail-closed on authentication and fail-open on content: a malformed
 decision is dropped and counted, and the rest of the batch is stored. Private,

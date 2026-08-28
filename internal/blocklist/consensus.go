@@ -21,7 +21,6 @@ import (
 type Reader interface {
 	ConsensusCandidates(ctx context.Context, since int64) ([]store.ThreatCandidateRow, error)
 	ThreatAllowlist(ctx context.Context, now int64) ([]store.AllowlistRow, error)
-	EgressIPs(ctx context.Context) ([]string, error)
 	UpsertBlocklistEntries(ctx context.Context, rows []store.BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]store.BlocklistRow, error)
@@ -78,12 +77,8 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	if err != nil {
 		return err
 	}
-	egress, err := r.egressSet(ctx)
-	if err != nil {
-		return err
-	}
 
-	promoted := r.promote(rows, allow, egress, now)
+	promoted := r.promote(rows, allow, now)
 	if err := r.store.UpsertBlocklistEntries(ctx, promoted); err != nil {
 		return fmt.Errorf("blocklist: promote: %w", err)
 	}
@@ -141,27 +136,9 @@ func (r *Runner) allowlist(ctx context.Context, now int64) (threat.Allowlist, er
 	return allow, nil
 }
 
-// egressSet is the fleet self-protection exclusion: the union of the
-// addresses reporters were seen from. It closes the worst failure mode --
-// one customer's misconfigured appliance getting the fleet's own WAN address
-// listed -- without depending on inventory contents.
-func (r *Runner) egressSet(ctx context.Context) (map[netip.Addr]bool, error) {
-	ips, err := r.store.EgressIPs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("blocklist: egress ips: %w", err)
-	}
-	set := make(map[netip.Addr]bool, len(ips))
-	for _, ip := range ips {
-		if a, err := netip.ParseAddr(ip); err == nil {
-			set[a.Unmap()] = true
-		}
-	}
-	return set, nil
-}
-
 // promote folds candidate triples per address and returns the entries
 // clearing the rule.
-func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist, egress map[netip.Addr]bool, now int64) []store.BlocklistRow {
+func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist, now int64) []store.BlocklistRow {
 	folded := map[netip.Addr]*candidate{}
 	for _, row := range rows {
 		addr, err := netip.ParseAddr(row.AttackerIP)
@@ -184,10 +161,10 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 
 	out := make([]store.BlocklistRow, 0, len(folded))
 	for addr, c := range folded {
-		// Both exclusions are applied at promotion rather than at read, so
-		// adding an allowlist entry retroactively unlists the address on this
-		// pass instead of merely hiding it.
-		if allow.Contains(addr) || egress[addr] {
+		// Applied at promotion rather than at read, so adding an allowlist
+		// entry retroactively unlists the address on this pass instead of
+		// merely hiding it.
+		if allow.Contains(addr) {
 			continue
 		}
 		if len(c.systems) < r.cfg.MinSystems {

@@ -125,27 +125,3 @@ func (s *SQLiteStore) ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, 
 		ORDER BY cidr
 	`)
 }
-
-// ListSystemEgress returns the observed reporter source addresses that form
-// the fleet self-protection exclusion set.
-func (s *SQLiteStore) ListSystemEgress(ctx context.Context) ([]EgressRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT system_id, source_ip, updated_at
-		FROM system_egress
-		ORDER BY system_id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("store: list system egress: %w", err)
-	}
-	defer rows.Close()
-
-	result := []EgressRow{}
-	for rows.Next() {
-		var r EgressRow
-		if err := rows.Scan(&r.SystemID, &r.SourceIP, &r.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("store: scan system egress: %w", err)
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}

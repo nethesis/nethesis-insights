@@ -25,7 +25,6 @@ import (
 // thirty-method stub. *store.SQLiteStore satisfies it.
 type ThreatStore interface {
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (int, int, error)
-	RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error
 	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
 }
 
@@ -117,15 +116,6 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 		MaxDecisions: s.threat.MaxDecisions,
 	}, now)
 
-	// Recorded before the events: the egress set is what stops one
-	// misconfigured appliance getting the fleet's own WAN address listed, and
-	// it must be known even for a batch that contributes nothing.
-	if sourceIP.IsValid() {
-		if err := s.threat.Store.RecordSystemEgress(r.Context(), authenticatedSystemID, sourceIP.String(), now); err != nil {
-			slog.Error("record system egress failed", "system_id", authenticatedSystemID, "error", err)
-		}
-	}
-
 	inserted, duplicates, err := s.threat.Store.InsertThreatEvents(r.Context(), authenticatedSystemID, res.Events)
 	if err != nil {
 		slog.Error("insert threat events failed", "system_id", authenticatedSystemID, "error", err)
@@ -216,11 +206,12 @@ func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 
 // remoteAddr extracts the peer address the server actually observed.
 //
-// X-Forwarded-For is deliberately NOT consulted. The value feeds the fleet
-// self-protection exclusion set, and the header is client-controlled: an
-// authenticated edge could otherwise inject any address it liked and keep it
-// off the blocklist permanently. Behind a reverse proxy this records the
-// proxy's address, which makes the exclusion useless but never wrong.
+// X-Forwarded-For is deliberately NOT consulted. The value feeds
+// threat.Sanitize's reporter-own-address check (a decision naming the
+// reporter's own address is dropped as a misconfiguration), and the header
+// is client-controlled: an authenticated edge could otherwise spoof its way
+// past that check with a forged header. Behind a reverse proxy this records
+// the proxy's address, which makes the check useless but never wrong.
 func remoteAddr(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

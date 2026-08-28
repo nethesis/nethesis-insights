@@ -182,8 +182,8 @@ client's timeout.
 3. `threat.Sanitize` turns raw CrowdSec decisions into `model.ThreatEvent`s,
    dropping and counting anything that fails a rule. The reporter's own source
    address is passed in and excluded.
-4. `RecordSystemEgress` remembers the peer address, `InsertThreatEvents` stores
-   the batch, and the per-day ingest counters are recorded.
+4. `InsertThreatEvents` stores the batch and the per-day ingest counters are
+   recorded.
 5. `202` with `stored`, `duplicates` and the full drop accounting.
 
 **Fail-closed on authentication, fail-open on content.** Only a store failure
@@ -192,10 +192,11 @@ out, because the evidence is already committed and losing the reporter's
 watermark would cost more than the counters are worth.
 
 The source address comes from `r.RemoteAddr` and never from
-`X-Forwarded-For`. That value feeds the fleet-egress exclusion set, and the
-header is client-controlled: honouring it would let an authenticated edge keep
-any address off the blocklist permanently. Behind a reverse proxy this records
-the proxy, which makes the exclusion useless but never wrong.
+`X-Forwarded-For`. That value feeds `threat.Sanitize`'s reporter-own-address
+check (step 3 above), and the header is client-controlled: honouring it would
+let an authenticated edge spoof its way past that check with a forged header.
+Behind a reverse proxy this records the proxy, which makes the check useless
+but never wrong.
 
 ### Consensus: `blocklist.Runner.Run`
 
@@ -208,8 +209,8 @@ load-bearing:
    `(attacker_ip, scenario, system_id)` triples.
 2. Go folds them per address into a distinct-system set, a scenario set, a hit
    sum and the latest sighting.
-3. Allowlisted and fleet-egress addresses are dropped — **at promotion, not at
-   read**, so adding to either unlists an address rather than hiding it.
+3. Allowlisted addresses are dropped — **at promotion, not at read**, so
+   adding an entry unlists an address rather than hiding it.
 4. Addresses with at least `BLOCKLIST_MIN_SYSTEMS` distinct systems are
    upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
    `listing_reason` snapshot of the evidence.
@@ -265,7 +266,6 @@ without a goroutine to leak.
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. No HTTP surface — this server has no admin auth plane. |
 | `threat_daily_stats` | Per day and scenario rollup, written before the prune so the trend outlives the raw events. |
-| `system_egress` | The address each reporter was last seen from: the fleet self-protection exclusion set. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
 
 `attacker_ip` is stored as a normalized `netip.Addr.String()`, so text equality
@@ -510,11 +510,7 @@ reimplements the query.
 - **No organization identity.** Promotion counts distinct systems only; the
   design's cross-organization requirement (D5) cannot be expressed until the
   authenticator returns a tenant. Three systems in one fleet therefore count
-  as consensus, and the allowlist plus the fleet-egress exclusion are the
-  compensating controls.
-- **The egress exclusion needs real client IPs.** Behind a reverse proxy every
-  reporter appears to come from the proxy, and fleet self-protection stops
-  protecting anything.
+  as consensus, and the hand-maintained allowlist is the compensating control.
 - **The admin actor is self-declared.** One shared `ADMIN_API_KEY` has no
   identity behind it, so `X-Admin-Actor` is a readable trail, not an
   authorization boundary — anyone with the key can claim any name.

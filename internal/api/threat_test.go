@@ -25,13 +25,10 @@ var threatNow = time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC).UnixMilli()
 type fakeThreatStore struct {
 	events     []model.ThreatEvent
 	systemID   string
-	egressIP   string
-	egressCall int
 	counters   model.ThreatCounters
 	duplicates int
 	day        string
 	insertErr  error
-	egressErr  error
 	countErr   error
 }
 
@@ -42,12 +39,6 @@ func (f *fakeThreatStore) InsertThreatEvents(_ context.Context, systemID string,
 	f.systemID = systemID
 	f.events = append(f.events, ev...)
 	return len(ev), 0, nil
-}
-
-func (f *fakeThreatStore) RecordSystemEgress(_ context.Context, _, sourceIP string, _ int64) error {
-	f.egressCall++
-	f.egressIP = sourceIP
-	return f.egressErr
 }
 
 func (f *fakeThreatStore) RecordIngestCounters(_ context.Context, day, _ string, c model.ThreatCounters, duplicates int) error {
@@ -190,7 +181,7 @@ func TestThreatIngestRequiresAuthentication(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
 	}
-	if len(st.events) != 0 || st.egressCall != 0 {
+	if len(st.events) != 0 {
 		t.Fatal("an unauthenticated report reached the store")
 	}
 }
@@ -274,9 +265,9 @@ func TestThreatIngestAcceptsAnUnfamiliarScenario(t *testing.T) {
 	}
 }
 
-// The egress set feeds fleet self-protection, so it must come from the
-// connection, never from a client-controlled header: otherwise an
-// authenticated edge could keep any address off the blocklist forever.
+// The reporter-own-address check must key off the real connection, never a
+// client-controlled header: otherwise an authenticated edge could spoof its
+// way past it and get any address dropped as "its own".
 func TestThreatIngestIgnoresXForwardedFor(t *testing.T) {
 	st := &fakeThreatStore{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/threat-events",
@@ -288,10 +279,7 @@ func TestThreatIngestIgnoresXForwardedFor(t *testing.T) {
 
 	threatServer(st, &fakeFeed{}).ServeHTTP(rec, req)
 
-	if st.egressIP != "198.51.100.5" {
-		t.Fatalf("egress ip: got %q, want the peer address 198.51.100.5", st.egressIP)
-	}
-	// The spoofed address must therefore still be stored.
+	// The spoofed address must not be excluded by the forged header.
 	if len(st.events) != 1 || st.events[0].AttackerIP != "203.0.113.7" {
 		t.Fatalf("stored: %+v, want the header not to have excluded 203.0.113.7", st.events)
 	}
@@ -348,7 +336,7 @@ func TestThreatIngestAnswers503WhenTheStoreFails(t *testing.T) {
 // its failure must not cost the reporter its 202 (and therefore its
 // watermark).
 func TestThreatIngestSucceedsWhenAccountingFails(t *testing.T) {
-	st := &fakeThreatStore{countErr: errors.New("nope"), egressErr: errors.New("nope")}
+	st := &fakeThreatStore{countErr: errors.New("nope")}
 	rec := postThreat(t, threatServer(st, &fakeFeed{}),
 		reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
 

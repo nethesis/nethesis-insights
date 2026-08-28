@@ -393,12 +393,9 @@ paths:
         two scenarios, is still one system. A listing expires
         `BLOCKLIST_TTL` (default 24h) after the last report; a new report
         refreshes the TTL without changing when the address was first
-        listed. Two exclusions are applied at promotion time, not at read
-        time, so adding to either one unlists an address on the next
-        consensus pass: the hand-maintained allowlist, and the fleet egress
-        set (every address a reporter has been seen connecting from, which
-        stops one misconfigured appliance getting the fleet's own WAN
-        address listed).
+        listed. The hand-maintained allowlist is applied at promotion time,
+        not at read time, so adding an entry unlists an address on the next
+        consensus pass instead of merely hiding it.
 
         **A `503` never means "empty".** No consensus pass having succeeded
         yet is indistinguishable from a validator outage to a naive client,

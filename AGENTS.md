@@ -66,17 +66,22 @@ Threat Shield rules that are as load-bearing as the gate's:
   per-scenario counts do not sum and `ARRAY_AGG`/`GROUP_CONCAT` are not portable.
   Promotion never depends on scenario agreement, which is why accepting an unfamiliar
   scenario cannot weaken the rule.
-- **Allowlist and fleet egress are applied at promotion, not at read**, so adding an
-  entry unlists an address on the next pass instead of hiding it. A malformed allowlist
-  row aborts the pass rather than being skipped — skipping fails open.
+- **The allowlist is applied at promotion, not at read**, so adding an entry unlists
+  an address on the next pass instead of hiding it. A malformed allowlist row aborts
+  the pass rather than being skipped — skipping fails open. (Fleet egress — an
+  earlier, automatic promotion exclusion keyed on each reporter's observed source
+  address — was removed as too complex and too easy to get wrong for what it bought;
+  the allowlist is now the only promotion exclusion.)
 - **Roll up before pruning.** `RollupThreatDailyStats` must precede
   `PruneThreatEvents`, or the dropped day loses its history permanently.
 - **Never serve blank.** `GET /v1/blocklist` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.
 - **The reporter's source IP comes from `RemoteAddr`, never `X-Forwarded-For`.** It
-  feeds the egress exclusion set and the header is client-controlled. Consequence:
-  behind a reverse proxy the exclusion records the proxy and stops being useful.
+  feeds `threat.Sanitize`'s reporter-own-address check (a decision naming the
+  reporter's own address is dropped as a misconfiguration), and the header is
+  client-controlled. Consequence: behind a reverse proxy this records the proxy's
+  address, which makes that check useless but never wrong.
 - **Nothing is ever allowlisted automatically.** A client request
   (`POST /v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
   an explicit admin approval creates an entry. Never add a consensus threshold that
@@ -336,8 +341,8 @@ successful no-op, not an error.
 - `blocklist`: temp-file SQLite, not a mock — the grouping *is* the SQL. Boundary
   fixtures: 2 distinct systems does not promote and 3 does; one system reporting
   three times does not; one system across two categories is still one system;
-  allowlisted and fleet-egress addresses never promote; `expires_at` refreshes while
-  `first_listed_at` holds; a failed pass keeps the previous snapshot.
+  allowlisted addresses never promote; `expires_at` refreshes while `first_listed_at`
+  holds; a failed pass keeps the previous snapshot.
 
 ## Conventions
 

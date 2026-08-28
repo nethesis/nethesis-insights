@@ -81,13 +81,11 @@ type Store interface {
 
 	// Threat Shield ingest and consensus (internal/api, internal/blocklist).
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)
-	RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error
 	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
 	ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error)
 	ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error)
 	UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error
 	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
-	EgressIPs(ctx context.Context) ([]string, error)
 	UpsertBlocklistEntries(ctx context.Context, rows []BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error)
@@ -100,7 +98,6 @@ type Store interface {
 	ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
-	ListSystemEgress(ctx context.Context) ([]EgressRow, error)
 
 	// Allowlist management: a client-facing request queue (internal/api),
 	// and the admin API / operator UI writes that turn a reviewed request,
@@ -250,15 +247,6 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			distinct_ips INTEGER,
 			total_hits INTEGER,
 			PRIMARY KEY (day, scenario)
-		)`,
-		// Fleet self-protection: the union of observed reporter source
-		// addresses is an automatic promotion exclusion, so one customer's
-		// misconfigured appliance cannot get the fleet's own WAN address
-		// listed.
-		`CREATE TABLE IF NOT EXISTS system_egress (
-			system_id TEXT PRIMARY KEY,
-			source_ip TEXT,
-			updated_at INTEGER
 		)`,
 		// Ingest accounting. Without it, "this node contributes nothing and
 		// here is which rule is dropping it" is answerable only from logs.

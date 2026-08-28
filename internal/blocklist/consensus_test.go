@@ -274,25 +274,6 @@ func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 	}
 }
 
-// One customer's misconfigured appliance must not be able to get the fleet's
-// own WAN address listed.
-func TestFleetEgressAddressNeverPromotes(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	if err := s.RecordSystemEgress(ctx, "sys-x", "203.0.113.7", now); err != nil {
-		t.Fatalf("RecordSystemEgress: %v", err)
-	}
-	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
-		report(t, s, sys, "203.0.113.7", "ssh_bruteforce", 5*minute)
-	}
-
-	runPass(t, s, testConfig())
-
-	if got := listed(t, s); len(got) != 0 {
-		t.Fatalf("a fleet egress address was promoted: %v", got)
-	}
-}
-
 // A malformed allowlist row must stop the pass, not be skipped: skipping it
 // would publish an address someone had explicitly excluded.
 func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
@@ -392,7 +373,6 @@ func (f *failingReader) ConsensusCandidates(context.Context, int64) ([]store.Thr
 func (f *failingReader) ThreatAllowlist(context.Context, int64) ([]store.AllowlistRow, error) {
 	return nil, nil
 }
-func (f *failingReader) EgressIPs(context.Context) ([]string, error) { return nil, nil }
 func (f *failingReader) UpsertBlocklistEntries(context.Context, []store.BlocklistRow) error {
 	return nil
 }

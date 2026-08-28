@@ -69,7 +69,6 @@ type Reader interface {
 	ThreatDailyStats(ctx context.Context, limit int) ([]store.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
-	ListSystemEgress(ctx context.Context) ([]store.EgressRow, error)
 
 	// PendingAllowlistRequests backs the /allowlist-requests review queue.
 	// This is a read: the queue is visible to anyone who can reach this
@@ -765,14 +764,13 @@ type blocklistPageData struct {
 	Feed      feedState
 	Entries   []store.BlocklistRow
 	Allowlist []store.AllowlistRow
-	Egress    []store.EgressRow
 	Now       int64
 	CanWrite  bool
 }
 
-// handleBlocklist shows what the fleet currently agrees on, plus the two
-// exclusion sets. "Why is this IP listed" and "why is this IP never listed"
-// are both operator questions, and both are answered on one page.
+// handleBlocklist shows what the fleet currently agrees on, plus the
+// allowlist exclusion. "Why is this IP listed" and "why is this IP never
+// listed" are both operator questions, and both are answered on one page.
 func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.reader.ListBlocklistEntries(r.Context(), blocklistLimit)
 	if err != nil {
@@ -784,17 +782,11 @@ func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "blocklist", err)
 		return
 	}
-	egress, err := s.reader.ListSystemEgress(r.Context())
-	if err != nil {
-		s.storeError(w, "blocklist", err)
-		return
-	}
 	s.render(w, "blocklist.html", blocklistPageData{
 		pageData:  s.newPageData(r, "blocklist"),
 		Feed:      s.feedState(),
 		Entries:   entries,
 		Allowlist: allowlist,
-		Egress:    egress,
 		Now:       time.Now().UnixMilli(),
 		CanWrite:  s.canWrite(),
 	})

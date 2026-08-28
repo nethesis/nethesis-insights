@@ -217,14 +217,13 @@ Distinct *systems*, not distinct reports: one node reporting an address a
 hundred times is one system, and one node reporting it under two categories is
 still one system.
 
-Two exclusions are applied at promotion, so adding to either one unlists an
-address on the next pass rather than merely hiding it:
-
-- the hand-maintained allowlist (`threat_allowlist`);
-- the fleet egress set — every address a reporter has been seen connecting
-  from, which is what stops one misconfigured appliance getting the fleet's own
-  WAN address listed.
+The hand-maintained allowlist (`threat_allowlist`) is applied at promotion, so
+adding an entry unlists an address on the next pass rather than merely hiding
+it. (An earlier fleet-egress exclusion — automatically excluding every address
+a reporter had been seen connecting from — was removed as too complex and too
+easy to get wrong for what it bought; the allowlist is the only promotion
+exclusion now.)
 
 There is no cross-organization requirement, because this server has no
 organization identity. Three systems in one fleet therefore count as consensus;
-the two exclusions above are the compensating controls.
+the allowlist above is the compensating control.

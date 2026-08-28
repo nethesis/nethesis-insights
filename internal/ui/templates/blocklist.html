@@ -110,25 +110,4 @@ removing an entry is not available here &mdash; use the admin API directly,
 or set ADMIN_API_KEY to enable this form.</small></p>
 {{end}}
 
-<h2>Fleet egress</h2>
-<p><small>Addresses reporters were seen connecting from. Never promoted: this is
-what stops one misconfigured appliance getting the fleet's own WAN address
-listed. Behind a reverse proxy this records the proxy, and the exclusion stops
-being useful.</small></p>
-<table>
-<thead>
-<tr><th>System</th><th>Source IP</th><th>Updated</th></tr>
-</thead>
-<tbody>
-{{range .Egress}}
-<tr>
-<td class="mono">{{.SystemID}}</td>
-<td class="mono">{{.SourceIP}}</td>
-<td class="mono" title="{{fmtTime .UpdatedAt}}">{{fmtAgo .UpdatedAt}}</td>
-</tr>
-{{else}}
-<tr><td colspan="3">no reporters seen yet</td></tr>
-{{end}}
-</tbody>
-</table>
 {{end}}

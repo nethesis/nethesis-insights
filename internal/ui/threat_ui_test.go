@@ -60,10 +60,6 @@ func (f *fakeReader) ListThreatAllowlist(_ context.Context) ([]store.AllowlistRo
 	return f.allowlist, f.err
 }
 
-func (f *fakeReader) ListSystemEgress(_ context.Context) ([]store.EgressRow, error) {
-	return f.egress, f.err
-}
-
 func (f *fakeReader) PendingAllowlistRequests(_ context.Context, limit int) ([]store.AllowlistRequestRow, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -121,13 +117,10 @@ func threatReader() *fakeReader {
 		{CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1700000000000},
 		{CIDR: "198.51.100.0/24", Reason: "temporary", CreatedBy: "ops", CreatedAt: 1700000000000, ExpiresAt: &expires},
 	}
-	r.egress = []store.EgressRow{
-		{SystemID: "sys-1", SourceIP: "192.0.2.10", UpdatedAt: 1700000100000},
-	}
 	return r
 }
 
-func TestBlocklistPageRendersEntriesAndExclusions(t *testing.T) {
+func TestBlocklistPageRendersEntriesAndAllowlist(t *testing.T) {
 	h := newTestServerWithFeed(t, threatReader(), nil,
 		fakeFeed{ready: true, entries: 1, generatedAt: 1700000100000, etag: `"sha256-abc"`})
 
@@ -138,7 +131,6 @@ func TestBlocklistPageRendersEntriesAndExclusions(t *testing.T) {
 		"crowdsecurity/port-scan, crowdsecurity/ssh-bf", // its scenarios
 		"91",              // hits, from the snapshotted evidence
 		"partner scanner", // the allowlist
-		"192.0.2.10",      // the fleet egress set
 		"sha256-abc",      // the served snapshot's ETag
 		"permanent",       // an allowlist entry with no expiry
 	} {

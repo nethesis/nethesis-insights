@@ -74,12 +74,6 @@ type AllowlistRow struct {
 	ExpiresAt               *int64
 }
 
-// EgressRow is one observed reporter source address.
-type EgressRow struct {
-	SystemID, SourceIP string
-	UpdatedAt          int64
-}
-
 // ThreatDailyRow is one day/scenario rollup.
 type ThreatDailyRow struct {
 	Day, Scenario string
@@ -153,29 +147,6 @@ func (s *SQLiteStore) InsertThreatEvents(ctx context.Context, systemID string, e
 		return 0, 0, fmt.Errorf("store: commit threat events: %w", err)
 	}
 	return inserted, duplicates, nil
-}
-
-// RecordSystemEgress remembers the address a reporter was last seen from.
-// The union of these is an automatic promotion exclusion (spec §6).
-func (s *SQLiteStore) RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error {
-	if systemID == "" || sourceIP == "" {
-		return nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO system_egress (system_id, source_ip, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(system_id) DO UPDATE SET
-			source_ip = excluded.source_ip,
-			updated_at = excluded.updated_at
-	`, systemID, sourceIP, now)
-	if err != nil {
-		return fmt.Errorf("store: record system egress: %w", err)
-	}
-	return nil
 }
 
 // RecordIngestCounters accumulates one request's outcome into the day's row
@@ -316,29 +287,6 @@ func (s *SQLiteStore) queryAllowlist(ctx context.Context, query string, args ...
 			r.ExpiresAt = &v
 		}
 		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-// EgressIPs returns every observed reporter source address.
-//
-// There is deliberately no freshness cut-off: a node that stopped reporting
-// last month still owns its WAN address, and re-listing it because the node
-// went quiet is exactly the failure this exclusion exists to prevent.
-func (s *SQLiteStore) EgressIPs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT source_ip FROM system_egress WHERE source_ip != ''`)
-	if err != nil {
-		return nil, fmt.Errorf("store: egress ips: %w", err)
-	}
-	defer rows.Close()
-
-	result := []string{}
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			return nil, fmt.Errorf("store: scan egress ip: %w", err)
-		}
-		result = append(result, ip)
 	}
 	return result, rows.Err()
 }

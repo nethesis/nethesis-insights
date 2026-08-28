@@ -34,7 +34,6 @@ type fakeReader struct {
 	threatDaily      []store.ThreatDailyRow
 	threatIngest     []store.ThreatIngestRow
 	allowlist        []store.AllowlistRow
-	egress           []store.EgressRow
 	allowlistRequest []store.AllowlistRequestRow
 
 	err error // when set, every method returns this error instead
