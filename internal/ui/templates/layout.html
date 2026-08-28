@@ -17,7 +17,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <nav>
 <ul><li><strong>insightsd</strong></li></ul>
 <ul>
-{{range .Nav}}<li><a href="{{.Path}}"{{if .Active}} class="active"{{end}}>{{.Label}}</a></li>{{end}}
+{{range .Nav}}{{if .Label}}<li><details class="dropdown"{{if .Active}} open{{end}}>
+<summary{{if .Active}} class="active"{{end}}>{{.Label}}</summary>
+<ul>
+{{range .Items}}<li><a href="{{.Path}}"{{if .Active}} class="active"{{end}}>{{.Label}}</a></li>{{end}}
+</ul>
+</details></li>{{else}}{{range .Items}}<li><a href="{{.Path}}"{{if .Active}} class="active"{{end}}>{{.Label}}</a></li>{{end}}{{end}}{{end}}
 </ul>
 <ul>
 <li><small>auto-refresh:</small></li>

@@ -35,7 +35,8 @@ thead th {
   vertical-align: bottom;
 }
 
-nav a.active {
+nav a.active,
+nav details.dropdown > summary.active {
   text-decoration: underline;
   font-weight: 700;
 }

@@ -148,19 +148,32 @@ type navPage struct {
 	Key, Path, Label string
 }
 
-var navPages = []navPage{
-	{"status", "/", "Status"},
-	{"systems", "/systems", "Systems"},
-	{"findings", "/findings", "Findings"},
-	{"analyses", "/analyses", "Analyses"},
-	{"gate", "/gate", "Gate"},
-	{"cost", "/cost", "Cost"},
-	{"templates", "/templates", "Templates"},
-	{"baselines", "/baselines", "Baselines"},
-	{"blocklist", "/blocklist", "Blocklist"},
-	{"threat-events", "/threat-events", "Threat events"},
-	{"threat-stats", "/threat-stats", "Threat stats"},
-	{"allowlist-requests", "/allowlist-requests", "Allowlist requests"},
+// navGroup is a section of the nav bar. A group with no Label renders as a
+// plain top-level link (there is exactly one such page, Status); a labeled
+// group renders as a Pico <details class="dropdown"> menu, so the 12 pages
+// this dashboard has grown to don't all sit in one flat row.
+type navGroup struct {
+	Label string
+	Pages []navPage
+}
+
+var navGroups = []navGroup{
+	{"", []navPage{{"status", "/", "Status"}}},
+	{"Pipeline", []navPage{
+		{"systems", "/systems", "Systems"},
+		{"findings", "/findings", "Findings"},
+		{"analyses", "/analyses", "Analyses"},
+		{"gate", "/gate", "Gate"},
+		{"cost", "/cost", "Cost"},
+		{"templates", "/templates", "Templates"},
+		{"baselines", "/baselines", "Baselines"},
+	}},
+	{"Threat Shield", []navPage{
+		{"blocklist", "/blocklist", "Blocklist"},
+		{"threat-events", "/threat-events", "Threat events"},
+		{"threat-stats", "/threat-stats", "Threat stats"},
+		{"allowlist-requests", "/allowlist-requests", "Allowlist requests"},
+	}},
 }
 
 type navItem struct {
@@ -168,11 +181,20 @@ type navItem struct {
 	Active      bool
 }
 
+// navGroupData is one rendered nav section. Active is set when one of Items
+// is the current page, so layout.html can keep that dropdown open by
+// default -- the current section stays visible without a click.
+type navGroupData struct {
+	Label  string
+	Items  []navItem
+	Active bool
+}
+
 // pageData is embedded (anonymously) in every page's template data, so
 // layout.html's nav/refresh/footer chrome renders the same way regardless
 // of which page is on screen.
 type pageData struct {
-	Nav        []navItem
+	Nav        []navGroupData
 	Refresh    int
 	RefreshOff string
 	Refresh10  string
@@ -425,9 +447,16 @@ func (s *server) storeError(w http.ResponseWriter, page string, err error) {
 // entry underlined, the meta-refresh value, and the three refresh links
 // (off/10s/30s) that preserve the rest of the current query string.
 func (s *server) newPageData(r *http.Request, active string) pageData {
-	nav := make([]navItem, len(navPages))
-	for i, p := range navPages {
-		nav[i] = navItem{Path: p.Path, Label: p.Label, Active: p.Key == active}
+	nav := make([]navGroupData, len(navGroups))
+	for i, g := range navGroups {
+		items := make([]navItem, len(g.Pages))
+		var groupActive bool
+		for j, p := range g.Pages {
+			isActive := p.Key == active
+			items[j] = navItem{Path: p.Path, Label: p.Label, Active: isActive}
+			groupActive = groupActive || isActive
+		}
+		nav[i] = navGroupData{Label: g.Label, Items: items, Active: groupActive}
 	}
 	off, r10, r30 := refreshLinks(r)
 	return pageData{
