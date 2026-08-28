@@ -6,6 +6,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/uptrace/bun v1.2.10
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.10
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.38.0
 )
 
@@ -13,6 +14,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect

@@ -3,53 +3,46 @@
 
 // Package docs_test is a drift guard for docs/api/openapi.yaml.
 //
-// What this test CAN prove: that the YAML file parses as a well-formed
-// sequence of `paths:` entries, that the set of documented paths exactly
-// matches the routes this server actually registers (nothing missing,
-// nothing stale left over from a removed endpoint), that the set of
-// documented (path, method) operations matches too, and that every
-// operation except /healthz declares a security scheme.
+// What this test CAN prove: that the YAML file parses as well-formed
+// OpenAPI, that the set of documented paths exactly matches the routes this
+// server actually registers (nothing missing, nothing stale left over from
+// a removed endpoint), that the set of documented (path, method) operations
+// matches too, and that every operation except /healthz declares a security
+// scheme.
 //
 // What this test CANNOT prove: that the request/response *schemas* in the
 // YAML match the Go structs in internal/model, that examples are
 // well-formed against those schemas, or that status codes/headers are
 // semantically correct. None of that is checked here -- it would need a
 // real OpenAPI validator and a JSON-schema-to-Go-struct comparison, neither
-// of which this repo depends on (go.mod carries no YAML or OpenAPI
-// library, and this test deliberately does not add one).
+// of which this repo depends on.
 //
 // The failure this test exists to catch is the one that actually happens:
 // someone adds `mux.HandleFunc("/v1/new-thing", ...)` in internal/api or
 // internal/admin and forgets docs/api/openapi.yaml entirely. A missing or
 // extra path, or an operation with no security block, fails the build.
 //
-// Because there is no YAML library available (see go.mod) and one must not
-// be added, this test does not do a general-purpose YAML parse. Instead it
-// exploits the fact that this file is hand-authored with one fixed
-// indentation convention -- 2 spaces for a path key, 4 for a method key
-// inside it, 6 for a `security:` key inside that -- and scans line by line
-// for exactly those shapes within the `paths:` block. That is brittle
-// against a reformatted file, which is an acceptable trade for adding zero
-// dependencies; if the YAML is ever reformatted, this test (and its
-// indentation assumptions) must be updated alongside it.
+// This parses the file with gopkg.in/yaml.v3 rather than scanning lines by
+// indentation, so it survives reformatting -- the earlier hand-rolled
+// scanner broke on anything but one fixed indentation convention.
 package docs_test
 
 import (
-	"bufio"
 	"os"
-	"regexp"
 	"sort"
-	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const openAPIPath = "openapi.yaml"
 
-var (
-	pathLineRE     = regexp.MustCompile(`^  (/\S+):$`)
-	methodLineRE   = regexp.MustCompile(`^    (get|post|put|delete|patch|head):$`)
-	securityLineRE = regexp.MustCompile(`^      security:(.*)$`)
-)
+// httpMethods are the path-item keys that name an operation, as opposed to
+// a sibling key like `servers` or `parameters` on the same path item.
+var httpMethods = map[string]bool{
+	"get": true, "post": true, "put": true,
+	"delete": true, "patch": true, "head": true,
+}
 
 // operation is one documented (path, method) pair.
 type operation struct {
@@ -62,13 +55,27 @@ type parsed struct {
 	paths      map[string]bool
 	operations map[operation]bool
 	// securityDeclared[op] is true when the operation has a non-empty
-	// security requirement (a bare "security:" followed by a scheme list).
-	// It is explicitly false for a "security: []" line, which is how
-	// /healthz opts out.
+	// security requirement (a `security:` key followed by a scheme list).
+	// It is explicitly false for `security: []`, which is how /healthz
+	// opts out.
 	securityDeclared map[operation]bool
 	// sawSecurityLine records that a security key existed at all, so a
 	// missing key (as opposed to an explicit empty one) can be told apart.
 	sawSecurityLine map[operation]bool
+}
+
+// openAPIDoc is the minimal top-level shape this test needs. Path items are
+// decoded as raw yaml.Node so this test can pick out method keys itself
+// without a full OpenAPI operation schema.
+type openAPIDoc struct {
+	Paths map[string]yaml.Node `yaml:"paths"`
+}
+
+// operationSecurity is the one field of an operation this test cares about.
+// A nil Security means the key was absent; a non-nil empty slice means an
+// explicit `security: []`.
+type operationSecurity struct {
+	Security *[]map[string]any `yaml:"security"`
 }
 
 // scanPaths reads the file at path and extracts the structure of its
@@ -77,35 +84,16 @@ type parsed struct {
 func scanPaths(t *testing.T, path string) parsed {
 	t.Helper()
 
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	defer f.Close()
-
-	var lines []string
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan %s: %v", path, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 
-	pathsStart := -1
-	pathsEnd := len(lines)
-	for i, l := range lines {
-		if l == "paths:" {
-			pathsStart = i + 1
-			continue
-		}
-		if pathsStart != -1 && l == "components:" {
-			pathsEnd = i
-			break
-		}
+	var doc openAPIDoc
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
-	if pathsStart == -1 {
+	if doc.Paths == nil {
 		t.Fatalf("%s: no top-level 'paths:' key found", path)
 	}
 
@@ -116,30 +104,28 @@ func scanPaths(t *testing.T, path string) parsed {
 		sawSecurityLine:  map[operation]bool{},
 	}
 
-	var currentPath, currentMethod string
-	for _, l := range lines[pathsStart:pathsEnd] {
-		if m := pathLineRE.FindStringSubmatch(l); m != nil {
-			currentPath = m[1]
-			currentMethod = ""
-			out.paths[currentPath] = true
-			continue
+	for p, pathNode := range doc.Paths {
+		out.paths[p] = true
+
+		if pathNode.Kind != yaml.MappingNode {
+			t.Fatalf("%s: path %q is not a mapping", path, p)
 		}
-		if m := methodLineRE.FindStringSubmatch(l); m != nil {
-			if currentPath == "" {
-				t.Fatalf("%s: method %q found before any path key", path, m[1])
+		for i := 0; i+1 < len(pathNode.Content); i += 2 {
+			method := pathNode.Content[i].Value
+			if !httpMethods[method] {
+				continue // a sibling key like `servers`, not an operation
 			}
-			currentMethod = m[1]
-			out.operations[operation{currentPath, currentMethod}] = true
-			continue
-		}
-		if m := securityLineRE.FindStringSubmatch(l); m != nil {
-			if currentPath == "" || currentMethod == "" {
-				continue // a stray "security:" outside any operation, ignore
+			op := operation{p, method}
+			out.operations[op] = true
+
+			var sec operationSecurity
+			if err := pathNode.Content[i+1].Decode(&sec); err != nil {
+				t.Fatalf("%s: %s %s: decode operation: %v", path, method, p, err)
 			}
-			op := operation{currentPath, currentMethod}
-			out.sawSecurityLine[op] = true
-			rest := strings.TrimSpace(m[1])
-			out.securityDeclared[op] = rest != "[]"
+			if sec.Security != nil {
+				out.sawSecurityLine[op] = true
+				out.securityDeclared[op] = len(*sec.Security) > 0
+			}
 		}
 	}
 
