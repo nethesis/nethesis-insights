@@ -21,7 +21,7 @@ import (
 func (s *SQLiteStore) ListBlocklistEntries(ctx context.Context, limit int) ([]BlocklistRow, error) {
 	return s.queryBlocklist(ctx, `
 		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
-		       distinct_systems, categories, listing_reason
+		       distinct_systems, scenarios, listing_reason
 		FROM threat_blocklist
 		ORDER BY last_seen_at DESC, attacker_ip
 		LIMIT ?
@@ -32,7 +32,7 @@ func (s *SQLiteStore) ListBlocklistEntries(ctx context.Context, limit int) ([]Bl
 // system and by attacker address -- the "who reported this IP" question.
 func (s *SQLiteStore) ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, system_id, attacker_ip, category, observed_at, hit_count, metadata
+		SELECT id, system_id, attacker_ip, scenario, observed_at, hit_count, metadata
 		FROM threat_events
 		WHERE (? = '' OR system_id = ?)
 		  AND (? = '' OR attacker_ip = ?)
@@ -50,7 +50,7 @@ func (s *SQLiteStore) ListThreatEvents(ctx context.Context, systemID, attackerIP
 			r        ThreatEventRow
 			metadata sql.NullString
 		)
-		if err := rows.Scan(&r.ID, &r.SystemID, &r.AttackerIP, &r.Category,
+		if err := rows.Scan(&r.ID, &r.SystemID, &r.AttackerIP, &r.Scenario,
 			&r.ObservedAt, &r.HitCount, &metadata); err != nil {
 			return nil, fmt.Errorf("store: scan threat event: %w", err)
 		}
@@ -62,12 +62,12 @@ func (s *SQLiteStore) ListThreatEvents(ctx context.Context, systemID, attackerIP
 	return result, rows.Err()
 }
 
-// ThreatDailyStats returns the day/category rollup, newest day first.
+// ThreatDailyStats returns the day/scenario rollup, newest day first.
 func (s *SQLiteStore) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT day, category, distinct_ips, total_hits
+		SELECT day, scenario, distinct_ips, total_hits
 		FROM threat_daily_stats
-		ORDER BY day DESC, category
+		ORDER BY day DESC, scenario
 		LIMIT ?
 	`, clampLimit(limit))
 	if err != nil {
@@ -78,7 +78,7 @@ func (s *SQLiteStore) ThreatDailyStats(ctx context.Context, limit int) ([]Threat
 	result := []ThreatDailyRow{}
 	for rows.Next() {
 		var r ThreatDailyRow
-		if err := rows.Scan(&r.Day, &r.Category, &r.DistinctIPs, &r.TotalHits); err != nil {
+		if err := rows.Scan(&r.Day, &r.Scenario, &r.DistinctIPs, &r.TotalHits); err != nil {
 			return nil, fmt.Errorf("store: scan threat daily stats: %w", err)
 		}
 		result = append(result, r)
@@ -92,7 +92,7 @@ func (s *SQLiteStore) ThreatIngestStats(ctx context.Context, limit int) ([]Threa
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT day, system_id, accepted, duplicates,
 		       dropped_type, dropped_scope, dropped_origin, dropped_bad_ip,
-		       dropped_private_ip, dropped_scenario, dropped_time, truncated
+		       dropped_private_ip, dropped_time, truncated
 		FROM threat_ingest_daily
 		ORDER BY day DESC, system_id
 		LIMIT ?
@@ -107,33 +107,8 @@ func (s *SQLiteStore) ThreatIngestStats(ctx context.Context, limit int) ([]Threa
 		var r ThreatIngestRow
 		if err := rows.Scan(&r.Day, &r.SystemID, &r.Accepted, &r.Duplicates,
 			&r.DroppedType, &r.DroppedScope, &r.DroppedOrigin, &r.DroppedBadIP,
-			&r.DroppedPrivateIP, &r.DroppedScenario, &r.DroppedTime, &r.Truncated); err != nil {
+			&r.DroppedPrivateIP, &r.DroppedTime, &r.Truncated); err != nil {
 			return nil, fmt.Errorf("store: scan threat ingest stats: %w", err)
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-// UnknownScenarios returns the unmapped scenarios most-seen first: the
-// worklist for the next release's category map.
-func (s *SQLiteStore) UnknownScenarios(ctx context.Context, limit int) ([]UnknownScenarioRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT scenario, count, first_seen, last_seen
-		FROM threat_unknown_scenarios
-		ORDER BY count DESC, scenario
-		LIMIT ?
-	`, clampLimit(limit))
-	if err != nil {
-		return nil, fmt.Errorf("store: unknown scenarios: %w", err)
-	}
-	defer rows.Close()
-
-	result := []UnknownScenarioRow{}
-	for rows.Next() {
-		var r UnknownScenarioRow
-		if err := rows.Scan(&r.Scenario, &r.Count, &r.FirstSeen, &r.LastSeen); err != nil {
-			return nil, fmt.Errorf("store: scan unknown scenario: %w", err)
 		}
 		result = append(result, r)
 	}

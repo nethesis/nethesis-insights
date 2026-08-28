@@ -83,7 +83,6 @@ type Store interface {
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)
 	RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error
 	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
-	RecordUnknownScenarios(ctx context.Context, scenarios map[string]int, now int64) error
 	ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error)
 	ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error)
 	UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error
@@ -100,7 +99,6 @@ type Store interface {
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error)
 	ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
-	UnknownScenarios(ctx context.Context, limit int) ([]UnknownScenarioRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
 	ListSystemEgress(ctx context.Context) ([]EgressRow, error)
 }
@@ -206,7 +204,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			system_id TEXT,
 			attacker_ip TEXT,
-			category TEXT,
+			scenario TEXT,
 			observed_at INTEGER,
 			hit_count INTEGER,
 			metadata TEXT
@@ -214,7 +212,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		// Redelivery idempotency: a reporter that retries a batch must not be
 		// able to inflate hit_count and manufacture its own consensus.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_events_dedup
-			ON threat_events(system_id, attacker_ip, category, observed_at)`,
+			ON threat_events(system_id, attacker_ip, scenario, observed_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_threat_events_ip ON threat_events(attacker_ip, observed_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_threat_events_observed ON threat_events(observed_at)`,
 		`CREATE TABLE IF NOT EXISTS threat_blocklist (
@@ -223,7 +221,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			last_seen_at INTEGER,
 			expires_at INTEGER,
 			distinct_systems INTEGER,
-			categories TEXT,
+			scenarios TEXT,
 			listing_reason TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_threat_blocklist_expires ON threat_blocklist(expires_at)`,
@@ -238,10 +236,10 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		// asset survives the retention window at a few rows per day.
 		`CREATE TABLE IF NOT EXISTS threat_daily_stats (
 			day TEXT,
-			category TEXT,
+			scenario TEXT,
 			distinct_ips INTEGER,
 			total_hits INTEGER,
-			PRIMARY KEY (day, category)
+			PRIMARY KEY (day, scenario)
 		)`,
 		// Fleet self-protection: the union of observed reporter source
 		// addresses is an automatic promotion exclusion, so one customer's
@@ -264,19 +262,9 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			dropped_origin INTEGER,
 			dropped_bad_ip INTEGER,
 			dropped_private_ip INTEGER,
-			dropped_scenario INTEGER,
 			dropped_time INTEGER,
 			truncated INTEGER,
 			PRIMARY KEY (day, system_id)
-		)`,
-		// The worklist for the next release's category map: an unknown
-		// scenario is dropped by design, and this is how an operator finds out
-		// which one to add.
-		`CREATE TABLE IF NOT EXISTS threat_unknown_scenarios (
-			scenario TEXT PRIMARY KEY,
-			count INTEGER,
-			first_seen INTEGER,
-			last_seen INTEGER
 		)`,
 	}
 

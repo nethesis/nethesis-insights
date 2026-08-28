@@ -59,7 +59,7 @@ reason.
 ```
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
-threat                      PURE — the Threat Shield sanitizer and category map
+threat                      PURE — the Threat Shield sanitizer and allowlist
 llm  store                  interfaces, each with a real and a stub impl
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
@@ -82,7 +82,7 @@ and `ui` does not import `api` or `analyzer`.
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties gate, fingerprint, prompt, llm and store together for one bundle. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. |
 | `internal/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. |
-| `internal/threat` | Threat Shield's pure half: `CategoryFor` (the scenario→category map), `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). |
+| `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
 | `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `/healthz`. |
 | `internal/ui` | Optional, read-only, zero-JavaScript operator dashboard on its own listener. |
@@ -181,7 +181,7 @@ client's timeout.
    dropping and counting anything that fails a rule. The reporter's own source
    address is passed in and excluded.
 4. `RecordSystemEgress` remembers the peer address, `InsertThreatEvents` stores
-   the batch, and the per-day counters and unmapped scenarios are recorded.
+   the batch, and the per-day ingest counters are recorded.
 5. `202` with `stored`, `duplicates` and the full drop accounting.
 
 **Fail-closed on authentication, fail-open on content.** Only a store failure
@@ -203,8 +203,8 @@ answering `503` while the database is full of live entries. The order is
 load-bearing:
 
 1. `ConsensusCandidates(now - BLOCKLIST_WINDOW)` returns
-   `(attacker_ip, category, system_id)` triples.
-2. Go folds them per address into a distinct-system set, a category set, a hit
+   `(attacker_ip, scenario, system_id)` triples.
+2. Go folds them per address into a distinct-system set, a scenario set, a hit
    sum and the latest sighting.
 3. Allowlisted and fleet-egress addresses are dropped — **at promotion, not at
    read**, so adding to either unlists an address rather than hiding it.
@@ -259,13 +259,12 @@ without a goroutine to leak.
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens, cost, duration, error. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. |
-| `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, category, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
+| `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. No HTTP surface — this server has no admin auth plane. |
-| `threat_daily_stats` | Per day and category rollup, written before the prune so the trend outlives the raw events. |
+| `threat_daily_stats` | Per day and scenario rollup, written before the prune so the trend outlives the raw events. |
 | `system_egress` | The address each reporter was last seen from: the fleet self-protection exclusion set. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
-| `threat_unknown_scenarios` | Scenarios the category map does not know, by count: the worklist for the next release. |
 
 `attacker_ip` is stored as a normalized `netip.Addr.String()`, so text equality
 is address identity — that is what lets a portable `TEXT` column stand in for
@@ -302,6 +301,31 @@ precise about, since the name invites confusion:
 - **`ewma_rate` (the baseline itself) is not bounded to `[0, 1]`.** It is in
   the same units as `observed` — a line count for one window — so it can
   legitimately be 0, or in the thousands, depending on the module.
+
+### Scenarios are not interpreted
+
+`threat_events.scenario` holds the CrowdSec scenario name verbatim, and there
+is no fixed category set behind it.
+
+An earlier revision mapped scenarios onto four categories (`ssh_bruteforce`,
+`http_exploit`, `port_scan`, `sip_probe`) and dropped anything unmapped, per
+the design's D3. That was removed. CrowdSec's hub grows continuously, nodes run
+third-party collections (`LePresidente/http-generic-401-bf` is a real example
+from a live NS8 node) and operators write local rules, so a fixed allowlist
+silently discards real evidence until somebody notices and ships a release —
+and "silently discards evidence" is the failure this pipeline exists to avoid.
+
+Consequences worth knowing:
+
+- The scenario is free text from the edge. It is trimmed, stripped of control
+  characters and capped at `threat.MaxScenarioLen` before storage, because it
+  reaches an HTML page and a log line. It is never judged on content.
+- It is part of the `threat_events` unique key and of the consensus grouping,
+  so two nodes reporting one address under different scenarios are still two
+  distinct systems — promotion counts systems, never scenario agreement.
+- `threat_blocklist.scenarios` and the daily rollup therefore carry whatever
+  the fleet actually reported, which is more useful than four buckets and is
+  what makes the rollup a real threat-trend asset.
 
 ## Finding identity: the fingerprint
 

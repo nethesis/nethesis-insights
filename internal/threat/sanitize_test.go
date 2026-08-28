@@ -6,6 +6,7 @@ package threat
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,8 +50,8 @@ func TestSanitizeAcceptsAGoodDecision(t *testing.T) {
 	if ev.AttackerIP != "203.0.113.7" {
 		t.Fatalf("attacker_ip: got %q", ev.AttackerIP)
 	}
-	if ev.Category != "ssh_bruteforce" {
-		t.Fatalf("category: got %q", ev.Category)
+	if ev.Scenario != "crowdsecurity/ssh-bf" {
+		t.Fatalf("scenario: got %q", ev.Scenario)
 	}
 	if ev.ObservedAt != testObservedAt {
 		t.Fatalf("observed_at: got %d, want %d", ev.ObservedAt, testObservedAt)
@@ -64,16 +65,13 @@ func TestSanitizeAcceptsAGoodDecision(t *testing.T) {
 }
 
 // The metadata allowlist is fixed and typed. Nothing free-text may reach the
-// store: no usernames, no URIs, no user agents.
+// store beyond the scenario itself: no usernames, no URIs, no user agents.
 func TestSanitizeMetadataIsAFixedTypedAllowlist(t *testing.T) {
 	res := Sanitize(report(goodDecision()), Options{}, testNow)
 	md := res.Events[0].Metadata
 
-	if len(md) != 2 {
-		t.Fatalf("metadata keys: got %v, want exactly scenario and duration_seconds", md)
-	}
-	if md["scenario"] != "crowdsecurity/ssh-bf" {
-		t.Fatalf("metadata scenario: got %v", md["scenario"])
+	if len(md) != 1 {
+		t.Fatalf("metadata keys: got %v, want exactly duration_seconds", md)
 	}
 	if md["duration_seconds"] != int64(14399) {
 		t.Fatalf("metadata duration_seconds: got %v (%T), want int64(14399)", md["duration_seconds"], md["duration_seconds"])
@@ -81,7 +79,7 @@ func TestSanitizeMetadataIsAFixedTypedAllowlist(t *testing.T) {
 }
 
 // An unparseable duration must not lose the whole event: the duration is
-// decoration, the address and the category are the evidence.
+// decoration, the address and the scenario are the evidence.
 func TestSanitizeKeepsTheEventWhenDurationIsUnparseable(t *testing.T) {
 	d := goodDecision()
 	d.Duration = "not-a-duration"
@@ -247,23 +245,65 @@ func TestSanitizeAcceptsOnlyBanDecisionsOnIPScope(t *testing.T) {
 	})
 }
 
-func TestSanitizeRecordsUnknownScenariosByName(t *testing.T) {
-	d1, d2, d3 := goodDecision(), goodDecision(), goodDecision()
-	d1.Scenario = "crowdsecurity/brand-new"
-	d2.Scenario = "crowdsecurity/brand-new"
-	d3.Scenario = "local/custom"
+// There is no scenario allowlist and there must never be one. CrowdSec's hub
+// grows continuously and nodes run third-party and local collections, so any
+// fixed set would silently discard real evidence until someone noticed.
+func TestSanitizeAcceptsEveryScenario(t *testing.T) {
+	scenarios := []string{
+		"crowdsecurity/ssh-bf",
+		"LePresidente/http-generic-401-bf",
+		"local/hand-written-rule",
+		"manual 'ban' from 'rl1'",
+		"",
+	}
+	for _, scenario := range scenarios {
+		d := goodDecision()
+		d.Scenario = scenario
+		d.Value = "203.0.113.7"
 
-	res := Sanitize(report(d1, d2, d3), Options{}, testNow)
+		res := Sanitize(report(d), Options{}, testNow)
 
-	if len(res.Events) != 0 {
-		t.Fatalf("events: got %d, want 0", len(res.Events))
+		if len(res.Events) != 1 {
+			t.Fatalf("scenario %q was dropped: %+v", scenario, res.Counters)
+		}
+		if res.Events[0].Scenario != scenario {
+			t.Fatalf("scenario %q was rewritten to %q", scenario, res.Events[0].Scenario)
+		}
 	}
-	if res.Counters.DroppedScenario != 3 {
-		t.Fatalf("dropped_scenario: got %d, want 3", res.Counters.DroppedScenario)
-	}
-	if res.Unknown["crowdsecurity/brand-new"] != 2 || res.Unknown["local/custom"] != 1 {
-		t.Fatalf("unknown scenarios: got %v", res.Unknown)
-	}
+}
+
+// The scenario is free text from the edge and reaches a rendered page and a
+// log line, so it is bounded and stripped of control characters -- but never
+// judged on content.
+func TestSanitizeBoundsAndDefangsTheScenario(t *testing.T) {
+	t.Run("control characters stripped", func(t *testing.T) {
+		d := goodDecision()
+		d.Scenario = "crowdsec\x00urity/ssh\nbf\r"
+		res := Sanitize(report(d), Options{}, testNow)
+		got := res.Events[0].Scenario
+		if strings.ContainsAny(got, "\x00\n\r") {
+			t.Fatalf("control characters survived: %q", got)
+		}
+	})
+
+	t.Run("length capped by rune", func(t *testing.T) {
+		d := goodDecision()
+		d.Scenario = strings.Repeat("\u00e9", MaxScenarioLen+50)
+		res := Sanitize(report(d), Options{}, testNow)
+		got := []rune(res.Events[0].Scenario)
+		if len(got) != MaxScenarioLen {
+			t.Fatalf("scenario length: got %d runes, want %d", len(got), MaxScenarioLen)
+		}
+	})
+
+	t.Run("surrounding whitespace trimmed", func(t *testing.T) {
+		d := goodDecision()
+		d.Scenario = "  crowdsecurity/ssh-bf  "
+		res := Sanitize(report(d), Options{}, testNow)
+		if got := res.Events[0].Scenario; got != "crowdsecurity/ssh-bf" {
+			t.Fatalf("scenario: got %q", got)
+		}
+	})
 }
 
 func TestSanitizeDropsUnparseableTimestamps(t *testing.T) {
@@ -307,7 +347,7 @@ func TestSanitizeKeepsSmallClockSkew(t *testing.T) {
 }
 
 // CrowdSec fires one decision per alert, so a node under sustained brute
-// force reports the same (ip, category, second) repeatedly. Folding them here
+// force reports the same (ip, scenario, second) repeatedly. Folding them here
 // means the store's unique index is never fought at insert time.
 func TestSanitizeCollapsesDuplicatesWithinOneBatch(t *testing.T) {
 	res := Sanitize(report(goodDecision(), goodDecision(), goodDecision()), Options{}, testNow)
@@ -399,9 +439,13 @@ func TestSanitizeOutputIsSorted(t *testing.T) {
 
 	var got []string
 	for _, ev := range res.Events {
-		got = append(got, ev.AttackerIP+"/"+ev.Category)
+		got = append(got, ev.AttackerIP+"/"+ev.Scenario)
 	}
-	want := []string{"203.0.113.1/port_scan", "203.0.113.1/ssh_bruteforce", "203.0.113.9/ssh_bruteforce"}
+	want := []string{
+		"203.0.113.1/crowdsecurity/port-scan",
+		"203.0.113.1/crowdsecurity/ssh-bf",
+		"203.0.113.9/crowdsecurity/ssh-bf",
+	}
 	if len(got) != len(want) {
 		t.Fatalf("events: got %v, want %v", got, want)
 	}

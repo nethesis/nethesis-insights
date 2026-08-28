@@ -11,13 +11,13 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-func threatEvent(ip, category string, observedAt int64, hits int64) model.ThreatEvent {
+func threatEvent(ip, scenario string, observedAt int64, hits int64) model.ThreatEvent {
 	return model.ThreatEvent{
 		AttackerIP: ip,
-		Category:   category,
+		Scenario:   scenario,
 		ObservedAt: observedAt,
 		HitCount:   hits,
-		Metadata:   map[string]any{"scenario": "crowdsecurity/ssh-bf"},
+		Metadata:   map[string]any{"duration_seconds": float64(14400)},
 	}
 }
 
@@ -52,9 +52,6 @@ func TestThreatMethodsOnEmptyDatabase(t *testing.T) {
 	}
 	if rows, err := s.ThreatIngestStats(ctx, 0); err != nil || len(rows) != 0 {
 		t.Fatalf("ThreatIngestStats: %v, %d rows", err, len(rows))
-	}
-	if rows, err := s.UnknownScenarios(ctx, 0); err != nil || len(rows) != 0 {
-		t.Fatalf("UnknownScenarios: %v, %d rows", err, len(rows))
 	}
 	if rows, err := s.ListThreatAllowlist(ctx); err != nil || len(rows) != 0 {
 		t.Fatalf("ListThreatAllowlist: %v, %d rows", err, len(rows))
@@ -104,7 +101,7 @@ func TestInsertThreatEventsIsIdempotent(t *testing.T) {
 		if r.AttackerIP == "203.0.113.7" && r.HitCount != 3 {
 			t.Fatalf("hit_count was inflated by redelivery: got %d, want 3", r.HitCount)
 		}
-		if r.Metadata["scenario"] != "crowdsecurity/ssh-bf" {
+		if r.Metadata["duration_seconds"] != float64(14400) {
 			t.Fatalf("metadata round trip: got %v", r.Metadata)
 		}
 	}
@@ -162,9 +159,9 @@ func TestListThreatEventsFilters(t *testing.T) {
 	}
 }
 
-// Candidates come back as (ip, category, system) triples so that Go can count
+// Candidates come back as (ip, scenario, system) triples so that Go can count
 // distinct systems per IP without double counting a system that reported the
-// same address under two categories.
+// same address under two scenarios.
 func TestConsensusCandidatesGroupsToTheSystem(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -182,10 +179,10 @@ func TestConsensusCandidatesGroupsToTheSystem(t *testing.T) {
 		t.Fatalf("ConsensusCandidates: %v", err)
 	}
 	if len(rows) != 3 {
-		t.Fatalf("rows: got %d, want 3 (two categories for sys-a, one for sys-b)", len(rows))
+		t.Fatalf("rows: got %d, want 3 (two scenarios for sys-a, one for sys-b)", len(rows))
 	}
 	for _, r := range rows {
-		if r.SystemID == "sys-a" && r.Category == "ssh_bruteforce" {
+		if r.SystemID == "sys-a" && r.Scenario == "ssh_bruteforce" {
 			if r.Hits != 5 {
 				t.Fatalf("sys-a ssh hits: got %d, want 5", r.Hits)
 			}
@@ -218,7 +215,7 @@ func TestUpsertBlocklistEntriesPreservesFirstListedAt(t *testing.T) {
 
 	first := BlocklistRow{
 		AttackerIP: "203.0.113.7", FirstListedAt: 1000, LastSeenAt: 1000, ExpiresAt: 5000,
-		DistinctSystems: 3, Categories: []string{"ssh_bruteforce"},
+		DistinctSystems: 3, Scenarios: []string{"ssh_bruteforce"},
 		Reason: ListingReason{Systems: 3, Hits: 12, Rule: "v1"},
 	}
 	if err := s.UpsertBlocklistEntries(ctx, []BlocklistRow{first}); err != nil {
@@ -230,7 +227,7 @@ func TestUpsertBlocklistEntriesPreservesFirstListedAt(t *testing.T) {
 	refresh.LastSeenAt = 4000
 	refresh.ExpiresAt = 8000
 	refresh.DistinctSystems = 5
-	refresh.Categories = []string{"port_scan", "ssh_bruteforce"}
+	refresh.Scenarios = []string{"port_scan", "ssh_bruteforce"}
 	if err := s.UpsertBlocklistEntries(ctx, []BlocklistRow{refresh}); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -249,8 +246,8 @@ func TestUpsertBlocklistEntriesPreservesFirstListedAt(t *testing.T) {
 	if got.LastSeenAt != 4000 || got.ExpiresAt != 8000 || got.DistinctSystems != 5 {
 		t.Fatalf("refresh did not apply: %+v", got)
 	}
-	if len(got.Categories) != 2 {
-		t.Fatalf("categories: got %v, want 2", got.Categories)
+	if len(got.Scenarios) != 2 {
+		t.Fatalf("scenarios: got %v, want 2", got.Scenarios)
 	}
 	if got.Reason.Rule != "v1" || got.Reason.Hits != 12 {
 		t.Fatalf("listing reason round trip: %+v", got.Reason)
@@ -377,36 +374,6 @@ func TestRecordIngestCountersAccumulates(t *testing.T) {
 	}
 }
 
-func TestRecordUnknownScenariosAccumulates(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.RecordUnknownScenarios(ctx, map[string]int{"a/one": 2, "b/two": 1}, 1000); err != nil {
-		t.Fatalf("first: %v", err)
-	}
-	if err := s.RecordUnknownScenarios(ctx, map[string]int{"a/one": 3}, 2000); err != nil {
-		t.Fatalf("second: %v", err)
-	}
-	if err := s.RecordUnknownScenarios(ctx, nil, 3000); err != nil {
-		t.Fatalf("empty map: %v", err)
-	}
-
-	rows, err := s.UnknownScenarios(ctx, 0)
-	if err != nil {
-		t.Fatalf("UnknownScenarios: %v", err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("rows: got %d, want 2", len(rows))
-	}
-	// Most-seen first: this is a worklist, not a log.
-	if rows[0].Scenario != "a/one" || rows[0].Count != 5 {
-		t.Fatalf("top scenario: got %+v", rows[0])
-	}
-	if rows[0].FirstSeen != 1000 || rows[0].LastSeen != 2000 {
-		t.Fatalf("first/last seen: got %d/%d, want 1000/2000", rows[0].FirstSeen, rows[0].LastSeen)
-	}
-}
-
 // The rollup is what turns a blocklist into fleet threat-trend data, and it
 // only works if it runs before the prune.
 func TestRollupSurvivesThePrune(t *testing.T) {
@@ -446,7 +413,7 @@ func TestRollupSurvivesThePrune(t *testing.T) {
 	}
 	var found bool
 	for _, r := range stats {
-		if r.Day == "2026-08-20" && r.Category == "ssh_bruteforce" {
+		if r.Day == "2026-08-20" && r.Scenario == "ssh_bruteforce" {
 			found = true
 			if r.DistinctIPs != 2 || r.TotalHits != 10 {
 				t.Fatalf("2026-08-20 rollup: got %+v, want 2 ips / 10 hits", r)

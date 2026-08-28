@@ -23,6 +23,19 @@ promotion, and the authenticated blocklist feed. It carries the design's *rules*
 dark launch, never-serve-blank) and re-expresses its *mechanics* in this codebase's
 constraints.
 
+**Superseded during implementation (2026-08-28).** Design decision D3 — the
+fixed v1 category set (`port_scan`, `ssh_bruteforce`, `http_exploit`,
+`sip_probe`) with a scenario→category map and unmapped scenarios dropped — was
+removed. The server accepts every CrowdSec scenario verbatim and stores it in
+place of a category. The first real payload from a live NS8 node carried
+`LePresidente/http-generic-401-bf`, which the map did not know and would have
+discarded: CrowdSec's hub grows continuously and nodes run third-party and
+local collections, so any allowlist silently loses evidence until somebody
+notices. Promotion counts distinct systems and never scenario agreement, so
+nothing about the consensus rule depends on the categories existing.
+`threat_unknown_scenarios` went with them. See `docs/architecture.md`
+§ "Scenarios are not interpreted".
+
 Decisions taken with the user:
 
 - Scope: ingest + consensus + feed. No allowlist/participation admin API — this repo

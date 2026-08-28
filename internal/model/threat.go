@@ -36,13 +36,19 @@ type ThreatReport struct {
 	Decisions     []Decision `json:"decisions"`
 }
 
-// ThreatEvent is the sanitized internal form: a public attacker address, a
-// category from the fixed v1 set, and metadata reduced to a typed allowlist.
+// ThreatEvent is the sanitized internal form: a public attacker address, the
+// CrowdSec scenario that banned it, and metadata reduced to a typed allowlist.
 // AttackerIP is always a normalized netip.Addr.String(), so text equality is
 // identity -- that is what lets a portable TEXT column behave like INET.
+//
+// Scenario is carried through verbatim. The server does not interpret it, does
+// not map it onto a fixed category set, and does not reject one it has not
+// seen before: CrowdSec's hub grows continuously and nodes run third-party and
+// local collections, so any allowlist here would silently discard real
+// evidence until someone noticed and shipped a release.
 type ThreatEvent struct {
 	AttackerIP string         `json:"attacker_ip"`
-	Category   string         `json:"category"`
+	Scenario   string         `json:"scenario"`
 	ObservedAt int64          `json:"observed_at"`
 	HitCount   int64          `json:"hit_count"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
@@ -60,21 +66,6 @@ type ThreatCounters struct {
 	DroppedOrigin    int `json:"dropped_origin"`
 	DroppedBadIP     int `json:"dropped_bad_ip"`
 	DroppedPrivateIP int `json:"dropped_private_ip"`
-	DroppedScenario  int `json:"dropped_scenario"`
 	DroppedTime      int `json:"dropped_time"`
 	Truncated        int `json:"truncated"`
-}
-
-// ThreatCategories is the v1 category set (design D3). It is deliberately
-// fixed: an unknown scenario is dropped and counted rather than folded into a
-// catch-all, because a catch-all category is evidence of nothing.
-var ThreatCategories = []string{"port_scan", "ssh_bruteforce", "http_exploit", "sip_probe"}
-
-func ValidThreatCategory(c string) bool {
-	for _, known := range ThreatCategories {
-		if known == c {
-			return true
-		}
-	}
-	return false
 }

@@ -49,11 +49,11 @@ func newTestStore(t *testing.T) *store.SQLiteStore {
 }
 
 // report stores one sighting of ip by systemID, observedAt millis before now.
-func report(t *testing.T, s *store.SQLiteStore, systemID, ip, category string, ago int64) {
+func report(t *testing.T, s *store.SQLiteStore, systemID, ip, scenario string, ago int64) {
 	t.Helper()
 	_, _, err := s.InsertThreatEvents(context.Background(), systemID, []model.ThreatEvent{{
 		AttackerIP: ip,
-		Category:   category,
+		Scenario:   scenario,
 		ObservedAt: now - ago,
 		HitCount:   1,
 	}})
@@ -118,10 +118,10 @@ func TestOneSystemReportingRepeatedlyDoesNotPromote(t *testing.T) {
 	}
 }
 
-// A system reporting the same address under two categories is still one
+// A system reporting the same address under two scenarios is still one
 // system -- the reason candidates are grouped down to system_id rather than
-// counted per category.
-func TestOneSystemAcrossTwoCategoriesIsStillOneSystem(t *testing.T) {
+// counted per scenario.
+func TestOneSystemAcrossTwoScenariosIsStillOneSystem(t *testing.T) {
 	s := newTestStore(t)
 	report(t, s, "sys-a", "203.0.113.7", "ssh_bruteforce", 5*minute)
 	report(t, s, "sys-a", "203.0.113.7", "port_scan", 4*minute)
@@ -130,7 +130,7 @@ func TestOneSystemAcrossTwoCategoriesIsStillOneSystem(t *testing.T) {
 	runPass(t, s, Config{Window: time.Hour, MinSystems: 3, TTL: 24 * time.Hour, MaxEntries: 100})
 
 	if got := listed(t, s); len(got) != 0 {
-		t.Fatalf("got %v, want nothing: two systems cannot become three by category", got)
+		t.Fatalf("got %v, want nothing: two systems cannot become three by scenario", got)
 	}
 }
 
@@ -163,8 +163,8 @@ func TestPromotedEntryCarriesItsEvidence(t *testing.T) {
 	if got.DistinctSystems != 3 {
 		t.Fatalf("distinct_systems: got %d, want 3", got.DistinctSystems)
 	}
-	if len(got.Categories) != 2 {
-		t.Fatalf("categories: got %v, want both", got.Categories)
+	if len(got.Scenarios) != 2 {
+		t.Fatalf("scenarios: got %v, want both", got.Scenarios)
 	}
 	if got.Reason.Systems != 3 || got.Reason.Hits != 3 || got.Reason.Rule != "v1" {
 		t.Fatalf("listing reason: %+v", got.Reason)
@@ -197,7 +197,7 @@ func TestRefreshExtendsTTLButKeepsFirstListedAt(t *testing.T) {
 	later := now + 10*minute
 	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
 		_, _, err := s.InsertThreatEvents(context.Background(), sys, []model.ThreatEvent{{
-			AttackerIP: "203.0.113.7", Category: "ssh_bruteforce", ObservedAt: later, HitCount: 1,
+			AttackerIP: "203.0.113.7", Scenario: "ssh_bruteforce", ObservedAt: later, HitCount: 1,
 		}})
 		if err != nil {
 			t.Fatalf("second round insert: %v", err)
@@ -327,7 +327,7 @@ func TestRunRollsUpStatsAndPrunes(t *testing.T) {
 	// drop it.
 	old := now - 200*hour
 	if _, _, err := s.InsertThreatEvents(ctx, "sys-a", []model.ThreatEvent{{
-		AttackerIP: "203.0.113.50", Category: "port_scan", ObservedAt: old, HitCount: 7,
+		AttackerIP: "203.0.113.50", Scenario: "port_scan", ObservedAt: old, HitCount: 7,
 	}}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

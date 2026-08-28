@@ -20,24 +20,24 @@ import (
 
 // ThreatEventRow is one stored threat_events row.
 type ThreatEventRow struct {
-	ID, SystemID, AttackerIP, Category string
+	ID, SystemID, AttackerIP, Scenario string
 	ObservedAt                         int64
 	HitCount                           int64
 	Metadata                           map[string]any
 }
 
-// ThreatCandidateRow is one (attacker_ip, category, system_id) group inside
+// ThreatCandidateRow is one (attacker_ip, scenario, system_id) group inside
 // the consensus window.
 //
 // The grouping goes all the way down to system_id deliberately. The obvious
-// query -- COUNT(DISTINCT system_id) per (ip, category) -- cannot answer
-// "how many distinct systems reported this IP at all", because per-category
-// counts do not sum: one system reporting an IP under two categories would
-// count twice. Aggregating the category list in SQL instead would need
+// query -- COUNT(DISTINCT system_id) per (ip, scenario) -- cannot answer
+// "how many distinct systems reported this IP at all", because per-scenario
+// counts do not sum: one system reporting an IP under two scenarios would
+// count twice. Aggregating the scenario list in SQL instead would need
 // ARRAY_AGG / GROUP_CONCAT / STRING_AGG, none of which are portable across
 // SQLite and Postgres. So the triples come back and Go folds them.
 type ThreatCandidateRow struct {
-	AttackerIP, Category, SystemID string
+	AttackerIP, Scenario, SystemID string
 	Hits                           int64
 	LastSeen                       int64
 }
@@ -50,7 +50,7 @@ type ThreatCandidateRow struct {
 type ListingReason struct {
 	Systems       int      `json:"systems"`
 	Hits          int64    `json:"hits"`
-	Categories    []string `json:"categories"`
+	Scenarios     []string `json:"scenarios"`
 	WindowMinutes int      `json:"window_minutes"`
 	MinSystems    int      `json:"min_systems"`
 	Rule          string   `json:"rule"`
@@ -62,7 +62,7 @@ type BlocklistRow struct {
 	AttackerIP                           string
 	FirstListedAt, LastSeenAt, ExpiresAt int64
 	DistinctSystems                      int
-	Categories                           []string
+	Scenarios                            []string
 	Reason                               ListingReason
 }
 
@@ -80,9 +80,9 @@ type EgressRow struct {
 	UpdatedAt          int64
 }
 
-// ThreatDailyRow is one day/category rollup.
+// ThreatDailyRow is one day/scenario rollup.
 type ThreatDailyRow struct {
-	Day, Category string
+	Day, Scenario string
 	DistinctIPs   int
 	TotalHits     int64
 }
@@ -95,14 +95,6 @@ type ThreatIngestRow struct {
 	model.ThreatCounters
 }
 
-// UnknownScenarioRow is one unmapped CrowdSec scenario, with how often it has
-// been seen.
-type UnknownScenarioRow struct {
-	Scenario            string
-	Count               int
-	FirstSeen, LastSeen int64
-}
-
 // DayString formats a unix-millis instant as the UTC day key used by the
 // rollup tables. Day bucketing is integer division on the millis column and
 // formatting in Go, never a SQL date function -- SQLite and Postgres do not
@@ -113,7 +105,7 @@ func DayString(ms int64) string {
 
 // InsertThreatEvents stores a sanitized batch in one transaction.
 //
-// ON CONFLICT DO NOTHING against the (system_id, attacker_ip, category,
+// ON CONFLICT DO NOTHING against the (system_id, attacker_ip, scenario,
 // observed_at) unique index is what makes redelivery safe: a reporter that
 // retries cannot inflate hit_count, and therefore cannot manufacture its own
 // contribution to consensus. Duplicates are counted, not hidden -- an edge
@@ -139,10 +131,10 @@ func (s *SQLiteStore) InsertThreatEvents(ctx context.Context, systemID string, e
 			return 0, 0, fmt.Errorf("store: marshal threat metadata: %w", err)
 		}
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO threat_events (id, system_id, attacker_ip, category, observed_at, hit_count, metadata)
+			INSERT INTO threat_events (id, system_id, attacker_ip, scenario, observed_at, hit_count, metadata)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(system_id, attacker_ip, category, observed_at) DO NOTHING
-		`, ulid.Make().String(), systemID, e.AttackerIP, e.Category, e.ObservedAt, e.HitCount, string(metadata))
+			ON CONFLICT(system_id, attacker_ip, scenario, observed_at) DO NOTHING
+		`, ulid.Make().String(), systemID, e.AttackerIP, e.Scenario, e.ObservedAt, e.HitCount, string(metadata))
 		if err != nil {
 			return 0, 0, fmt.Errorf("store: insert threat event: %w", err)
 		}
@@ -195,8 +187,8 @@ func (s *SQLiteStore) RecordIngestCounters(ctx context.Context, day, systemID st
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_ingest_daily (day, system_id, accepted, duplicates,
 			dropped_type, dropped_scope, dropped_origin, dropped_bad_ip,
-			dropped_private_ip, dropped_scenario, dropped_time, truncated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			dropped_private_ip, dropped_time, truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day, system_id) DO UPDATE SET
 			accepted = threat_ingest_daily.accepted + excluded.accepted,
 			duplicates = threat_ingest_daily.duplicates + excluded.duplicates,
@@ -205,63 +197,27 @@ func (s *SQLiteStore) RecordIngestCounters(ctx context.Context, day, systemID st
 			dropped_origin = threat_ingest_daily.dropped_origin + excluded.dropped_origin,
 			dropped_bad_ip = threat_ingest_daily.dropped_bad_ip + excluded.dropped_bad_ip,
 			dropped_private_ip = threat_ingest_daily.dropped_private_ip + excluded.dropped_private_ip,
-			dropped_scenario = threat_ingest_daily.dropped_scenario + excluded.dropped_scenario,
 			dropped_time = threat_ingest_daily.dropped_time + excluded.dropped_time,
 			truncated = threat_ingest_daily.truncated + excluded.truncated
 	`, day, systemID, c.Accepted, duplicates,
 		c.DroppedType, c.DroppedScope, c.DroppedOrigin, c.DroppedBadIP,
-		c.DroppedPrivateIP, c.DroppedScenario, c.DroppedTime, c.Truncated)
+		c.DroppedPrivateIP, c.DroppedTime, c.Truncated)
 	if err != nil {
 		return fmt.Errorf("store: record ingest counters: %w", err)
 	}
 	return nil
 }
 
-// RecordUnknownScenarios accumulates the scenarios the category map does not
-// know, so the next release has a sorted worklist instead of guesswork.
-func (s *SQLiteStore) RecordUnknownScenarios(ctx context.Context, scenarios map[string]int, now int64) error {
-	if len(scenarios) == 0 {
-		return nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: record unknown scenarios: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for scenario, count := range scenarios {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO threat_unknown_scenarios (scenario, count, first_seen, last_seen)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(scenario) DO UPDATE SET
-				count = threat_unknown_scenarios.count + excluded.count,
-				last_seen = excluded.last_seen
-		`, scenario, count, now, now)
-		if err != nil {
-			return fmt.Errorf("store: upsert unknown scenario: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit unknown scenarios: %w", err)
-	}
-	return nil
-}
-
-// ConsensusCandidates returns every (attacker_ip, category, system_id) triple
+// ConsensusCandidates returns every (attacker_ip, scenario, system_id) triple
 // observed since the given instant. See ThreatCandidateRow for why the
 // grouping goes down to system_id.
 func (s *SQLiteStore) ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT attacker_ip, category, system_id, SUM(hit_count), MAX(observed_at)
+		SELECT attacker_ip, scenario, system_id, SUM(hit_count), MAX(observed_at)
 		FROM threat_events
 		WHERE observed_at >= ?
-		GROUP BY attacker_ip, category, system_id
-		ORDER BY attacker_ip, category, system_id
+		GROUP BY attacker_ip, scenario, system_id
+		ORDER BY attacker_ip, scenario, system_id
 	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("store: consensus candidates: %w", err)
@@ -271,7 +227,7 @@ func (s *SQLiteStore) ConsensusCandidates(ctx context.Context, since int64) ([]T
 	result := []ThreatCandidateRow{}
 	for rows.Next() {
 		var r ThreatCandidateRow
-		if err := rows.Scan(&r.AttackerIP, &r.Category, &r.SystemID, &r.Hits, &r.LastSeen); err != nil {
+		if err := rows.Scan(&r.AttackerIP, &r.Scenario, &r.SystemID, &r.Hits, &r.LastSeen); err != nil {
 			return nil, fmt.Errorf("store: scan consensus candidate: %w", err)
 		}
 		result = append(result, r)
@@ -406,9 +362,9 @@ func (s *SQLiteStore) UpsertBlocklistEntries(ctx context.Context, entries []Bloc
 	defer func() { _ = tx.Rollback() }()
 
 	for _, e := range entries {
-		categories, err := json.Marshal(e.Categories)
+		scenarios, err := json.Marshal(e.Scenarios)
 		if err != nil {
-			return fmt.Errorf("store: marshal blocklist categories: %w", err)
+			return fmt.Errorf("store: marshal blocklist scenarios: %w", err)
 		}
 		reason, err := json.Marshal(e.Reason)
 		if err != nil {
@@ -416,16 +372,16 @@ func (s *SQLiteStore) UpsertBlocklistEntries(ctx context.Context, entries []Bloc
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO threat_blocklist (attacker_ip, first_listed_at, last_seen_at, expires_at,
-				distinct_systems, categories, listing_reason)
+				distinct_systems, scenarios, listing_reason)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(attacker_ip) DO UPDATE SET
 				last_seen_at = excluded.last_seen_at,
 				expires_at = excluded.expires_at,
 				distinct_systems = excluded.distinct_systems,
-				categories = excluded.categories,
+				scenarios = excluded.scenarios,
 				listing_reason = excluded.listing_reason
 		`, e.AttackerIP, e.FirstListedAt, e.LastSeenAt, e.ExpiresAt,
-			e.DistinctSystems, string(categories), string(reason))
+			e.DistinctSystems, string(scenarios), string(reason))
 		if err != nil {
 			return fmt.Errorf("store: upsert blocklist entry: %w", err)
 		}
@@ -459,7 +415,7 @@ func (s *SQLiteStore) ExpireBlocklist(ctx context.Context, now int64) (int, erro
 func (s *SQLiteStore) ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error) {
 	return s.queryBlocklist(ctx, `
 		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
-		       distinct_systems, categories, listing_reason
+		       distinct_systems, scenarios, listing_reason
 		FROM threat_blocklist
 		WHERE expires_at > ?
 		ORDER BY first_listed_at, attacker_ip
@@ -477,18 +433,18 @@ func (s *SQLiteStore) queryBlocklist(ctx context.Context, query string, args ...
 	result := []BlocklistRow{}
 	for rows.Next() {
 		var (
-			r          BlocklistRow
-			categories sql.NullString
-			reason     sql.NullString
+			r         BlocklistRow
+			scenarios sql.NullString
+			reason    sql.NullString
 		)
 		if err := rows.Scan(&r.AttackerIP, &r.FirstListedAt, &r.LastSeenAt, &r.ExpiresAt,
-			&r.DistinctSystems, &categories, &reason); err != nil {
+			&r.DistinctSystems, &scenarios, &reason); err != nil {
 			return nil, fmt.Errorf("store: scan blocklist entry: %w", err)
 		}
 		// A malformed row degrades to "no detail" rather than failing the
 		// whole feed or the whole page.
-		if categories.Valid && categories.String != "" {
-			_ = json.Unmarshal([]byte(categories.String), &r.Categories)
+		if scenarios.Valid && scenarios.String != "" {
+			_ = json.Unmarshal([]byte(scenarios.String), &r.Scenarios)
 		}
 		if reason.Valid && reason.String != "" {
 			_ = json.Unmarshal([]byte(reason.String), &r.Reason)
@@ -506,9 +462,9 @@ func (s *SQLiteStore) queryBlocklist(ctx context.Context, query string, args ...
 // formatted in Go: SQLite and Postgres share no date function.
 func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT observed_at / ?, category, COUNT(DISTINCT attacker_ip), SUM(hit_count)
+		SELECT observed_at / ?, scenario, COUNT(DISTINCT attacker_ip), SUM(hit_count)
 		FROM threat_events
-		GROUP BY observed_at / ?, category
+		GROUP BY observed_at / ?, scenario
 	`, dayMillis, dayMillis)
 	if err != nil {
 		return fmt.Errorf("store: rollup threat stats: %w", err)
@@ -516,7 +472,7 @@ func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 	defer rows.Close()
 
 	type bucket struct {
-		day, category string
+		day, scenario string
 		distinctIPs   int
 		totalHits     int64
 	}
@@ -526,7 +482,7 @@ func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 			dayIdx int64
 			b      bucket
 		)
-		if err := rows.Scan(&dayIdx, &b.category, &b.distinctIPs, &b.totalHits); err != nil {
+		if err := rows.Scan(&dayIdx, &b.scenario, &b.distinctIPs, &b.totalHits); err != nil {
 			return fmt.Errorf("store: scan threat rollup: %w", err)
 		}
 		b.day = DayString(dayIdx * dayMillis)
@@ -550,12 +506,12 @@ func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 
 	for _, b := range buckets {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO threat_daily_stats (day, category, distinct_ips, total_hits)
+			INSERT INTO threat_daily_stats (day, scenario, distinct_ips, total_hits)
 			VALUES (?, ?, ?, ?)
-			ON CONFLICT(day, category) DO UPDATE SET
+			ON CONFLICT(day, scenario) DO UPDATE SET
 				distinct_ips = excluded.distinct_ips,
 				total_hits = excluded.total_hits
-		`, b.day, b.category, b.distinctIPs, b.totalHits)
+		`, b.day, b.scenario, b.distinctIPs, b.totalHits)
 		if err != nil {
 			return fmt.Errorf("store: upsert threat daily stats: %w", err)
 		}

@@ -30,14 +30,14 @@ until the first successful consensus pass. An empty body would mean
 <h2>Promoted entries</h2>
 <table>
 <thead>
-<tr><th>Attacker IP</th><th>Categories</th><th class="num">Systems</th>
+<tr><th>Attacker IP</th><th>Scenarios</th><th class="num">Systems</th>
 <th>First listed</th><th>Last seen</th><th>Expires</th><th>Evidence</th></tr>
 </thead>
 <tbody>
 {{range .Entries}}
 <tr>
 <td class="mono">{{.AttackerIP}}</td>
-<td>{{join .Categories ", "}}</td>
+<td>{{join .Scenarios ", "}}</td>
 <td class="num">{{.DistinctSystems}}</td>
 <td class="mono" title="{{fmtTime .FirstListedAt}}">{{fmtAgo .FirstListedAt}}</td>
 <td class="mono" title="{{fmtTime .LastSeenAt}}">{{fmtAgo .LastSeenAt}}</td>
@@ -50,7 +50,7 @@ behind it are pruned long before anyone asks.</small></p>
 <ul>
 <li>rule <code>{{.Reason.Rule}}</code>: {{.Reason.MinSystems}} systems / {{.Reason.WindowMinutes}}m window</li>
 <li>{{.Reason.Systems}} distinct systems, {{.Reason.Hits}} hits</li>
-<li>categories: {{join .Reason.Categories ", "}}</li>
+<li>scenarios: {{join .Reason.Scenarios ", "}}</li>
 <li>decided {{fmtTime .Reason.DecidedAt}}</li>
 </ul>
 </details>

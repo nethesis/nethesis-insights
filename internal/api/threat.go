@@ -27,7 +27,6 @@ type ThreatStore interface {
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (int, int, error)
 	RecordSystemEgress(ctx context.Context, systemID, sourceIP string, now int64) error
 	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
-	RecordUnknownScenarios(ctx context.Context, scenarios map[string]int, now int64) error
 }
 
 // Feed is the rendered blocklist snapshot. *blocklist.Snapshot satisfies it.
@@ -139,15 +138,6 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 	day := store.DayString(now)
 	if err := s.threat.Store.RecordIngestCounters(r.Context(), day, authenticatedSystemID, res.Counters, duplicates); err != nil {
 		slog.Error("record ingest counters failed", "system_id", authenticatedSystemID, "error", err)
-	}
-	if len(res.Unknown) > 0 {
-		if err := s.threat.Store.RecordUnknownScenarios(r.Context(), res.Unknown, now); err != nil {
-			slog.Error("record unknown scenarios failed", "error", err)
-		}
-		for scenario, count := range res.Unknown {
-			slog.Debug("threat report carried an unmapped scenario",
-				"system_id", authenticatedSystemID, "scenario", scenario, "count", count)
-		}
 	}
 
 	slog.Debug("threat report accepted",

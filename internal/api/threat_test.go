@@ -30,7 +30,6 @@ type fakeThreatStore struct {
 	counters   model.ThreatCounters
 	duplicates int
 	day        string
-	unknown    map[string]int
 	insertErr  error
 	egressErr  error
 	countErr   error
@@ -56,11 +55,6 @@ func (f *fakeThreatStore) RecordIngestCounters(_ context.Context, day, _ string,
 	f.counters = c
 	f.duplicates = duplicates
 	return f.countErr
-}
-
-func (f *fakeThreatStore) RecordUnknownScenarios(_ context.Context, scenarios map[string]int, _ int64) error {
-	f.unknown = scenarios
-	return nil
 }
 
 // fakeFeed is a fixed snapshot.
@@ -242,7 +236,7 @@ func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
 	body := reportBody(t, testSystemID,
 		decision("10.0.0.5", "crowdsecurity/ssh-bf", "crowdsec"),
 		decision("203.0.113.7", "crowdsecurity/ssh-bf", "CAPI"),
-		decision("203.0.113.8", "crowdsecurity/unknown-thing", "crowdsec"),
+		decision("bogus", "crowdsecurity/ssh-bf", "crowdsec"),
 		decision("203.0.113.9", "crowdsecurity/ssh-bf", "crowdsec"),
 	)
 
@@ -256,11 +250,27 @@ func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
 	}
 	var got threatIngestResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.Dropped.DroppedPrivateIP != 1 || got.Dropped.DroppedOrigin != 1 || got.Dropped.DroppedScenario != 1 {
+	if got.Dropped.DroppedPrivateIP != 1 || got.Dropped.DroppedOrigin != 1 || got.Dropped.DroppedBadIP != 1 {
 		t.Fatalf("dropped counters: %+v", got.Dropped)
 	}
-	if st.unknown["crowdsecurity/unknown-thing"] != 1 {
-		t.Fatalf("unknown scenarios: %v", st.unknown)
+}
+
+// A scenario the server has never seen is stored, not dropped: there is no
+// allowlist, so a third-party or hand-written collection still contributes.
+func TestThreatIngestAcceptsAnUnfamiliarScenario(t *testing.T) {
+	st := &fakeThreatStore{}
+	rec := postThreat(t, threatServer(st, &fakeFeed{}),
+		reportBody(t, testSystemID,
+			decision("203.0.113.7", "LePresidente/http-generic-401-bf", "crowdsec")), true)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", rec.Code)
+	}
+	if len(st.events) != 1 {
+		t.Fatalf("stored: %+v, want the event kept", st.events)
+	}
+	if st.events[0].Scenario != "LePresidente/http-generic-401-bf" {
+		t.Fatalf("scenario: got %q", st.events[0].Scenario)
 	}
 }
 

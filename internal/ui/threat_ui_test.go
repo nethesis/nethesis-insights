@@ -56,10 +56,6 @@ func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]store.Threat
 	return f.threatIngest, f.err
 }
 
-func (f *fakeReader) UnknownScenarios(_ context.Context, _ int) ([]store.UnknownScenarioRow, error) {
-	return f.unknown, f.err
-}
-
 func (f *fakeReader) ListThreatAllowlist(_ context.Context) ([]store.AllowlistRow, error) {
 	return f.allowlist, f.err
 }
@@ -87,31 +83,28 @@ func threatReader() *fakeReader {
 	r.blocklist = []store.BlocklistRow{{
 		AttackerIP: "203.0.113.7", FirstListedAt: 1700000000000, LastSeenAt: 1700000100000,
 		ExpiresAt: 1700086500000, DistinctSystems: 4,
-		Categories: []string{"port_scan", "ssh_bruteforce"},
+		Scenarios: []string{"crowdsecurity/port-scan", "crowdsecurity/ssh-bf"},
 		Reason: store.ListingReason{
-			Systems: 4, Hits: 91, Categories: []string{"port_scan", "ssh_bruteforce"},
+			Systems: 4, Hits: 91, Scenarios: []string{"crowdsecurity/port-scan", "crowdsecurity/ssh-bf"},
 			WindowMinutes: 60, MinSystems: 3, Rule: "v1", DecidedAt: 1700000100000,
 		},
 	}}
 	r.threatEvents = []store.ThreatEventRow{
 		{
 			ID: "01EVENT0000000000000000000", SystemID: "sys-1", AttackerIP: "203.0.113.7",
-			Category: "ssh_bruteforce", ObservedAt: 1700000100000, HitCount: 3,
-			Metadata: map[string]any{"scenario": "crowdsecurity/ssh-bf", "duration_seconds": float64(14400)},
+			Scenario: "crowdsecurity/ssh-bf", ObservedAt: 1700000100000, HitCount: 3,
+			Metadata: map[string]any{"duration_seconds": float64(14400)},
 		},
 		{
 			ID: "01EVENT0000000000000000001", SystemID: "sys-2", AttackerIP: "198.51.100.9",
-			Category: "port_scan", ObservedAt: 1700000090000, HitCount: 1,
+			Scenario: "crowdsecurity/port-scan", ObservedAt: 1700000090000, HitCount: 1,
 		},
 	}
 	r.threatDaily = []store.ThreatDailyRow{
-		{Day: "2026-08-27", Category: "ssh_bruteforce", DistinctIPs: 12, TotalHits: 240},
+		{Day: "2026-08-27", Scenario: "crowdsecurity/ssh-bf", DistinctIPs: 12, TotalHits: 240},
 	}
 	r.threatIngest = []store.ThreatIngestRow{
 		{Day: "2026-08-27", SystemID: "sys-1", Accepted: 40, Duplicates: 2},
-	}
-	r.unknown = []store.UnknownScenarioRow{
-		{Scenario: "crowdsecurity/brand-new", Count: 17, FirstSeen: 1700000000000, LastSeen: 1700000100000},
 	}
 	r.allowlist = []store.AllowlistRow{
 		{CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1700000000000},
@@ -130,13 +123,13 @@ func TestBlocklistPageRendersEntriesAndExclusions(t *testing.T) {
 	body := get(t, h, "/blocklist").Body.String()
 
 	for _, want := range []string{
-		"203.0.113.7",               // the promoted entry
-		"port_scan, ssh_bruteforce", // its categories
-		"91",                        // hits, from the snapshotted evidence
-		"partner scanner",           // the allowlist
-		"192.0.2.10",                // the fleet egress set
-		"sha256-abc",                // the served snapshot's ETag
-		"permanent",                 // an allowlist entry with no expiry
+		"203.0.113.7", // the promoted entry
+		"crowdsecurity/port-scan, crowdsecurity/ssh-bf", // its scenarios
+		"91",              // hits, from the snapshotted evidence
+		"partner scanner", // the allowlist
+		"192.0.2.10",      // the fleet egress set
+		"sha256-abc",      // the served snapshot's ETag
+		"permanent",       // an allowlist entry with no expiry
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/blocklist is missing %q", want)
@@ -219,17 +212,16 @@ func TestThreatEventsPageClampsItsLimit(t *testing.T) {
 	}
 }
 
-func TestThreatStatsPageRendersAllThreeTables(t *testing.T) {
+func TestThreatStatsPageRendersBothTables(t *testing.T) {
 	h := newTestServerWithFeed(t, threatReader(), nil, nil)
 
 	body := get(t, h, "/threat-stats").Body.String()
 
 	for _, want := range []string{
-		"2026-08-27",              // the daily rollup
-		"240",                     // its hit total
-		"sys-1",                   // ingest accounting
-		"crowdsecurity/brand-new", // the unmapped-scenario worklist
-		"17",
+		"2026-08-27",           // the daily rollup
+		"crowdsecurity/ssh-bf", // rolled up per scenario, verbatim
+		"240",                  // its hit total
+		"sys-1",                // ingest accounting
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/threat-stats is missing %q", want)
@@ -257,7 +249,7 @@ func TestThreatPagesRenderEmpty(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/blocklist", "nothing promoted yet"},
 		{"/threat-events", "no threat events"},
-		{"/threat-stats", "every reported scenario is mapped"},
+		{"/threat-stats", "no rollup yet"},
 	} {
 		rec := get(t, h, tc.path)
 		if rec.Code != http.StatusOK {

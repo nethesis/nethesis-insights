@@ -56,9 +56,9 @@ Request body, `Content-Type: application/json`, optionally
 
 The `decisions` array mirrors CrowdSec's `models.Decision`, exactly as
 `cscli decisions list --output json` emits it, batched per `models.Alert` the
-plugin fires on. Send the decisions verbatim: the server owns the
-scenario→category map, so supporting a new scenario is a server release rather
-than a fleet-wide template change.
+plugin fires on. Send the decisions verbatim. The server owns the interpretation, and it accepts
+**every** scenario — see "Scenarios" below — so a node running a third-party or
+hand-written collection needs no coordination with the server at all.
 
 - `schema_version` must be `1`. A different value is `400`.
 - `system_id` is **optional**. The credential already identifies the reporter;
@@ -82,7 +82,6 @@ than a fleet-wide template change.
     "dropped_origin": 2,
     "dropped_bad_ip": 0,
     "dropped_private_ip": 1,
-    "dropped_scenario": 5,
     "dropped_time": 0,
     "truncated": 0
   }
@@ -93,7 +92,7 @@ than a fleet-wide template change.
 - `duplicates` — decisions that matched an existing row and were ignored.
 - `dropped` — the full per-rule accounting for the batch, including `accepted`,
   the number of decisions that passed every filter. `stored` is normally lower
-  than `accepted`, because decisions describing the same `(ip, category,
+  than `accepted`, because decisions describing the same `(ip, scenario,
   second)` are folded into one row with a summed hit count.
 
 | status | meaning |
@@ -110,7 +109,7 @@ malformed decision is dropped and counted; the rest of the batch is stored. A
 reporter under active attack must not lose its whole batch to one bad row.
 
 **Advance the watermark only on `2xx`.** A server outage should produce delayed
-events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, category,
+events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, scenario,
 observed_at)` is unique, so a repeated batch cannot inflate anything.
 
 ### Drop rules
@@ -132,30 +131,30 @@ Applied in this order; each drop increments exactly one counter.
    IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, benchmark
    `198.18.0.0/15`, and the address the server saw the report arrive from. The
    documentation ranges are *not* rejected.
-6. **`scenario`** must be in the category map below (`dropped_scenario`). An
-   unmapped scenario is recorded by name and surfaced in the operator UI, which
-   is how the map grows.
-7. **`created_at`** must parse as RFC3339 (`dropped_time`). A value more than
+6. **`created_at`** must parse as RFC3339 (`dropped_time`). A value more than
    24 h in the future is clamped to the server clock rather than dropped.
 
-Only `scenario` and `duration_seconds` are retained as metadata. Nothing
-free-text is stored: no usernames, no URIs, no user agents.
+Beyond the scenario name and `duration_seconds`, nothing is retained. No
+usernames, no URIs, no user agents, no request paths, no geo or ASN data — do
+not send them.
 
-### Scenario → category map
+### Scenarios
 
-The v1 category set is fixed at `port_scan`, `ssh_bruteforce`, `http_exploit`
-and `sip_probe`. Unmapped scenarios are dropped rather than bucketed into a
-catch-all.
+**Every scenario is accepted.** There is no category map, no fixed category
+set, and no list of known scenarios. `crowdsecurity/ssh-bf`,
+`LePresidente/http-generic-401-bf` and a hand-written local rule are all stored
+and all count toward consensus identically.
 
-| category | scenarios |
-|---|---|
-| `ssh_bruteforce` | `crowdsecurity/ssh-bf`, `crowdsecurity/ssh-bf_user-enum`, `crowdsecurity/ssh-slow-bf`, `crowdsecurity/ssh-slow-bf_user-enum` |
-| `http_exploit` | `crowdsecurity/http-probing`, `crowdsecurity/http-bad-user-agent`, `crowdsecurity/http-path-traversal-probing`, `crowdsecurity/http-sensitive-files`, `crowdsecurity/http-sqli-probing`, `crowdsecurity/http-xss-probing`, `crowdsecurity/http-backdoors-attempts`, `crowdsecurity/http-crawl-non_statics`, `crowdsecurity/http-cve-probing` |
-| `port_scan` | `crowdsecurity/port-scan`, `crowdsecurity/iptables-scan-multi_ports` |
-| `sip_probe` | `crowdsecurity/asterisk-user-enum`, `crowdsecurity/asterisk-bf`, `crowdsecurity/asterisk-bf_user-enum` |
+This is deliberate. CrowdSec's hub grows continuously, NS8 nodes run
+third-party collections, and operators write their own rules; a server-side
+allowlist would silently discard real evidence until somebody noticed the gap
+and shipped a release. Since promotion counts **distinct systems** and never
+scenario agreement, accepting an unfamiliar scenario cannot weaken the rule.
 
-The map lives in `internal/threat/category.go`. This table is a copy of it;
-the code is the authority.
+The scenario is free text from the edge, so the server trims it, strips control
+characters, and caps it at 128 runes before storage. It is never rewritten
+otherwise, and it is what `threat_blocklist.scenarios` and the daily rollup are
+grouped by.
 
 ## `GET /v1/blocklist`
 

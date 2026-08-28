@@ -57,7 +57,6 @@ type Reader interface {
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]store.ThreatEventRow, error)
 	ThreatDailyStats(ctx context.Context, limit int) ([]store.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
-	UnknownScenarios(ctx context.Context, limit int) ([]store.UnknownScenarioRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
 	ListSystemEgress(ctx context.Context) ([]store.EgressRow, error)
 }
@@ -650,9 +649,8 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 
 type threatStatsPageData struct {
 	pageData
-	Daily   []store.ThreatDailyRow
-	Ingest  []store.ThreatIngestRow
-	Unknown []store.UnknownScenarioRow
+	Daily  []store.ThreatDailyRow
+	Ingest []store.ThreatIngestRow
 }
 
 func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
@@ -666,16 +664,10 @@ func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "threat-stats", err)
 		return
 	}
-	unknown, err := s.reader.UnknownScenarios(r.Context(), threatStatsLimit)
-	if err != nil {
-		s.storeError(w, "threat-stats", err)
-		return
-	}
 	s.render(w, "threat-stats.html", threatStatsPageData{
 		pageData: s.newPageData(r, "threat-stats"),
 		Daily:    daily,
 		Ingest:   ingest,
-		Unknown:  unknown,
 	})
 }
 

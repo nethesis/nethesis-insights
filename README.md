@@ -155,7 +155,7 @@ It is **off unless you set `UI_LISTEN_ADDR`**:
 | `/baselines` | the EWMA rates the gate falls back on when a bundle carries no `expected` |
 | `/blocklist` | the consensus feed with its promotion evidence, plus the allowlist and fleet-egress exclusion sets |
 | `/threat-events` | recent sanitized CrowdSec decisions; filter by system or attacker IP |
-| `/threat-stats` | daily threat rollup, per-node ingest accounting, and the unmapped-scenario worklist |
+| `/threat-stats` | daily threat rollup per scenario, and per-node ingest accounting |
 
 ### Read this before exposing it
 
@@ -238,8 +238,14 @@ either unlists an address on the next pass:
 Ingest is fail-closed on authentication and fail-open on content: a malformed
 decision is dropped and counted, and the rest of the batch is stored. Private,
 loopback, CGNAT, link-local, multicast and ULA addresses are rejected at ingest,
-so they never reach the database at all. Only `scenario` and `duration_seconds`
-are kept as metadata — nothing free-text, no usernames, no URIs.
+so they never reach the database at all. Beyond the scenario name and the ban
+duration nothing is kept — no usernames, no URIs, no user agents.
+
+**Every CrowdSec scenario is accepted.** There is no category map and no
+known-scenario allowlist: the hub grows continuously and nodes run third-party
+and local collections, so a fixed set would silently discard real evidence. The
+scenario is bounded and stripped of control characters, then stored verbatim
+and used as-is for grouping and for the daily rollup.
 
 `GET /v1/blocklist` answers `503` until the first consensus pass succeeds, and
 after a failed pass it keeps serving the previous snapshot with its original

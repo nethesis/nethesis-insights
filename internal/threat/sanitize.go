@@ -1,6 +1,22 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// Package threat holds the pure half of the Threat Shield pipeline: the ingest
+// sanitizer and the promotion allowlist.
+//
+// Same purity contract as gate, fingerprint and prompt -- no I/O, no clock
+// beyond an injected now -- and for a sharper reason than those: everything
+// that decides whether a third party's IP address is stored and published
+// lives here, so a bug in this package is a data-protection incident rather
+// than a wrong answer. That is what makes it worth being table-driven testable
+// with no fixtures and no database.
+//
+// What this package does NOT do is judge the scenario. There is no fixed
+// category set and no scenario allowlist: CrowdSec's hub grows continuously
+// and nodes run third-party and local collections, so anything resembling a
+// known-scenarios list would silently discard real evidence until someone
+// noticed. Scenarios are bounded and stripped of control characters, then
+// carried through verbatim.
 package threat
 
 import (
@@ -8,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
@@ -54,19 +71,15 @@ type Options struct {
 type Result struct {
 	Events   []model.ThreatEvent
 	Counters model.ThreatCounters
-	// Unknown counts the scenarios that were dropped for having no category,
-	// keyed by scenario name, so the server can show operators what its map
-	// is missing.
-	Unknown map[string]int
 }
 
 // dedupKey collapses decisions that describe the same observation. CrowdSec
 // fires one decision per alert, so a node under a sustained brute force
-// reports the same (ip, category, second) repeatedly; folding them here means
+// reports the same (ip, scenario, second) repeatedly; folding them here means
 // the store's unique index is never fought at insert time.
 type dedupKey struct {
 	ip         string
-	category   string
+	scenario   string
 	observedAt int64
 }
 
@@ -81,7 +94,7 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 		max = DefaultMaxDecisions
 	}
 
-	res := Result{Unknown: map[string]int{}}
+	var res Result
 
 	decisions := r.Decisions
 	if len(decisions) > max {
@@ -118,28 +131,30 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 			continue
 		}
 
-		category, ok := CategoryFor(d.Scenario)
-		if !ok {
-			res.Counters.DroppedScenario++
-			res.Unknown[d.Scenario]++
-			continue
-		}
-
 		observedAt, ok := observedAt(d.CreatedAt, now)
 		if !ok {
 			res.Counters.DroppedTime++
 			continue
 		}
 
+		// Every scenario is accepted, whatever it says. There is deliberately
+		// no allowlist: CrowdSec's hub grows continuously and nodes run
+		// third-party and local collections, so a fixed set would silently
+		// discard real evidence until someone noticed and shipped a release.
+		// The scenario is free text from the edge, so it is bounded and
+		// stripped of control characters -- it reaches an HTML page and a
+		// plain-text log -- but never judged.
+		scenario := cleanScenario(d.Scenario)
+
 		res.Counters.Accepted++
-		key := dedupKey{ip: addr.String(), category: category, observedAt: observedAt}
+		key := dedupKey{ip: addr.String(), scenario: scenario, observedAt: observedAt}
 		if ev, seen := merged[key]; seen {
 			ev.HitCount++
 			continue
 		}
 		merged[key] = &model.ThreatEvent{
 			AttackerIP: key.ip,
-			Category:   category,
+			Scenario:   scenario,
 			ObservedAt: observedAt,
 			HitCount:   1,
 			Metadata:   metadata(d),
@@ -157,8 +172,8 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 		if a.AttackerIP != b.AttackerIP {
 			return a.AttackerIP < b.AttackerIP
 		}
-		if a.Category != b.Category {
-			return a.Category < b.Category
+		if a.Scenario != b.Scenario {
+			return a.Scenario < b.Scenario
 		}
 		return a.ObservedAt < b.ObservedAt
 	})
@@ -205,11 +220,34 @@ func observedAt(raw string, now int64) (int64, bool) {
 	return ms, true
 }
 
+// MaxScenarioLen bounds the scenario string. CrowdSec's own names are well
+// under this; the cap exists because the value is free text from the edge that
+// ends up in a rendered page, a log line and a database column.
+const MaxScenarioLen = 128
+
+// cleanScenario bounds and de-fangs a scenario name without judging it.
+// Control characters are stripped so the value cannot break a log line, and
+// the result is truncated by rune so a multi-byte name cannot be cut in half.
+func cleanScenario(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
+
+	if runes := []rune(s); len(runes) > MaxScenarioLen {
+		s = string(runes[:MaxScenarioLen])
+	}
+	return s
+}
+
 // metadata reduces a decision to a fixed, typed allowlist. Nothing free-text
-// reaches the store: no usernames (a hash of "root" is trivially reversible
-// and carries no analytic value), no URIs, no user agents.
+// reaches the store beyond the scenario itself: no usernames (a hash of "root"
+// is trivially reversible and carries no analytic value), no URIs, no user
+// agents.
 func metadata(d model.Decision) map[string]any {
-	m := map[string]any{"scenario": d.Scenario}
+	m := map[string]any{}
 	if dur, err := time.ParseDuration(strings.TrimSpace(d.Duration)); err == nil {
 		m["duration_seconds"] = int64(dur.Seconds())
 	}

@@ -56,11 +56,11 @@ func New(r Reader, snap *Snapshot, cfg Config) *Runner {
 // candidate is one attacker address folded across every system that reported
 // it inside the window.
 type candidate struct {
-	addr       netip.Addr
-	systems    map[string]bool
-	categories map[string]bool
-	hits       int64
-	lastSeen   int64
+	addr      netip.Addr
+	systems   map[string]bool
+	scenarios map[string]bool
+	hits      int64
+	lastSeen  int64
 }
 
 // Run executes promote -> expire -> roll up -> prune -> regenerate.
@@ -171,11 +171,11 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 		addr = addr.Unmap()
 		c, seen := folded[addr]
 		if !seen {
-			c = &candidate{addr: addr, systems: map[string]bool{}, categories: map[string]bool{}}
+			c = &candidate{addr: addr, systems: map[string]bool{}, scenarios: map[string]bool{}}
 			folded[addr] = c
 		}
 		c.systems[row.SystemID] = true
-		c.categories[row.Category] = true
+		c.scenarios[row.Scenario] = true
 		c.hits += row.Hits
 		if row.LastSeen > c.lastSeen {
 			c.lastSeen = row.LastSeen
@@ -193,7 +193,7 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 		if len(c.systems) < r.cfg.MinSystems {
 			continue
 		}
-		categories := keys(c.categories)
+		scenarios := keys(c.scenarios)
 		out = append(out, store.BlocklistRow{
 			AttackerIP: addr.String(),
 			// Ignored by the upsert when the row already exists: a refresh is
@@ -202,11 +202,11 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 			LastSeenAt:      c.lastSeen,
 			ExpiresAt:       c.lastSeen + r.cfg.TTL.Milliseconds(),
 			DistinctSystems: len(c.systems),
-			Categories:      categories,
+			Scenarios:       scenarios,
 			Reason: store.ListingReason{
 				Systems:       len(c.systems),
 				Hits:          c.hits,
-				Categories:    categories,
+				Scenarios:     scenarios,
 				WindowMinutes: int(r.cfg.Window.Minutes()),
 				MinSystems:    r.cfg.MinSystems,
 				Rule:          "v1",

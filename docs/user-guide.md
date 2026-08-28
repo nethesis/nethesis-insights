@@ -200,8 +200,8 @@ collected, counted and handed back.
    from CrowdSec's *own community blocklist* rather than the node's own
    observation are discarded too — otherwise a thousand nodes all repeating
    the same downloaded list would look like a thousand independent witnesses.
-   Only the address, a category, a timestamp and the scenario name survive.
-   No usernames, no URLs, no free text of any kind.
+   Only the address, the CrowdSec scenario name, a timestamp and the ban
+   duration survive. No usernames, no URLs, no request paths, no user agents.
 
 3. **Consensus decides what is real.** Every few minutes the server asks: which
    addresses have been reported by at least three *different* machines in the
@@ -271,7 +271,7 @@ What each page shows, in plain terms:
 | `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
 | `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |
 | `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
-| `/threat-stats` | Three things: the day-by-day threat trend, what each machine contributed (and how much of what it sent was discarded, by reason), and the list of CrowdSec scenarios the server didn't recognise — which is the to-do list for the next release. |
+| `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
 
 Nothing on this UI ever shows a raw, unmasked log line — the server never
 stores those in the first place, so there's nothing to show. And the page

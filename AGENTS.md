@@ -38,7 +38,7 @@ A related, separate feature also lives here and is **implemented**:
 `docs/plans/2026-08-07-threat-shield-server.md` (this repo's flavour) and
 `docs/specs/2026-08-07-threat-events-ingest-contract.md` (the wire contract
 `ns8-crowdsec` builds against — keep it in step with
-`internal/threat/category.go`). Server-side fleet-wide CrowdSec ban sharing:
+`internal/threat/sanitize.go`'s drop rules). Server-side fleet-wide CrowdSec ban sharing:
 `POST /v1/threat-events` in, `GET /v1/blocklist` out. It is **not** part of the
 ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
 gate, no fingerprint, no queue. Treat it as a distinct pipeline sharing only the
@@ -55,9 +55,17 @@ Threat Shield rules that are as load-bearing as the gate's:
   CAPI/community list would manufacture agreement between systems that never
   independently observed anything, and consensus over manufactured agreement is
   worthless (spec §7.2).
+- **Every CrowdSec scenario is accepted — never add an allowlist.** There is no
+  category map and no known-scenario list; the design's D3 category set was removed
+  during implementation. The hub grows continuously and nodes run third-party and local
+  collections, so a fixed set silently discards real evidence until someone notices.
+  The scenario is trimmed, stripped of control characters and capped at
+  `threat.MaxScenarioLen`, then stored verbatim and used as the grouping key.
 - **Distinct systems, not row count.** Promotion counts `COUNT(DISTINCT system_id)`;
   candidates are therefore grouped down to `system_id` in SQL and folded in Go, because
-  per-category counts do not sum and `ARRAY_AGG`/`GROUP_CONCAT` are not portable.
+  per-scenario counts do not sum and `ARRAY_AGG`/`GROUP_CONCAT` are not portable.
+  Promotion never depends on scenario agreement, which is why accepting an unfamiliar
+  scenario cannot weaken the rule.
 - **Allowlist and fleet egress are applied at promotion, not at read**, so adding an
   entry unlists an address on the next pass instead of hiding it. A malformed allowlist
   row aborts the pass rather than being skipped — skipping fails open.
@@ -304,7 +312,8 @@ successful no-op, not an error.
   unspecified, benchmark, IPv4-mapped, the reporter's own address), documentation
   ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
-  truncating rather than rejecting.
+  truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
+  is the executable form of "never add a scenario allowlist".
 - `blocklist`: temp-file SQLite, not a mock — the grouping *is* the SQL. Boundary
   fixtures: 2 distinct systems does not promote and 3 does; one system reporting
   three times does not; one system across two categories is still one system;

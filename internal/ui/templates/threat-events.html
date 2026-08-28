@@ -19,8 +19,8 @@ reported this IP&rdquo;. Rows are pruned once past the retention window.</small>
 
 <table>
 <thead>
-<tr><th>Observed</th><th>System</th><th>Attacker IP</th><th>Category</th>
-<th class="num">Hits</th><th>Scenario</th><th class="num">Ban</th></tr>
+<tr><th>Observed</th><th>System</th><th>Attacker IP</th><th>Scenario</th>
+<th class="num">Hits</th><th class="num">Ban</th></tr>
 </thead>
 <tbody>
 {{range .Events}}
@@ -28,13 +28,12 @@ reported this IP&rdquo;. Rows are pruned once past the retention window.</small>
 <td class="mono" title="{{fmtTime .ObservedAt}}">{{fmtAgo .ObservedAt}}</td>
 <td class="mono">{{.SystemID}}</td>
 <td class="mono">{{.AttackerIP}}</td>
-<td>{{.Category}}</td>
+<td class="mono">{{.Scenario}}</td>
 <td class="num">{{.HitCount}}</td>
-<td class="mono">{{with index .Metadata "scenario"}}{{.}}{{else}}&mdash;{{end}}</td>
 <td class="num">{{with index .Metadata "duration_seconds"}}{{.}}s{{else}}&mdash;{{end}}</td>
 </tr>
 {{else}}
-<tr><td colspan="7">no threat events</td></tr>
+<tr><td colspan="6">no threat events</td></tr>
 {{end}}
 </tbody>
 </table>
