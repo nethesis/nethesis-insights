@@ -83,16 +83,17 @@ func (s *SQLiteStore) UpsertAllowlistRequest(ctx context.Context, cidr, systemID
 // request, ranked by distinct systems then recency -- the review queue's
 // priority order.
 //
-// "Pending" means no row in threat_allowlist_reviews yet: approving or
-// rejecting writes that row and permanently retires the CIDR from this
-// list, without touching the requests that got it here (see
-// TestRejectedRequestsSurviveButLeaveTheQueue).
+// "Pending" means exactly "a threat_allowlist_requests row exists": handling
+// a request deletes its rows (DeleteAllowlistRequests), so the queue holds
+// only what still needs a decision. It deliberately does not consult
+// threat_allowlist_reviews -- a past decision must not gag a later ask, or a
+// CIDR rejected once on thin evidence could never be raised again however
+// many systems went on to report it. What was asked and how it was decided
+// lives in the audit trail, which is append-only.
 func (s *SQLiteStore) PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.cidr, r.reason, r.system_id, r.created_at
 		FROM threat_allowlist_requests r
-		LEFT JOIN threat_allowlist_reviews v ON v.cidr = r.cidr
-		WHERE v.cidr IS NULL
 		ORDER BY r.cidr, r.created_at DESC
 	`)
 	if err != nil {
@@ -172,7 +173,10 @@ func sortAllowlistRequests(rows []AllowlistRequestRow) {
 	}
 }
 
-// UpsertAllowlistReview records an approve/reject decision for a CIDR.
+// UpsertAllowlistReview records an approve/reject decision for a CIDR. It is
+// the latest-decision record only: it does not retire anything from the
+// review queue, which is emptied by DeleteAllowlistRequests instead.
+//
 // ON CONFLICT DO UPDATE rather than erroring on a repeat: an admin may
 // reject a request and later reconsider, and the review row always
 // reflects the latest decision.
@@ -193,6 +197,36 @@ func (s *SQLiteStore) UpsertAllowlistReview(ctx context.Context, cidr, state, de
 		return fmt.Errorf("store: upsert allowlist review: %w", err)
 	}
 	return nil
+}
+
+// DeleteAllowlistRequests removes every client request for a CIDR and
+// returns how many rows went, which is how a handled request leaves the
+// review queue. It is called after the decision has been recorded, so a
+// failure between the two leaves the request pending -- to be decided again
+// -- rather than deleted with nothing to show for it.
+//
+// Deleting the asks is safe precisely because nothing is lost by it: the
+// decision is in threat_allowlist_reviews and the append-only audit trail
+// holds who decided what, with the note. Keeping the rows instead would let
+// the table grow without bound and, worse, would need a permanent per-CIDR
+// mask over the queue to hide them -- which is what silently swallowed a
+// later, better-evidenced ask for the same address.
+//
+// A CIDR with no requests is a successful no-op returning 0: an admin may
+// legitimately approve or reject an address nobody asked about.
+func (s *SQLiteStore) DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_allowlist_requests WHERE cidr = ?`, cidr)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete allowlist requests: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: delete allowlist requests rows: %w", err)
+	}
+	return int(n), nil
 }
 
 // AppendAllowlistAudit appends one row to the append-only audit trail. It is

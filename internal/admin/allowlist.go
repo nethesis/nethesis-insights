@@ -26,6 +26,7 @@ type AllowlistStore interface {
 	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
 	PendingAllowlistRequests(ctx context.Context, limit int) ([]store.AllowlistRequestRow, error)
 	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
+	DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error)
 	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 	ListAllowlistAudit(ctx context.Context, limit int) ([]store.AllowlistAuditRow, error)
 }
@@ -285,16 +286,22 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
-	// Retire the CIDR from the pending queue. Logged, not fatal: the entry
-	// already exists, which is the operationally important half of this
-	// call, and a review-row failure should not be reported as the whole
-	// approval having failed.
+	// Record the decision. Logged, not fatal: the entry already exists,
+	// which is the operationally important half of this call, and a
+	// review-row failure should not be reported as the whole approval
+	// having failed.
 	if err := s.store.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewApproved, act, note, now); err != nil {
 		slog.Error("admin: record allowlist review failed", "cidr", cidr, "error", err)
 	}
 	detail := auditDetail(note, warning)
 	if err := s.store.AppendAllowlistAudit(r.Context(), cidr, "request.approve", act, detail, now); err != nil {
 		slog.Error("admin: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	// Retire the handled request from the queue, last: the decision and its
+	// audit row are already durable, so a failure here leaves the request
+	// pending rather than losing the ask with nothing recorded.
+	if _, err := s.store.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
+		slog.Error("admin: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
 
 	resp := map[string]any{"cidr": cidr, "state": store.AllowlistReviewApproved}
@@ -348,6 +355,11 @@ func (s *server) handleReject(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.AppendAllowlistAudit(r.Context(), cidr, "request.reject", act, note, now); err != nil {
 		slog.Error("admin: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	// As in handleApprove: the queue is emptied last, once the rejection is
+	// durably recorded.
+	if _, err := s.store.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
+		slog.Error("admin: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"cidr": cidr, "state": store.AllowlistReviewRejected})

@@ -273,6 +273,17 @@ Approving or rejecting is done either through the operator UI's
 `/allowlist-requests` page or through the admin API, both of which require the
 admin key and record who did it.
 
+Once a request has been approved or rejected it **leaves the queue** — the
+queue only ever shows addresses still waiting on a decision. What was asked
+and how it was settled is kept in the audit trail, so a handled request is
+still answerable for later; it just stops asking to be handled again.
+
+Deciding an address is not a permanent verdict on it. If machines ask for the
+same address again after a rejection, it comes back into the queue to be
+looked at afresh — which is what you want, because "two machines asked once"
+and "sixty machines have asked since" deserve different answers, and an old
+`no` should not quietly bury the second case.
+
 ## The operator UI: looking at what the server knows
 
 The operator UI is a separate, optional, read-only web page built into the

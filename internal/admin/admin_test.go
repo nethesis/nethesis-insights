@@ -20,14 +20,16 @@ var adminNow = int64(1700000000000)
 
 // fakeStore is an in-package stand-in for AllowlistStore.
 type fakeStore struct {
-	entries  []store.AllowlistRow
-	pending  []store.AllowlistRequestRow
-	audit    []store.AllowlistAuditRow
-	upserts  []store.AllowlistRow
-	deletes  []string
-	reviews  []reviewCall
-	auditErr error
-	err      error // when set, every method that can fail returns this
+	entries   []store.AllowlistRow
+	pending   []store.AllowlistRequestRow
+	audit     []store.AllowlistAuditRow
+	upserts   []store.AllowlistRow
+	deletes   []string
+	reviews   []reviewCall
+	reqDels   []string // CIDRs passed to DeleteAllowlistRequests, in order
+	auditErr  error
+	delReqErr error // when set, only DeleteAllowlistRequests fails
+	err       error // when set, every method that can fail returns this
 }
 
 type reviewCall struct {
@@ -71,6 +73,29 @@ func (f *fakeStore) UpsertAllowlistReview(_ context.Context, cidr, state, decide
 	}
 	f.reviews = append(f.reviews, reviewCall{cidr, state, decidedBy, note})
 	return nil
+}
+
+// DeleteAllowlistRequests drops the CIDR from the pending queue, so a test
+// can observe the queue emptying and not merely the call happening.
+func (f *fakeStore) DeleteAllowlistRequests(_ context.Context, cidr string) (int, error) {
+	if f.delReqErr != nil {
+		return 0, f.delReqErr
+	}
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.reqDels = append(f.reqDels, cidr)
+	kept := f.pending[:0]
+	removed := 0
+	for _, p := range f.pending {
+		if p.CIDR == cidr {
+			removed++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	f.pending = kept
+	return removed, nil
 }
 
 func (f *fakeStore) AppendAllowlistAudit(_ context.Context, cidr, action, actor, detail string, at int64) error {
@@ -291,6 +316,57 @@ func TestApproveCreatesTheEntryAndRetiresTheRequest(t *testing.T) {
 	}
 	if len(st.audit) != 1 || st.audit[0].Action != "request.approve" || st.audit[0].Actor != "alice" {
 		t.Fatalf("audit: got %+v", st.audit)
+	}
+	if len(st.reqDels) != 1 || st.reqDels[0] != "203.0.113.0/24" {
+		t.Fatalf("handled requests not deleted: got %+v", st.reqDels)
+	}
+}
+
+// A handled request leaves the queue, so the next GET of the review queue
+// does not offer a decision that has already been made.
+func TestApproveAndRejectEmptyTheQueue(t *testing.T) {
+	for _, tc := range []struct{ name, path string }{
+		{"approve", "/admin/v1/allowlist/requests/approve"},
+		{"reject", "/admin/v1/allowlist/requests/reject"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &fakeStore{pending: []store.AllowlistRequestRow{
+				{CIDR: "203.0.113.0/24", DistinctSystems: 5},
+				{CIDR: "198.51.100.0/24", DistinctSystems: 2},
+			}}
+			h := testServer(st)
+
+			if rec := doReq(t, h, http.MethodPost, tc.path, `{"cidr":"203.0.113.0/24"}`, true, "alice"); rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200 (body %s)", rec.Code, rec.Body.String())
+			}
+
+			rec := doReq(t, h, http.MethodGet, "/admin/v1/allowlist/requests", "", true, "")
+			if strings.Contains(rec.Body.String(), "203.0.113.0/24") {
+				t.Fatalf("the handled request is still in the queue: %s", rec.Body.String())
+			}
+			// Only the decided CIDR goes.
+			if !strings.Contains(rec.Body.String(), "198.51.100.0/24") {
+				t.Fatalf("an unrelated request was dropped: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// The queue is emptied only after the decision is recorded: a store that
+// fails the delete must still report the decision as made, since the
+// allowlist entry (approve) or the review row (reject) is already durable
+// and the request will simply come up for review again.
+func TestApproveStillSucceedsIfTheRequestDeleteFails(t *testing.T) {
+	st := &fakeStore{delReqErr: errors.New("disk on fire")}
+	h := testServer(st)
+
+	rec := doReq(t, h, http.MethodPost, "/admin/v1/allowlist/requests/approve",
+		`{"cidr":"203.0.113.0/24"}`, true, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(st.upserts) != 1 {
+		t.Fatalf("the entry must still be created: got %+v", st.upserts)
 	}
 }
 

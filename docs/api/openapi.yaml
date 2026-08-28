@@ -835,10 +835,14 @@ paths:
       summary: Approve a pending allowlist request
       description: |
         **Planned, not yet implemented.** Creates the allowlist entry from
-        the request and marks the `(cidr)` review state `approved`, so it
-        stops resurfacing in the pending queue. This is the only path by
+        the request, marks the `(cidr)` review state `approved`, and removes
+        the handled request from the pending queue. This is the only path by
         which a client request becomes an allowlist entry -- always an
         explicit human decision, never automatic.
+
+        A later request for the same CIDR re-enters the queue: a decision is
+        recorded, not a permanent gag. Approving an already-allowlisted CIDR
+        is an idempotent no-op.
 
         `force` overrides the same over-broad-prefix guardrail as
         `POST /admin/v1/allowlist` (required to approve anything shorter
@@ -904,9 +908,14 @@ paths:
       summary: Reject a pending allowlist request
       description: |
         **Planned, not yet implemented.** Marks the `(cidr)` review state
-        `rejected`, so it stops resurfacing in the pending queue. The
-        underlying per-system request rows are kept, not deleted: rejecting
-        a CIDR must not erase the history of who asked for it.
+        `rejected` and removes the handled request from the pending queue.
+        The per-system request rows are deleted, but the history of who
+        asked for what and how it was decided survives in the append-only
+        audit trail (`GET /admin/v1/allowlist/audit`).
+
+        A later request for the same CIDR re-enters the queue to be reviewed
+        on its own merits -- one rejection on thin evidence must not bury
+        every future ask for that address.
 
         `note` is optional free text recorded on the audit row explaining
         the rejection. `force` has no effect here -- the guardrail only

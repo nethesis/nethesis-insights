@@ -88,6 +88,7 @@ type Writer interface {
 	UpsertThreatAllowlistEntry(ctx context.Context, e store.AllowlistRow) error
 	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
 	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
+	DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error)
 	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 }
 
@@ -979,6 +980,11 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.approve", actor, note, now); err != nil {
 		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
 	}
+	// Retire the handled request, last: see store.DeleteAllowlistRequests
+	// for why the queue is emptied only after the decision is durable.
+	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
+		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
+	}
 	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
 }
 
@@ -1008,6 +1014,9 @@ func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, act
 	}
 	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.reject", actor, note, now); err != nil {
 		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
+		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
 	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
 }

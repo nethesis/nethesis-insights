@@ -135,10 +135,12 @@ func TestPendingAllowlistRequestsAreRankedByDistinctSystemsThenRecency(t *testin
 	}
 }
 
-// Rejecting a CIDR must retire it from the queue without touching the
-// requests that got it there -- an admin needs to be able to see "this was
-// asked for and was rejected", not just silence.
-func TestRejectedRequestsSurviveButLeaveTheQueue(t *testing.T) {
+// Handling a request removes it: recording the decision is not what empties
+// the queue, deleting the asks is. A review row on its own must leave the
+// request exactly where it was, or the two halves of "handled" could drift
+// apart and an operator would see a queue that disagrees with the audit
+// trail.
+func TestHandledRequestsLeaveTheQueueOnlyWhenDeleted(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
@@ -150,26 +152,141 @@ func TestRejectedRequestsSurviveButLeaveTheQueue(t *testing.T) {
 		t.Fatalf("UpsertAllowlistReview: %v", err)
 	}
 
+	// The decision alone does not retire anything.
 	pending, err := s.PendingAllowlistRequests(ctx, 0)
 	if err != nil {
 		t.Fatalf("PendingAllowlistRequests: %v", err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("pending: got %+v, want the rejected CIDR gone from the queue", pending)
+	if len(pending) != 1 || pending[0].CIDR != cidr {
+		t.Fatalf("pending after the review row alone: got %+v, want the request still queued", pending)
 	}
 
-	// A fresh ask for the same, still-rejected CIDR must not resurrect it:
-	// the review row is keyed on cidr alone and is not cleared by a new
-	// request.
-	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-2", "still want it", 3000); err != nil {
-		t.Fatalf("UpsertAllowlistRequest (after rejection): %v", err)
+	removed, err := s.DeleteAllowlistRequests(ctx, cidr)
+	if err != nil {
+		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed: got %d, want 1", removed)
 	}
 	pending, err = s.PendingAllowlistRequests(ctx, 0)
 	if err != nil {
 		t.Fatalf("PendingAllowlistRequests: %v", err)
 	}
 	if len(pending) != 0 {
-		t.Fatalf("pending after a fresh ask: got %+v, want the rejected CIDR to stay out of the queue", pending)
+		t.Fatalf("pending after the delete: got %+v, want the handled CIDR gone", pending)
+	}
+}
+
+// A past decision must not gag a later ask. A CIDR rejected once on thin
+// evidence has to be reviewable again when more systems report it --
+// otherwise one hasty rejection silently buries every future request for
+// that address, and nobody is told.
+func TestAFreshAskAfterADecisionReturnsToTheQueue(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const cidr = "203.0.113.0/24"
+
+	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000); err != nil {
+		t.Fatalf("UpsertAllowlistRequest: %v", err)
+	}
+	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "not enough evidence", 2000); err != nil {
+		t.Fatalf("UpsertAllowlistReview: %v", err)
+	}
+	if _, err := s.DeleteAllowlistRequests(ctx, cidr); err != nil {
+		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	}
+
+	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-2", "still want it", 3000); err != nil {
+		t.Fatalf("UpsertAllowlistRequest (after the rejection): %v", err)
+	}
+	pending, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(pending) != 1 || pending[0].CIDR != cidr {
+		t.Fatalf("pending after a fresh ask: got %+v, want the CIDR reviewable again", pending)
+	}
+	// The new ask is counted on its own, not on top of the deleted one.
+	if pending[0].DistinctSystems != 1 {
+		t.Fatalf("distinct systems: got %d, want 1 -- the deleted ask must not still count",
+			pending[0].DistinctSystems)
+	}
+	if pending[0].LastRequestedAt != 3000 {
+		t.Fatalf("last requested: got %d, want 3000", pending[0].LastRequestedAt)
+	}
+}
+
+// Deleting requests for a CIDR nobody asked about is a successful no-op: an
+// admin may approve or reject an address out of band.
+func TestDeleteAllowlistRequestsWithNothingQueued(t *testing.T) {
+	s := newTestStore(t)
+
+	removed, err := s.DeleteAllowlistRequests(context.Background(), "203.0.113.0/24")
+	if err != nil {
+		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed: got %d, want 0", removed)
+	}
+}
+
+// The delete is scoped to its CIDR: handling one request must not clear the
+// rest of the queue.
+func TestDeleteAllowlistRequestsTouchesOnlyItsCIDR(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "a", 1000); err != nil {
+		t.Fatalf("UpsertAllowlistRequest: %v", err)
+	}
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-1", "b", 1000); err != nil {
+		t.Fatalf("UpsertAllowlistRequest: %v", err)
+	}
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-2", "b", 1100); err != nil {
+		t.Fatalf("UpsertAllowlistRequest: %v", err)
+	}
+
+	if _, err := s.DeleteAllowlistRequests(ctx, "203.0.113.0/24"); err != nil {
+		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	}
+
+	pending, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(pending) != 1 || pending[0].CIDR != "198.51.100.0/24" || pending[0].DistinctSystems != 2 {
+		t.Fatalf("pending: got %+v, want only 198.51.100.0/24 with 2 systems", pending)
+	}
+}
+
+// Every ask for a CIDR goes, not just the one row that happened to be
+// newest: the queue counts distinct systems, so leaving any behind would
+// leave the CIDR queued at a lower count -- which reads as a fresh, weaker
+// request that nobody made.
+func TestDeleteAllowlistRequestsRemovesEverySystemsAsk(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const cidr = "203.0.113.0/24"
+
+	for i, sys := range []string{"sys-1", "sys-2", "sys-3"} {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please", int64(1000+i*100)); err != nil {
+			t.Fatalf("UpsertAllowlistRequest(%s): %v", sys, err)
+		}
+	}
+
+	removed, err := s.DeleteAllowlistRequests(ctx, cidr)
+	if err != nil {
+		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("removed: got %d, want 3", removed)
+	}
+	pending, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending: got %+v, want empty", pending)
 	}
 }
 
@@ -186,10 +303,9 @@ func TestUpsertAllowlistReviewOverwritesAPriorDecision(t *testing.T) {
 	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewApproved, "bob", "reconsidered", 2000); err != nil {
 		t.Fatalf("UpsertAllowlistReview (approve): %v", err)
 	}
-	// No direct getter for one review row; PendingAllowlistRequests's
-	// "no live row" behavior together with the lack of an error above is the
-	// externally observable proof that the second call replaced the first
-	// rather than being rejected as a duplicate key.
+	// There is no getter for a single review row, so the lack of an error
+	// above is the observable proof: the cidr is the primary key, and a
+	// second insert that was not an upsert would fail on it.
 }
 
 // The audit trail is append-only: every write appends exactly one row, and

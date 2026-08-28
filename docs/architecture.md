@@ -346,9 +346,28 @@ credential.
 
 Three tables sit behind it. `threat_allowlist_requests` is keyed
 `(cidr, system_id)` so one system counts once, mirroring the blocklist's
-distinct-system rule; `threat_allowlist_reviews` records the human verdict, an
-absent row meaning pending; `threat_allowlist_audit` is append-only and exists
-because `DELETE` destroys the row that would otherwise hold the trail.
+distinct-system rule; `threat_allowlist_reviews` records the latest human
+verdict; `threat_allowlist_audit` is append-only and exists because `DELETE`
+destroys the row that would otherwise hold the trail.
+
+**A handled request is deleted, not masked.** Approving or rejecting records
+the verdict, appends the audit row, and then calls `DeleteAllowlistRequests`
+to drop every ask for that CIDR — in that order, so a failed delete leaves the
+request pending to be decided again rather than losing the ask with nothing
+recorded. `PendingAllowlistRequests` therefore means exactly "a request row
+exists" and does not consult `threat_allowlist_reviews` at all.
+
+The reason is not tidiness. Masking the queue on a per-CIDR review row — the
+earlier design — made a decision permanent in the wrong direction: an address
+rejected once on thin evidence could never be raised again, however many
+systems went on to ask for it, and nobody was told it was being swallowed.
+Deleting the asks instead loses nothing, because the verdict is in
+`threat_allowlist_reviews` and the append-only audit trail holds who decided
+what with their note, while a later ask is reviewed on its own merits.
+`TestAFreshAskAfterADecisionReturnsToTheQueue` is the executable form of that.
+A consequence to keep in mind: re-approving an address that is already
+allowlisted is an idempotent no-op, so a fresh ask for one is harmless noise in
+the queue rather than a problem.
 
 **The operator UI's GET-only invariant has changed.** It used to be "every
 route answers GET, anything else is 405, enforced once, centrally" — the reason

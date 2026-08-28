@@ -20,6 +20,7 @@ type fakeWriter struct {
 	upserted []store.AllowlistRow
 	deleted  []string
 	reviews  []review
+	reqDels  []string // CIDRs passed to DeleteAllowlistRequests, in order
 	audit    []auditCall
 	err      error
 }
@@ -50,6 +51,14 @@ func (f *fakeWriter) UpsertAllowlistReview(_ context.Context, cidr, state, decid
 	}
 	f.reviews = append(f.reviews, review{cidr, state, decidedBy, note})
 	return nil
+}
+
+func (f *fakeWriter) DeleteAllowlistRequests(_ context.Context, cidr string) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.reqDels = append(f.reqDels, cidr)
+	return 1, nil
 }
 
 func (f *fakeWriter) AppendAllowlistAudit(_ context.Context, cidr, action, actor, detail string, _ int64) error {
@@ -289,6 +298,12 @@ func TestApproveAndRejectRecordTheReviewAndAudit(t *testing.T) {
 			}
 			if len(w.audit) == 0 || w.audit[len(w.audit)-1].actor != "bob" {
 				t.Fatalf("audit: %+v", w.audit)
+			}
+			// Handling the request retires it from the queue, so the page the
+			// operator is redirected back to no longer offers the decision
+			// they just made.
+			if len(w.reqDels) != 1 || w.reqDels[0] != "203.0.113.0/24" {
+				t.Fatalf("handled request not deleted: %+v", w.reqDels)
 			}
 		})
 	}

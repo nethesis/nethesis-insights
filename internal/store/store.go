@@ -106,6 +106,7 @@ type Store interface {
 	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (distinctSystems int, err error)
 	PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error)
 	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
+	DeleteAllowlistRequests(ctx context.Context, cidr string) (removed int, err error)
 	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 	ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error)
 }
@@ -285,11 +286,13 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			created_at INTEGER,
 			PRIMARY KEY (cidr, system_id)
 		)`,
-		// An absent row means "pending". state is "approved" or "rejected";
-		// either one permanently retires the cidr from the pending queue
-		// without touching the requests that got it there. Re-reviewing an
-		// already-decided cidr overwrites the row rather than erroring, since
-		// an admin may reject and then reconsider.
+		// The latest decision for a cidr, and nothing more: state is
+		// "approved" or "rejected". It does not gate the pending queue --
+		// handling a request deletes the threat_allowlist_requests rows that
+		// raised it, so a later ask for the same cidr is reviewed on its own
+		// merits instead of being silently swallowed by an old decision.
+		// Re-reviewing an already-decided cidr overwrites the row rather than
+		// erroring, since an admin may reject and then reconsider.
 		`CREATE TABLE IF NOT EXISTS threat_allowlist_reviews (
 			cidr TEXT PRIMARY KEY,
 			state TEXT,

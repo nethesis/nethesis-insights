@@ -155,11 +155,16 @@ threat_allowlist_audit(id TEXT PRIMARY KEY, cidr TEXT, action TEXT, actor TEXT,
                        at INTEGER, detail TEXT)
 ```
 
-- Requests are append-only per system, so the counter survives a rejection and
-  "who asked, and when" stays answerable.
-- An absent `threat_allowlist_reviews` row means pending; `state` is `approved` or
-  `rejected`. Rejected CIDRs stop surfacing in the queue without deleting the
-  history of the request.
+- Requests are keyed per system, so the queue counts systems and not asks.
+- `threat_allowlist_reviews` holds the latest decision; `state` is `approved` or
+  `rejected`. It does **not** gate the queue.
+- **Superseded during implementation:** the queue was originally masked by the
+  review row, which kept the request rows forever and made one rejection a
+  permanent gag on that CIDR. Handling a request now *deletes* its rows
+  (`DeleteAllowlistRequests`), called after the verdict and audit row are
+  durable. "Who asked, and how it was decided" is answerable from the
+  append-only audit trail, and a later ask for the same CIDR is reviewed on its
+  own merits. See `docs/architecture.md` § The allowlist admin plane.
 - The audit table exists because `DELETE` removes the row that would otherwise
   hold the trail. Without it, "who removed the exemption that let this through"
   is unanswerable — which is the question that gets asked.
