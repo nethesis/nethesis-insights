@@ -21,6 +21,18 @@ Both live in this repository:
 - Spec: `docs/specs/2026-08-05-nethesis-insights-design.md`
 - Plan: `docs/plans/2026-08-05-nethesis-insights.md` (Tasks 1–10)
 
+Two more docs describe the system as it stands today, not just why it was
+designed this way, and **must be kept up to date as part of every change that
+affects what they describe** — package boundaries, the analyzer's step order,
+the wire protocol, storage schema, the gate/fingerprint formulas, or the
+operator UI's pages:
+
+- `docs/architecture.md` — package layout, request flow, storage, and the
+  correctness invariants, for engineers working on the code.
+- `docs/user-guide.md` — plain-language explanation of the system for anyone
+  who isn't reading Go: what a finding/analysis/template/baseline is, and how
+  to use the operator UI.
+
 Read the spec before changing gating, fingerprinting, the wire protocol, or the analyzer's step
 order — those sections explain *why* each rule exists, and the reasons are not
 reconstructible from the code.
