@@ -226,9 +226,21 @@ func observedAt(raw string, now int64) (int64, bool) {
 const MaxScenarioLen = 128
 
 // cleanScenario bounds and de-fangs a scenario name without judging it.
-// Control characters are stripped so the value cannot break a log line, and
-// the result is truncated by rune so a multi-byte name cannot be cut in half.
 func cleanScenario(s string) string {
+	return CleanText(s, MaxScenarioLen)
+}
+
+// CleanText strips control characters and truncates by rune to at most max
+// runes. It is the one sanitizer for every piece of free text that reaches
+// this server from outside and ends up in a rendered page, a log line or a
+// database column: CrowdSec scenarios, allowlist request/entry reasons,
+// admin actors. Truncating by rune rather than by byte is what keeps a
+// multi-byte name from being cut in half.
+//
+// This never rejects -- fail-open on content is the rule for text fields
+// throughout this pipeline (see Sanitize's doc comment) -- so a caller that
+// needs to reject unprintable input must check before calling this.
+func CleanText(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
 			return -1
@@ -236,8 +248,8 @@ func cleanScenario(s string) string {
 		return r
 	}, strings.TrimSpace(s))
 
-	if runes := []rune(s); len(runes) > MaxScenarioLen {
-		s = string(runes[:MaxScenarioLen])
+	if runes := []rune(s); len(runes) > max {
+		s = string(runes[:max])
 	}
 	return s
 }

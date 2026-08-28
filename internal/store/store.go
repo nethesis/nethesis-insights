@@ -101,6 +101,16 @@ type Store interface {
 	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
 	ListSystemEgress(ctx context.Context) ([]EgressRow, error)
+
+	// Allowlist management: a client-facing request queue (internal/api),
+	// and the admin API / operator UI writes that turn a reviewed request,
+	// or an out-of-band decision, into a threat_allowlist row
+	// (internal/admin, internal/ui). See docs/plans/2026-08-28-allowlist-management.md.
+	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (distinctSystems int, err error)
+	PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error)
+	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
+	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
+	ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error)
 }
 
 type SQLiteStore struct {
@@ -266,6 +276,53 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			truncated INTEGER,
 			PRIMARY KEY (day, system_id)
 		)`,
+
+		// --- Allowlist management ---
+		//
+		// threat_allowlist itself (above) is unchanged. These three tables add
+		// a client-facing request queue and its audit trail on top of it, with
+		// no path from a request to a live entry that does not pass through an
+		// explicit admin decision -- see the "no automatic promotion" rule in
+		// CLAUDE.md.
+		//
+		// Requests are append-only per (cidr, system_id): a rejection or an
+		// approval never deletes them, so "who asked, and when" survives the
+		// decision. The counter that ranks the review queue is
+		// COUNT(DISTINCT system_id) over this table, mirroring the blocklist's
+		// own distinct-systems rule.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_requests (
+			cidr TEXT,
+			system_id TEXT,
+			reason TEXT,
+			created_at INTEGER,
+			PRIMARY KEY (cidr, system_id)
+		)`,
+		// An absent row means "pending". state is "approved" or "rejected";
+		// either one permanently retires the cidr from the pending queue
+		// without touching the requests that got it there. Re-reviewing an
+		// already-decided cidr overwrites the row rather than erroring, since
+		// an admin may reject and then reconsider.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_reviews (
+			cidr TEXT PRIMARY KEY,
+			state TEXT,
+			decided_by TEXT,
+			decided_at INTEGER,
+			note TEXT
+		)`,
+		// Append-only, and deliberately never updated or deleted: DELETE on
+		// threat_allowlist removes the very row that would otherwise hold the
+		// trail, so without this table "who removed the exemption that let
+		// this through" is unanswerable -- which is the question that gets
+		// asked.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_audit (
+			id TEXT PRIMARY KEY,
+			cidr TEXT,
+			action TEXT,
+			actor TEXT,
+			at INTEGER,
+			detail TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_allowlist_audit_at ON threat_allowlist_audit(at)`,
 	}
 
 	for _, stmt := range stmts {

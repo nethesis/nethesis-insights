@@ -29,12 +29,13 @@ type fakeReader struct {
 	templates []store.TemplateRow
 	baselines []store.BaselineRow
 
-	blocklist    []store.BlocklistRow
-	threatEvents []store.ThreatEventRow
-	threatDaily  []store.ThreatDailyRow
-	threatIngest []store.ThreatIngestRow
-	allowlist    []store.AllowlistRow
-	egress       []store.EgressRow
+	blocklist        []store.BlocklistRow
+	threatEvents     []store.ThreatEventRow
+	threatDaily      []store.ThreatDailyRow
+	threatIngest     []store.ThreatIngestRow
+	allowlist        []store.AllowlistRow
+	egress           []store.EgressRow
+	allowlistRequest []store.AllowlistRequestRow
 
 	err error // when set, every method returns this error instead
 }
@@ -193,9 +194,24 @@ func newTestServer(t *testing.T, r Reader, rt Runtime) http.Handler {
 	return newTestServerWithFeed(t, r, rt, nil)
 }
 
+// newTestServerWithFeed builds a read-only server: no writer, no admin key.
+// Every existing (pre-allowlist-management) test relies on writes being
+// unreachable, which is also the off-by-default behavior this helper is
+// meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, rt Runtime, feed Feed) http.Handler {
 	t.Helper()
-	return NewServer(r, rt, feed, Info{
+	return NewServer(r, rt, feed, testInfo(), nil, "")
+}
+
+// newWriteTestServer builds a server with the write routes enabled against
+// w, authenticated with adminKey.
+func newWriteTestServer(t *testing.T, r Reader, rt Runtime, feed Feed, w Writer, adminKey string) http.Handler {
+	t.Helper()
+	return NewServer(r, rt, feed, testInfo(), w, adminKey)
+}
+
+func testInfo() Info {
+	return Info{
 		StartedAt: 1700000000000,
 		Workers:   4,
 		Build:     "test-build",
@@ -204,7 +220,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, rt Runtime, feed Feed) http.H
 			{Name: "AUTH_PEPPER", Value: "set"},
 			{Name: "DB_PATH", Value: "/tmp/insights.db"},
 		},
-	})
+	}
 }
 
 func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {
@@ -230,6 +246,7 @@ var routes = []struct {
 	{"/blocklist", "<h1>Blocklist</h1>"},
 	{"/threat-events", "<h1>Threat events</h1>"},
 	{"/threat-stats", "<h1>Threat stats</h1>"},
+	{"/allowlist-requests", "<h1>Allowlist requests</h1>"},
 }
 
 func TestRoutesOK(t *testing.T) {
@@ -436,7 +453,7 @@ func TestSecretRedaction(t *testing.T) {
 			{Name: "LLM_API_KEY", Value: "set"},
 			{Name: "AUTH_PEPPER", Value: "set (ephemeral)"},
 		},
-	})
+	}, nil, "")
 
 	rec := get(t, h, "/")
 	body := rec.Body.String()

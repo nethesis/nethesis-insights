@@ -249,6 +249,30 @@ address published fleet-wide. That requirement cannot be enforced here yet, so
 three machines belonging to the same customer do count as consensus. The
 allowlist and fleet self-protection above are what stands in for it.
 
+### Asking for an address to be left alone
+
+Sometimes the fleet agrees about an address that is not actually an attacker —
+a partner's security scanner, a shared resolver, a customer's own gateway. Two
+things exist for that.
+
+A node can **ask**: `POST /v1/allowlist-requests` puts the address in a review
+queue, ranked by how many different machines asked for it. Forty customers all
+hitting the same shared resolver floats it to the top; a single opportunistic
+request sinks.
+
+A human then **decides**. Nothing is ever exempted automatically, and this is
+deliberate rather than an unfinished feature. The blocklist and the allowlist
+look like mirror images and are not: if the fleet wrongly blocks an address,
+somebody notices within the day and it expires anyway, whereas if the fleet
+wrongly *exempts* an address, nobody notices at all — there is no complaint to
+be made about not being blocked — and it stays exempt forever. Reporting an
+attack is evidence; asking to be exempted is an opinion. So the counter ranks
+the queue and does nothing else.
+
+Approving or rejecting is done either through the operator UI's
+`/allowlist-requests` page or through the admin API, both of which require the
+admin key and record who did it.
+
 ## The operator UI: looking at what the server knows
 
 The operator UI is a separate, optional, read-only web page built into the
@@ -272,6 +296,13 @@ What each page shows, in plain terms:
 | `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |
 | `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
 | `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
+| `/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here. |
+
+If an admin key is configured, this UI also gains a small number of **buttons**
+— add or remove an allowlist entry, approve or reject a request. Those actions,
+and only those, ask for a password; everything else on every page stays
+readable without one. Whatever username you type at that prompt is recorded
+alongside the change, so the audit trail says who did it.
 
 Nothing on this UI ever shows a raw, unmasked log line — the server never
 stores those in the first place, so there's nothing to show. And the page

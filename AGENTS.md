@@ -77,9 +77,27 @@ Threat Shield rules that are as load-bearing as the gate's:
 - **The reporter's source IP comes from `RemoteAddr`, never `X-Forwarded-For`.** It
   feeds the egress exclusion set and the header is client-controlled. Consequence:
   behind a reverse proxy the exclusion records the proxy and stops being useful.
-- `threat_allowlist` has **no HTTP surface** — this server has no admin auth plane.
-  `store.UpsertThreatAllowlistEntry` / `DeleteThreatAllowlistEntry` are the supported
-  out-of-band seam.
+- **Nothing is ever allowlisted automatically.** A client request
+  (`POST /v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
+  an explicit admin approval creates an entry. Never add a consensus threshold that
+  promotes one. A wrong blocklist entry blocks a legitimate address loudly and expires;
+  a wrong allowlist entry exempts an attacker silently and permanently, so the two
+  consensus rules are not symmetric however much they look it.
+- **The admin plane is off unless both `ADMIN_LISTEN_ADDR` and `ADMIN_API_KEY` are
+  set**, on its own listener, and there is never a default key. `X-Admin-Actor` is
+  required on every write and recorded in an append-only audit table — which exists
+  because `DELETE` destroys the row that would hold the trail. The actor is not a
+  security control; say so wherever it is documented.
+- **The operator UI's GET-only rule is now GET-plus-an-enumerated-POST-list.** Every
+  write route authenticates against `ADMIN_API_KEY` (Basic; the username is the actor)
+  and refuses cross-site requests — a browser replays cached Basic credentials
+  automatically, so without that check any page could exempt an attacker's address.
+  Keep the enumeration in `writableRoutes`, next to the central check.
+- **Allowlist prefixes wider than `/24` (v4) or `/48` (v6) need an explicit `force`.**
+  `0.0.0.0/0` on the allowlist silently disables the whole feed.
+- **Every endpoint must appear in `docs/api/openapi.yaml`**, whose schemas mirror
+  `internal/model` field-for-field. `docs/api/openapi_test.go` fails the build on a
+  missing or stale path. The operator UI is deliberately not documented there.
 
 `docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
 scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
@@ -100,7 +118,8 @@ of the spec are **not** built before assuming a bug:
 | Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
 | Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
-| Operator UI | `internal/ui`: read-only, zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set — unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses). Backed by the cross-system read methods in `internal/store/ui.go` and `internal/store/threat_ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Operator UI | `internal/ui`: zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses); an enumerated set of `POST` routes authenticates against `ADMIN_API_KEY` and exists only when that is set. Backed by the cross-system read methods in `internal/store/ui.go` and `internal/store/threat_ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Allowlist management | built: `POST /v1/allowlist-requests`, `internal/admin` on `ADMIN_LISTEN_ADDR`, UI review pages. Both off unless configured | cross-org scoping once auth returns a tenant |
 | Threat Shield | built: `internal/threat` (pure), `internal/store/threat.go`, `internal/blocklist`, `internal/api/threat.go`, three UI pages. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;

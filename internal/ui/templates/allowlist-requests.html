@@ -1,0 +1,58 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Allowlist requests</h1>
+<p><small>A customer asking that a CIDR be exempted from blocklist promotion.
+This is a review queue, not a decision procedure: however many systems ask,
+nothing here becomes a live allowlist entry without an explicit approval
+below. Ranked by distinct systems, then by how recently one asked.</small></p>
+
+<table>
+<thead>
+<tr><th>CIDR</th><th class="num">Systems</th><th>First asked</th><th>Last asked</th>
+<th>Reasons</th>{{if .CanWrite}}<th>Decision</th>{{end}}</tr>
+</thead>
+<tbody>
+{{range .Requests}}
+<tr>
+<td class="mono">{{.CIDR}}</td>
+<td class="num">{{.DistinctSystems}}</td>
+<td class="mono" title="{{fmtTime .FirstRequestedAt}}">{{fmtAgo .FirstRequestedAt}}</td>
+<td class="mono" title="{{fmtTime .LastRequestedAt}}">{{fmtAgo .LastRequestedAt}}</td>
+<td>
+{{range .Reasons}}<div>{{.}}</div>{{else}}&mdash;{{end}}
+</td>
+{{if $.CanWrite}}
+<td>
+<form method="post" action="/allowlist-requests/approve">
+<input type="hidden" name="cidr" value="{{.CIDR}}">
+<fieldset role="group">
+<input type="text" name="note" placeholder="note (optional)">
+<label><input type="checkbox" name="force"> force</label>
+<button type="submit">Approve</button>
+</fieldset>
+</form>
+<form method="post" action="/allowlist-requests/reject">
+<input type="hidden" name="cidr" value="{{.CIDR}}">
+<fieldset role="group">
+<input type="text" name="note" placeholder="note (optional)">
+<button type="submit" class="secondary">Reject</button>
+</fieldset>
+</form>
+</td>
+{{end}}
+</tr>
+{{else}}
+<tr><td colspan="{{if .CanWrite}}6{{else}}5{{end}}">no pending requests</td></tr>
+{{end}}
+</tbody>
+</table>
+
+{{if not .CanWrite}}
+<p><small>ADMIN_API_KEY is not configured on this deployment, so approving or
+rejecting a request is not available here &mdash; use the admin API directly,
+or set ADMIN_API_KEY to enable these forms.</small></p>
+{{end}}
+{{end}}

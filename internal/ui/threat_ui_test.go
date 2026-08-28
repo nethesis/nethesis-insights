@@ -64,6 +64,17 @@ func (f *fakeReader) ListSystemEgress(_ context.Context) ([]store.EgressRow, err
 	return f.egress, f.err
 }
 
+func (f *fakeReader) PendingAllowlistRequests(_ context.Context, limit int) ([]store.AllowlistRequestRow, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := f.allowlistRequest
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // fakeFeed is a fixed snapshot state.
 type fakeFeed struct {
 	ready       bool

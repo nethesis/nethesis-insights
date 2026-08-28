@@ -1,28 +1,38 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package ui serves an optional, off-by-default, unauthenticated read-only
-// operator dashboard for insightsd. It replaces the shell helper that used to
-// need sqlite3, root on the node and the podman volume path, and adds the live
-// process state a query over the database could never see: queue depth,
-// uptime, and the effective configuration.
+// Package ui serves an optional, off-by-default operator dashboard for
+// insightsd. It replaces the shell helper that used to need sqlite3, root on
+// the node and the podman volume path, and adds the live process state a
+// query over the database could never see: queue depth, uptime, and the
+// effective configuration.
 //
-// This surface is unauthenticated and fleet-wide -- it shows every system's
-// findings, templates, baselines and spend, across tenants. That is why the
-// constraints here are not optional:
+// Reads are unauthenticated and fleet-wide -- every GET shows every
+// system's findings, templates, baselines and spend, across tenants, exactly
+// as before. That is why most of the constraints here are not optional:
 //
-//   - Zero JavaScript. Interactions are <meta refresh>, <form method="get">
-//     and <details>, never a <script> tag.
-//   - Every handler is GET-only; anything else is 405, enforced once,
-//     centrally.
+//   - Zero JavaScript. Interactions are <meta refresh>, <form> and
+//     <details>, never a <script> tag.
 //   - Every list is bounded server-side.
 //   - Secrets never render: Info.Config arrives already redacted by the
 //     caller, and this package never reads the environment.
+//
+// A small, explicit, enumerated set of routes also answers POST: adding and
+// removing a threat_allowlist entry, and approving/rejecting a client's
+// allowlist request. Every one of those authenticates with HTTP Basic
+// against ADMIN_API_KEY before doing anything, and is registered at all only
+// when a key was configured -- with none set, this package behaves exactly
+// like the read-only dashboard it used to be. See writableRoutes and
+// route() for the one place this rule is enforced. The Basic username
+// becomes the actor recorded with the write and in the audit trail; this is
+// not a security control (anyone holding the key can claim any name), only
+// a readable trail.
 package ui
 
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"embed"
 	"html/template"
 	"io/fs"
@@ -35,6 +45,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/store"
+	"github.com/nethesis/nethesis-insights/internal/threat"
 )
 
 //go:embed templates static
@@ -59,6 +70,26 @@ type Reader interface {
 	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
 	ListSystemEgress(ctx context.Context) ([]store.EgressRow, error)
+
+	// PendingAllowlistRequests backs the /allowlist-requests review queue.
+	// This is a read: the queue is visible to anyone who can reach this
+	// listener, exactly like every other page here, and it carries no more
+	// than a ranked list of CIDRs someone asked about. Only acting on an
+	// entry (approve/reject) requires the admin key.
+	PendingAllowlistRequests(ctx context.Context, limit int) ([]store.AllowlistRequestRow, error)
+}
+
+// Writer is the slice of store.Store the UI's write routes need: adding or
+// removing a threat_allowlist entry, and turning a request into an approval
+// or a rejection. It is wired in, and its routes are registered, only when
+// ADMIN_API_KEY is set -- see NewServer and writableRoutes.
+//
+// *store.SQLiteStore satisfies it, exactly like Reader.
+type Writer interface {
+	UpsertThreatAllowlistEntry(ctx context.Context, e store.AllowlistRow) error
+	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
+	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
+	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -129,6 +160,7 @@ var navPages = []navPage{
 	{"blocklist", "/blocklist", "Blocklist"},
 	{"threat-events", "/threat-events", "Threat events"},
 	{"threat-stats", "/threat-stats", "Threat stats"},
+	{"allowlist-requests", "/allowlist-requests", "Allowlist requests"},
 }
 
 type navItem struct {
@@ -150,16 +182,23 @@ type pageData struct {
 }
 
 type server struct {
-	reader Reader
-	rt     Runtime
-	feed   Feed
-	info   Info
-	tmpl   map[string]*template.Template
-	static http.Handler
+	reader   Reader
+	rt       Runtime
+	feed     Feed
+	info     Info
+	writer   Writer
+	adminKey string
+	tmpl     map[string]*template.Template
+	static   http.Handler
 }
 
 // NewServer builds the operator UI handler. rt and feed may be nil.
-func NewServer(r Reader, rt Runtime, feed Feed, info Info) http.Handler {
+//
+// w and adminKey wire the write half: if adminKey is empty, w is never
+// consulted and every writable route answers 405 exactly like any other
+// non-GET request -- an operator who has not set ADMIN_API_KEY gets the
+// plain read-only dashboard, with no write form reachable at all.
+func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey string) http.Handler {
 	staticFS, err := fs.Sub(assets, "static")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -169,18 +208,21 @@ func NewServer(r Reader, rt Runtime, feed Feed, info Info) http.Handler {
 	}
 
 	srv := &server{
-		reader: r,
-		rt:     rt,
-		feed:   feed,
-		info:   info,
-		tmpl:   parseTemplates(),
-		static: http.FileServer(http.FS(staticFS)),
+		reader:   r,
+		rt:       rt,
+		feed:     feed,
+		info:     info,
+		writer:   w,
+		adminKey: adminKey,
+		tmpl:     parseTemplates(),
+		static:   http.FileServer(http.FS(staticFS)),
 	}
 
 	mux := http.NewServeMux()
 	// Every path, including unknown ones, is dispatched centrally through
-	// route() so the GET-only rule and the 404 fallback are enforced in
-	// exactly one place, per the plan's "enforce it centrally, once".
+	// route() so the GET-only rule (and its small, explicit write exception)
+	// and the 404 fallback are enforced in exactly one place, per the plan's
+	// "enforce it centrally, once".
 	mux.HandleFunc("/", srv.route)
 
 	return &loggingHandler{next: mux}
@@ -195,6 +237,7 @@ var pages = []string{
 	"status.html", "systems.html", "findings.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html",
 	"blocklist.html", "threat-events.html", "threat-stats.html",
+	"allowlist-requests.html",
 }
 
 func parseTemplates() map[string]*template.Template {
@@ -207,11 +250,48 @@ func parseTemplates() map[string]*template.Template {
 	return out
 }
 
+// writableRoutes is the small, explicit, enumerated set of paths that also
+// answer POST. It lives here, next to the GET-only check it modifies, so
+// "which routes can write" stays answerable by reading this one function --
+// see the plan's decision 2. Every route not in this set still 405s on
+// anything but GET, exactly as before that plan.
+//
+// The CIDR itself never travels in these paths: it is always a form field,
+// mirroring the admin API's rule that it never travels in a path segment.
+var writableRoutes = map[string]bool{
+	"/blocklist/allowlist":        true, // add or update an entry
+	"/blocklist/allowlist/delete": true, // remove an entry
+	"/allowlist-requests/approve": true,
+	"/allowlist-requests/reject":  true,
+}
+
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
-	// This is a read-only surface: every route, including /static/, answers
-	// only GET. Enforced once, here, rather than per-handler.
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		// Every route answers GET. A small, explicit, enumerated set of
+		// routes also answers POST, and every one of those authenticates
+		// before doing anything -- see the package doc comment. Anything
+		// else, including a write route reached without ADMIN_API_KEY
+		// configured (s.writer/s.adminKey unset), is still a plain 405: this
+		// is what makes "no key configured" mean "no write forms reachable
+		// at all", not "reachable but always unauthorized".
+		if s.writer == nil || s.adminKey == "" || !writableRoutes[r.URL.Path] {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		actor, ok := s.authenticateWrite(w, r)
+		if !ok {
+			return
+		}
+		switch r.URL.Path {
+		case "/blocklist/allowlist":
+			s.handleAddAllowlist(w, r, actor)
+		case "/blocklist/allowlist/delete":
+			s.handleDeleteAllowlist(w, r, actor)
+		case "/allowlist-requests/approve":
+			s.handleApproveRequest(w, r, actor)
+		case "/allowlist-requests/reject":
+			s.handleRejectRequest(w, r, actor)
+		}
 		return
 	}
 
@@ -243,6 +323,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleThreatEvents(w, r)
 	case "/threat-stats":
 		s.handleThreatStats(w, r)
+	case "/allowlist-requests":
+		s.handleAllowlistRequests(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and
@@ -250,6 +332,77 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		// this 404 rather than silently rendering the status page.
 		http.NotFound(w, r)
 	}
+}
+
+// authenticateWrite checks HTTP Basic against ADMIN_API_KEY and returns the
+// sanitized username as the actor to record with the write. The browser
+// prompts for these credentials natively -- this costs no JavaScript, no
+// cookie and no session state, exactly as the plan requires.
+// sameOriginWrite reports whether a write request plausibly came from this
+// UI's own pages rather than from another site.
+//
+// This matters more here than the usual CSRF case. The write routes
+// authenticate with HTTP Basic, and a browser that has been given Basic
+// credentials once **replays them automatically on every later request to
+// the same origin** -- including a form POST triggered by an unrelated page
+// the operator happens to visit afterwards. Without this check, any site
+// could auto-submit a form at 127.0.0.1:9596 and add an attacker's address to
+// the fleet allowlist, silently and permanently. That is precisely the harm
+// the "no automatic promotion" decision exists to prevent, so it must not be
+// reachable through the browser either.
+//
+// Two headers, both sent by browsers and neither forgeable by a cross-site
+// page:
+//
+//   - Sec-Fetch-Site must be same-origin (or "none" for a direct address-bar
+//     action). A cross-site form POST arrives as "cross-site".
+//   - Origin, when present, must name this host.
+//
+// A request carrying neither header is allowed: that is a non-browser client
+// (curl, a script), which has no ambient credential to be abused in the first
+// place -- CSRF is a browser problem, and refusing curl would only break the
+// legitimate scripted path without closing anything.
+func sameOriginWrite(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
+}
+
+func (s *server) authenticateWrite(w http.ResponseWriter, r *http.Request) (string, bool) {
+	// Checked before the credential: a cross-site request must be refused
+	// whether or not the browser attached a valid cached one, and answering
+	// 401 here would prompt the operator for a password on a forged form.
+	if !sameOriginWrite(r) {
+		slog.Warn("ui: refused a cross-site write",
+			"path", r.URL.Path,
+			"origin", r.Header.Get("Origin"),
+			"sec_fetch_site", r.Header.Get("Sec-Fetch-Site"),
+			"remote_addr", r.RemoteAddr)
+		http.Error(w, "cross-site writes are refused", http.StatusForbidden)
+		return "", false
+	}
+
+	username, password, ok := r.BasicAuth()
+	if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(s.adminKey)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Basic realm="insightsd admin"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return "", false
+	}
+	actor := threat.CleanText(username, model.MaxAdminActorLen)
+	if actor == "" {
+		http.Error(w, "a non-empty username is required as the actor", http.StatusBadRequest)
+		return "", false
+	}
+	return actor, true
 }
 
 func (s *server) render(w http.ResponseWriter, page string, data any) {
@@ -585,6 +738,7 @@ type blocklistPageData struct {
 	Allowlist []store.AllowlistRow
 	Egress    []store.EgressRow
 	Now       int64
+	CanWrite  bool
 }
 
 // handleBlocklist shows what the fleet currently agrees on, plus the two
@@ -613,7 +767,16 @@ func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		Allowlist: allowlist,
 		Egress:    egress,
 		Now:       time.Now().UnixMilli(),
+		CanWrite:  s.canWrite(),
 	})
+}
+
+// canWrite reports whether the write forms should render at all. It is
+// false whenever ADMIN_API_KEY was not configured -- the plan requires that
+// case to leave the UI with "no write forms at all", not forms that render
+// and then always 401.
+func (s *server) canWrite() bool {
+	return s.writer != nil && s.adminKey != ""
 }
 
 type threatEventsPageData struct {
@@ -669,6 +832,163 @@ func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
 		Daily:    daily,
 		Ingest:   ingest,
 	})
+}
+
+// --- Allowlist requests: the review queue, and its write half ---
+
+// allowlistRequestsLimit bounds the queue the same way every other
+// unauthenticated list here is bounded.
+const allowlistRequestsLimit = 200
+
+type allowlistRequestsPageData struct {
+	pageData
+	Requests []store.AllowlistRequestRow
+	CanWrite bool
+}
+
+// handleAllowlistRequests shows the pending review queue. It is a GET, and
+// therefore unauthenticated like every other page: the queue is a ranked
+// list of CIDRs someone asked about, and only acting on one (approve/reject)
+// requires the admin key.
+func (s *server) handleAllowlistRequests(w http.ResponseWriter, r *http.Request) {
+	requests, err := s.reader.PendingAllowlistRequests(r.Context(), allowlistRequestsLimit)
+	if err != nil {
+		s.storeError(w, "allowlist-requests", err)
+		return
+	}
+	s.render(w, "allowlist-requests.html", allowlistRequestsPageData{
+		pageData: s.newPageData(r, "allowlist-requests"),
+		Requests: requests,
+		CanWrite: s.canWrite(),
+	})
+}
+
+// handleAddAllowlist and handleDeleteAllowlist are POST form handlers
+// (writableRoutes), reached only after HTTP Basic authentication. Both
+// redirect back to /blocklist rather than answering JSON: this is a human
+// submitting a form, and the useful response is the updated page, not a
+// status code.
+
+func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	force := r.FormValue("force") != ""
+	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), force)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	reason := threat.CleanText(r.FormValue("reason"), model.MaxAllowlistReasonLen)
+	now := time.Now().UnixMilli()
+
+	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
+		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
+	}); err != nil {
+		s.storeError(w, "blocklist", err)
+		return
+	}
+	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.upsert", actor, reason, now); err != nil {
+		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	http.Redirect(w, r, "/blocklist", http.StatusSeeOther)
+}
+
+func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	// force=true: breadth guards adding an exemption, not removing one --
+	// the caller must be able to remove whatever is actually stored.
+	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	existed, err := s.writer.DeleteThreatAllowlistEntry(r.Context(), cidr)
+	if err != nil {
+		s.storeError(w, "blocklist", err)
+		return
+	}
+	if !existed {
+		http.Error(w, "no such allowlist entry", http.StatusNotFound)
+		return
+	}
+	now := time.Now().UnixMilli()
+	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.delete", actor, "", now); err != nil {
+		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	http.Redirect(w, r, "/blocklist", http.StatusSeeOther)
+}
+
+// handleApproveRequest is the only path this package offers from a client
+// request to a live allowlist entry, and it only ever runs because an
+// authenticated human submitted this form -- see the "no automatic
+// promotion" rule in CLAUDE.md.
+func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, actor string) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	force := r.FormValue("force") != ""
+	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), force)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
+	reason := note
+	if reason == "" {
+		reason = "approved via operator UI"
+	}
+	now := time.Now().UnixMilli()
+
+	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
+		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
+	}); err != nil {
+		s.storeError(w, "allowlist-requests", err)
+		return
+	}
+	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewApproved, actor, note, now); err != nil {
+		slog.Error("ui: record allowlist review failed", "cidr", cidr, "error", err)
+	}
+	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.approve", actor, note, now); err != nil {
+		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
+}
+
+// handleRejectRequest creates no allowlist entry -- there is nothing here
+// that could auto-promote anything.
+func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, actor string) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	raw := strings.TrimSpace(r.FormValue("cidr"))
+	if raw == "" {
+		http.Error(w, "cidr is required", http.StatusBadRequest)
+		return
+	}
+	cidr, _, err := threat.ParseAllowlistEntry(raw, true) // no entry is created; breadth is irrelevant
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
+	now := time.Now().UnixMilli()
+
+	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewRejected, actor, note, now); err != nil {
+		s.storeError(w, "allowlist-requests", err)
+		return
+	}
+	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.reject", actor, note, now); err != nil {
+		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
+	}
+	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
 }
 
 // --- logging ---

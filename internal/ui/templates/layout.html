@@ -31,7 +31,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{template "content" .}}
 </main>
 <footer class="container">
-<small>insightsd operator UI &middot; build {{.Build}} &middot; up {{.Uptime}} &middot; read-only, unauthenticated, fleet-wide</small>
+<small>insightsd operator UI &middot; build {{.Build}} &middot; up {{.Uptime}} &middot; reads are unauthenticated and fleet-wide; a small set of write routes require the admin key</small>
 </footer>
 </body>
 </html>

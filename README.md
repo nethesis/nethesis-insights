@@ -125,6 +125,8 @@ locally with `podman build -t nethesis-insights .`.
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
 | `THREAT_EVENT_RETENTION` | how long raw threat events are kept (default `168h`) |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request decision cap; over-cap batches are truncated, not rejected (default `500`) |
+| `ADMIN_LISTEN_ADDR` | bind address for the allowlist admin API (default empty — **the admin plane is off**). Needs `ADMIN_API_KEY` too |
+| `ADMIN_API_KEY` | bearer key for the admin API and for the operator UI's write forms — secret; unset means **no admin surface at all**, never a default credential |
 
 `LOG_LEVEL=debug` adds request detail, the reason behind every 401/400/403,
 the gate decision and its inputs, prompt size, provider status and timing, and
@@ -156,6 +158,7 @@ It is **off unless you set `UI_LISTEN_ADDR`**:
 | `/blocklist` | the consensus feed with its promotion evidence, plus the allowlist and fleet-egress exclusion sets |
 | `/threat-events` | recent sanitized CrowdSec decisions; filter by system or attacker IP |
 | `/threat-stats` | daily threat rollup per scenario, and per-node ingest accounting |
+| `/allowlist-requests` | the review queue: what customers asked to have exempted, ranked by how many distinct systems asked |
 
 ### Read this before exposing it
 
@@ -185,7 +188,20 @@ Note the container must bind `:9596` internally while `podman` publishes it to
 
 Everything else about it is constrained to match that exposure:
 
-- **Read-only.** No handler writes; anything other than `GET` is `405`.
+- **`GET` is read-only and unauthenticated.** Every page answers `GET` with no
+  credential, exactly as before.
+- **Writes exist only when `ADMIN_API_KEY` is set**, on a short enumerated list
+  of `POST` routes, each authenticating with HTTP Basic against that key before
+  doing anything. With no key they are `405` — not "reachable but unauthorized".
+  The Basic *username* becomes the actor recorded in the audit trail, which is
+  why there is no separate actor field. It is not a security control: anyone
+  holding the key can claim any name.
+- **Cross-site writes are refused.** A browser replays a cached Basic
+  credential automatically on every later request to the same origin, so
+  without this any page could auto-submit a form at the UI and exempt an
+  attacker's address. Writes require `Sec-Fetch-Site: same-origin` (or `none`)
+  and an `Origin` matching the host; a request with neither header — a script,
+  which has no ambient credential to abuse — is allowed.
 - **No secrets.** The configuration table is built from an explicit list of
   fields, never by iterating the environment. `LLM_API_KEY` and `AUTH_PEPPER`
   appear only as `set` / `unset` (or `set (ephemeral)` for a generated pepper).
@@ -259,6 +275,65 @@ Try it locally, with the promotion rule relaxed to a single system:
 
     scripts/insights-api.sh threat-events decisions.json
     scripts/insights-api.sh blocklist
+
+## Allowlist management
+
+The allowlist keeps an address off the blocklist however many systems report
+it — a shared resolver, a partner's scanner, a customer's own WAN range. It is
+applied at promotion rather than at read, so adding an entry unlists the
+address on the next consensus pass instead of merely hiding it.
+
+Two ways in, plus a customer-facing way to ask:
+
+| endpoint | who |
+|---|---|
+| `POST /v1/allowlist-requests` | an edge asks for an address to be exempted |
+| `/admin/v1/allowlist*` | an operator reviews and decides |
+| operator UI `/allowlist-requests`, `/blocklist` | the same decisions, with buttons |
+
+**Nothing is ever allowlisted automatically.** A customer request is a ranked
+review queue entry and nothing else; only an explicit approval creates an
+entry. The two consensus rules look symmetric and are not — a wrong blocklist
+entry blocks a legitimate address loudly and expires in `BLOCKLIST_TTL`, while
+a wrong allowlist entry exempts an attacker silently and permanently. Blocklist
+consensus counts nodes reporting *what they observed*; an allowlist request is
+an opinion with a subscription credential behind it and nothing more.
+
+The admin API is bearer-authenticated with `ADMIN_API_KEY` on its own listener:
+
+    ADMIN_LISTEN_ADDR=127.0.0.1:9597 ADMIN_API_KEY=... insightsd
+
+    curl -H "Authorization: Bearer $KEY" -H 'X-Admin-Actor: alice' \
+         -H 'Content-Type: application/json' \
+         -d '{"cidr":"203.0.113.0/24","reason":"partner scanner"}' \
+         127.0.0.1:9597/admin/v1/allowlist
+
+`X-Admin-Actor` is required on every write and is recorded in an append-only
+audit table — which exists because `DELETE` destroys the row that would
+otherwise hold the trail, and "who removed the exemption that let this
+through" is the question that gets asked. It is not a security control: anyone
+holding the key can claim any name.
+
+A prefix broader than `/24` (IPv4) or `/48` (IPv6) is refused unless the caller
+passes `force`. `0.0.0.0/0` on the allowlist silently disables the entire feed
+and nothing anywhere would report it.
+
+Deleting an entry **re-blocks nothing**: the address returns to the blocklist
+only if enough distinct systems report it again.
+
+## API reference
+
+`docs/api/openapi.yaml` (OpenAPI 3.1) describes every HTTP endpoint — the log
+pipeline, Threat Shield, the admin plane and `/healthz` — with the schemas
+mirroring `internal/model` field-for-field. It is what `ns8-crowdsec` and
+`ns8-loki` build clients against.
+
+The operator UI is deliberately absent from it: that surface serves HTML to a
+human, has no stable contract, and documenting it would invite scripting
+against it.
+
+`docs/api/openapi_test.go` fails the build if an endpoint is added without
+being documented.
 
 ## License
 

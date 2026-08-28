@@ -102,6 +102,7 @@ func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig) 
 	if tc.enabled() {
 		mux.HandleFunc("/v1/threat-events", srv.handleThreatEvents)
 		mux.HandleFunc("/v1/blocklist", srv.handleBlocklist)
+		mux.HandleFunc("/v1/allowlist-requests", srv.handleAllowlistRequest)
 	}
 	srv.mux = mux
 	return &loggingHandler{next: mux}

@@ -195,10 +195,60 @@ threat_allowlist_audit(id TEXT PRIMARY KEY, cidr TEXT, action TEXT, actor TEXT,
    route set, and Basic auth on it. `GET` untouched.
 7. **`cmd/insightsd`** — `ADMIN_API_KEY`, `ADMIN_LISTEN_ADDR`, wiring, the
    loopback warning, `ConfigItem` rows (the key as `set`/`unset`, never the value).
-8. **Docs** — `README.md` (config, endpoints, and the UI's changed security
+8. **`docs/api/openapi.yaml`** — an OpenAPI 3.1 description of **every** HTTP
+   endpoint this server exposes, not only the new ones. See below.
+9. **Docs** — `README.md` (config, endpoints, and the UI's changed security
    story), `docs/architecture.md` (the admin plane and the weakened GET-only
    invariant), `docs/user-guide.md` (how to review a request), `AGENTS.md` (the
    invariant change and the no-auto-allowlist rule), `scripts/insights-api.sh`.
+
+## OpenAPI
+
+One document, `docs/api/openapi.yaml`, OpenAPI 3.1, covering all three
+surfaces. It is the artifact other teams read instead of our Go code —
+`ns8-crowdsec` and `ns8-loki` both build clients against these endpoints — so
+it has to be complete rather than a description of the new work only.
+
+| surface | endpoints |
+|---|---|
+| edge, log pipeline | `POST /v1/bundles`, `GET /v1/findings` |
+| edge, Threat Shield | `POST /v1/threat-events`, `GET /v1/blocklist`, `POST /v1/allowlist-requests` |
+| admin | the seven `/admin/v1/allowlist*` operations |
+| unauthenticated | `GET /healthz` |
+
+Requirements, because a half-written spec is worse than none:
+
+- **Three security schemes, applied per operation**, matching reality:
+  `basicAuth` (edge credentials, forward-auth validated), `bearerAuth`
+  (`ADMIN_API_KEY`), and explicitly `security: []` on `/healthz`. Admin
+  operations additionally document the required `X-Admin-Actor` header.
+- **Every response an endpoint can actually return**, including the ones that
+  carry meaning here: `202` with the drop counters, `304` on the feed, the
+  `503` that means "no snapshot yet" as distinct from "validator unreachable",
+  `403` on a mismatched `system_id`, and `400` for a missing `X-Admin-Actor`.
+- **Schemas mirroring `internal/model`** — `Bundle`, `Finding`, `Decision`,
+  `ThreatReport`, `ThreatCounters`, plus the allowlist request/entry/audit
+  shapes. Field names and JSON tags must match the Go structs exactly; a spec
+  that disagrees with the wire format is a trap.
+- `GET /v1/blocklist` returns `text/plain`, not JSON. Document the header
+  format in the description and the `ETag`/`Cache-Control`/`Vary` response
+  headers.
+- Servers list: the production base URL and `http://localhost:9595` for local
+  work. The admin surface is a separate listener, so it gets its own server
+  entry pointing at `http://localhost:9597`.
+- Examples on every request body, taken from real payloads rather than
+  invented ones.
+
+The operator UI is **not** described: it serves HTML to humans, has no stable
+contract, and documenting it would invite someone to script against it.
+
+**Drift.** A spec that silently falls behind the code is the normal outcome, so
+add `docs/api/openapi_test.go` (package `docs_test` or similar) that parses the
+YAML and asserts the documented path set exactly equals an explicit list of the
+routes the server registers, and that every non-`/healthz` operation declares a
+security scheme. It cannot prove the schemas match the structs, but it does fail
+the build when someone adds an endpoint and forgets the spec, which is the
+failure that actually happens. `AGENTS.md` gets the rule in prose as well.
 
 ## Testing
 
@@ -222,6 +272,8 @@ threat_allowlist_audit(id TEXT PRIMARY KEY, cidr TEXT, action TEXT, actor TEXT,
 - **End to end** — request from a client credential, see it ranked in the queue,
   approve it as an admin, watch the address leave the blocklist on the next
   consensus pass.
+- **OpenAPI** — the document parses, its path set matches the registered routes
+  exactly, and every operation except `/healthz` declares a security scheme.
 
 ## Verification
 

@@ -64,6 +64,7 @@ llm  store                  interfaces, each with a real and a stub impl
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 api                         HTTP: ingest + read, auth via the Authenticator iface
+admin                       HTTP: allowlist admin plane, own listener, off by default
 ui                          HTTP: optional operator dashboard, off by default
 cmd/insightsd                env config, wiring, graceful shutdown
 ```
@@ -85,7 +86,8 @@ and `ui` does not import `api` or `analyzer`.
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
 | `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `/healthz`. |
-| `internal/ui` | Optional, read-only, zero-JavaScript operator dashboard on its own listener. |
+| `internal/admin` | The allowlist admin plane: bearer-key auth, the seven `/admin/v1/allowlist*` handlers, on its own listener. A separate package from `internal/api` so the public ingest surface and the admin surface can never accidentally share a route table. |
+| `internal/ui` | Optional, zero-JavaScript operator dashboard on its own listener. `GET` is unauthenticated; an enumerated set of `POST` routes authenticates against `ADMIN_API_KEY`. |
 | `cmd/insightsd` | Reads environment config, wires every package together, runs the consensus ticker, runs graceful shutdown. |
 
 The purity of `gate`, `fingerprint` and `prompt` is deliberate: they hold all
@@ -327,6 +329,49 @@ Consequences worth knowing:
   the fleet actually reported, which is more useful than four buckets and is
   what makes the rollup a real threat-trend asset.
 
+### The allowlist admin plane
+
+Three surfaces now write to `threat_allowlist`, and exactly one thing is true
+of all of them: **no path promotes a customer request automatically.** A
+request is a ranked queue entry; only an explicit approval creates an entry.
+`TestClientRequestsNeverAutoPromoteToTheAllowlist` and
+`TestAllowlistRequestsNeverAutoPromote` are the executable form of that rule.
+
+`internal/admin` is a separate package from `internal/api`, and a separate
+listener from the ingest socket. On `:9595` the API key would be the entire
+defence; on a normally loopback-bound admin port it is the second layer behind
+the network. With `ADMIN_API_KEY` or `ADMIN_LISTEN_ADDR` unset the listener
+never starts, so "unconfigured" means a closed port rather than a guessable
+credential.
+
+Three tables sit behind it. `threat_allowlist_requests` is keyed
+`(cidr, system_id)` so one system counts once, mirroring the blocklist's
+distinct-system rule; `threat_allowlist_reviews` records the human verdict, an
+absent row meaning pending; `threat_allowlist_audit` is append-only and exists
+because `DELETE` destroys the row that would otherwise hold the trail.
+
+**The operator UI's GET-only invariant has changed.** It used to be "every
+route answers GET, anything else is 405, enforced once, centrally" — the reason
+an unauthenticated fleet-wide page was safe to run. It is now:
+
+> Every route answers GET. A small, explicit, enumerated set of routes also
+> answers POST, and every one of those authenticates before doing anything.
+
+The enumeration (`writableRoutes`) lives next to the central check in
+`route()`, so "which routes can write" is answerable by reading one function.
+Writes are registered only when `ADMIN_API_KEY` is set.
+
+Write routes additionally refuse cross-site requests. This is not boilerplate
+CSRF hygiene: the routes authenticate with HTTP Basic, and a browser replays a
+cached Basic credential automatically on every later same-origin request,
+including a form POST from an unrelated page the operator visits afterwards.
+Without the check any site could add an attacker's address to the fleet
+allowlist silently and permanently — the exact harm the no-automatic-promotion
+rule exists to prevent. `sameOriginWrite` requires `Sec-Fetch-Site:
+same-origin`/`none` and an `Origin` matching the host, and allows a request
+carrying neither header, which is a non-browser client with no ambient
+credential to abuse.
+
 ## Finding identity: the fingerprint
 
 `fingerprint.Compute(systemID, modules, evidence, category)` hashes
@@ -470,3 +515,6 @@ reimplements the query.
 - **The egress exclusion needs real client IPs.** Behind a reverse proxy every
   reporter appears to come from the proxy, and fleet self-protection stops
   protecting anything.
+- **The admin actor is self-declared.** One shared `ADMIN_API_KEY` has no
+  identity behind it, so `X-Admin-Actor` is a readable trail, not an
+  authorization boundary — anyone with the key can claim any name.
