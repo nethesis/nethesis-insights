@@ -179,6 +179,29 @@ as `TEXT` and parsed in Go.
 Raw `samples` from the bundle are **never** persisted — the DB and the UI can
 only ever show masked templates.
 
+### The EWMA baseline formula
+
+`store.UpsertBaselines` maintains one exponentially-weighted moving average
+per `(system_id, module_id, priority)`:
+
+```
+newRate = EWMA_ALPHA * observed + (1 - EWMA_ALPHA) * prevRate   // prevRate exists
+newRate = observed                                              // first sample
+```
+
+This is the standard EWMA recurrence, and the implementation matches it
+exactly (verified against `internal/store/store.go`). Two things worth being
+precise about, since the name invites confusion:
+
+- **`EWMA_ALPHA` itself must be in `(0, 1]`** — it is a blend weight, not the
+  baseline. The code does not clamp or validate it (`cmd/insightsd`'s
+  `getenvFloat` accepts any parseable float), so an operator-supplied value
+  outside that range would silently produce a nonsensical baseline (e.g. a
+  negative or diverging `ewma_rate`). Keep it in `(0, 1]` when configuring.
+- **`ewma_rate` (the baseline itself) is not bounded to `[0, 1]`.** It is in
+  the same units as `observed` — a line count for one window — so it can
+  legitimately be 0, or in the thousands, depending on the module.
+
 ## Finding identity: the fingerprint
 
 `fingerprint.Compute(systemID, modules, evidence, category)` hashes

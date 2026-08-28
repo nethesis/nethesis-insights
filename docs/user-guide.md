@@ -19,19 +19,12 @@ to use the operator UI. For the technical package-level design, see
 NethServer machines produce logs constantly. Somewhere in that stream are the
 handful of lines that mean "something is actually wrong" — a service crash-
 looping, a login being brute-forced, a disk filling up. Finding those lines
-by hand across ~2700 machines is not realistic, so the old approach put a
-small AI analyzer directly on every customer machine, each with its own API
-key to a paid LLM service.
+by hand across ~2700 machines is not realistic.
 
-That had three problems: an API key sitting on every customer's box
-(credential sprawl), no memory between one 15-minute check and the next (so
-the same problem got reported over and over), and no way to control how much
-money the fleet was spending on LLM calls.
-
-`nethesis-insights` replaces that: it's one central server. Every node still
-watches its own logs and packages up what changed, but the *decision* to
-spend money asking an AI about it, and the *memory* of what's already been
-reported, both live here instead.
+`nethesis-insights` is one central server that does this instead: every node
+still watches its own logs and packages up what changed, but the *decision*
+to spend money asking an AI about it, and the *memory* of what's already been
+reported, both live here — one place, not one per machine.
 
 ## The moving parts, in order
 
@@ -104,12 +97,31 @@ the fact from stored data — see the `/analyses` and `/gate` pages below.
 
 Not every node's log collector knows how many lines it expects to see for a
 given module. When it doesn't say, the server keeps its own running estimate
-per `(machine, module, priority)`, called a **baseline** — a smoothed average
-("EWMA") that adapts gradually as normal behavior for that machine drifts
-over time. The gate compares the actual count in a bundle against this
-baseline (or the node's own stated expectation, if it gave one) to decide
-whether a module is behaving unusually. You can see the current baseline for
-every module of every machine on the `/baselines` page.
+per `(machine, module, priority)`, called a **baseline**. The gate compares
+the actual count in a bundle against this baseline (or the node's own stated
+expectation, if it gave one) to decide whether a module is behaving
+unusually. You can see the current baseline for every module of every
+machine on the `/baselines` page.
+
+**What "EWMA" means, in simple words.** EWMA stands for Exponentially
+Weighted Moving Average — a fancy name for a simple idea: "my new estimate of
+normal is mostly my old estimate, nudged a little bit toward whatever just
+happened." Every time a new count comes in, the server blends it with the
+previous baseline:
+
+    new baseline = (a little bit × this window's count) + (mostly × old baseline)
+
+That "a little bit" is `EWMA_ALPHA` (default `0.3`, i.e. 30%). A higher
+`EWMA_ALPHA` makes the baseline react faster to recent changes; a lower one
+makes it more stable and slower to move. The very first time a module is
+seen, there's no "old baseline" yet, so the baseline just starts out equal to
+that first count.
+
+One thing worth being precise about: **`EWMA_ALPHA` itself is always between
+0 and 1** (it's a blending weight — "how much of the new value to mix in").
+The *baseline value it produces* is **not** a 0–1 number — it's a count of
+log lines, so it can be anything from 0 to several thousand, whatever is
+normal for that module on that machine.
 
 ### 5. The analysis: when the AI actually looks
 

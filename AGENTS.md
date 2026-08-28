@@ -10,10 +10,6 @@ the server gates each bundle against novelty and deviation, calls an LLM **only*
 when the gate fires, and stores findings keyed by a server-computed fingerprint so
 the same problem is never re-raised.
 
-It replaces a per-node Python analyzer in `ns8-loki` that put an LLM API key on
-every customer machine. Three problems drive every design decision here:
-credential sprawl, no cross-window memory, and uncontrolled inference cost.
-
 ## Design documents (authoritative)
 
 Both live in this repository:
