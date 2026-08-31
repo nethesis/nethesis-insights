@@ -85,16 +85,22 @@ type server struct {
 	auth   Authenticator
 	threat ThreatConfig
 	mux    *http.ServeMux
+
+	// excludeModules names modules dropped from every bundle before it is
+	// queued. See model.Bundle.ExcludeModules for why this is applied here
+	// and not deeper in the pipeline.
+	excludeModules map[string]bool
 }
 
 // NewServer builds the ingest and read API. tc wires the Threat Shield
 // endpoints, which are a separate pipeline sharing only this listener and the
-// Authenticator; its zero value leaves them unregistered.
-func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig) http.Handler {
+// Authenticator; its zero value leaves them unregistered. excludeModules names
+// modules stripped from every incoming bundle; nil keeps all of them.
+func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig, excludeModules map[string]bool) http.Handler {
 	if tc.Now == nil {
 		tc.Now = func() int64 { return time.Now().UnixMilli() }
 	}
-	srv := &server{queue: q, store: s, auth: auth, threat: tc}
+	srv := &server{queue: q, store: s, auth: auth, threat: tc, excludeModules: excludeModules}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
@@ -248,12 +254,22 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strip modules that own a dedicated pipeline before anything else sees
+	// the bundle. Doing it here rather than in the analyzer keeps it to one
+	// place: the gate, the prompt, system_templates and module_baselines all
+	// read from what is queued, so none of them can disagree about which
+	// modules are in scope.
+	receivedTemplates, receivedDigest := len(b.Templates), len(b.Digest)
+	b = b.ExcludeModules(s.excludeModules)
+
 	slog.Debug("bundle accepted for analysis",
 		"system_id", b.SystemID,
 		"window_start", b.Window.Start,
 		"window_end", b.Window.End,
 		"templates", len(b.Templates),
 		"digest_entries", len(b.Digest),
+		"templates_received", receivedTemplates,
+		"digest_entries_received", receivedDigest,
 		"collector_version", b.CollectorVersion,
 		"lines_seen", b.Budget.LinesSeen,
 		"lines_kept", b.Budget.LinesKept,

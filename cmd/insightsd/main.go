@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +59,32 @@ func getenvDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// getenvModuleSet parses a comma-separated module list into a set. Blank
+// entries are dropped, so "crowdsec1,," is the same as "crowdsec1" and an empty
+// value disables the exclusion entirely rather than excluding the host bucket,
+// whose module id is the empty string.
+func getenvModuleSet(key, def string) map[string]bool {
+	raw := getenv(key, def)
+	set := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		if m := strings.TrimSpace(part); m != "" {
+			set[m] = true
+		}
+	}
+	return set
+}
+
+// sortedKeys renders a set deterministically, so the effective-config table
+// shows the same string on every restart with the same configuration.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func getenvInt(key string, def int) int {
@@ -204,6 +232,9 @@ func main() {
 	authNegCacheTTL := getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
 	authTimeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
+	// CrowdSec has its own pipeline (/v1/threat-events -> blocklist), so its
+	// log lines must not also be sent to the LLM.
+	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec1")
 	staleAfter := getenvDuration("STALE_AFTER", 24*time.Hour)
 	ewmaAlpha := getenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := getenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
@@ -295,7 +326,7 @@ func main() {
 		Feed:         snapshot,
 		MaxDecisions: threatMaxDecisions,
 		Now:          func() int64 { return time.Now().UnixMilli() },
-	})
+	}, excludeModules)
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
@@ -328,6 +359,7 @@ func main() {
 		{Name: "AUTH_NEG_CACHE_TTL", Value: authNegCacheTTL.String()},
 		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
 		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
+		{Name: "PIPELINE_EXCLUDE_MODULES", Value: strings.Join(sortedKeys(excludeModules), ",")},
 		{Name: "STALE_AFTER", Value: staleAfter.String()},
 		{Name: "EWMA_ALPHA", Value: strconv.FormatFloat(ewmaAlpha, 'f', -1, 64)},
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},

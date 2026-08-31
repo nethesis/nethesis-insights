@@ -119,6 +119,23 @@ func SortFindings(f []Finding) {
 	})
 }
 
+// LessTemplate orders templates by (ModuleID, Priority, Template).
+//
+// This is the single definition of template order. prompt.SortedTemplates uses
+// it to number the identifiers the model cites, and fingerprint uses it to pick
+// the canonical primary template out of a cited set. Those two must agree: if
+// they ever disagree, a finding's identity stops matching the evidence the
+// operator is shown for it.
+func LessTemplate(a, b Template) bool {
+	if a.ModuleID != b.ModuleID {
+		return a.ModuleID < b.ModuleID
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.Template < b.Template
+}
+
 // CategoryOf returns the Category of the matching template, else "".
 func (b Bundle) CategoryOf(template string) string {
 	for _, t := range b.Templates {
@@ -127,4 +144,51 @@ func (b Bundle) CategoryOf(template string) string {
 		}
 	}
 	return ""
+}
+
+// ExcludeModules returns a copy of b with every template, digest entry and
+// truncation record whose ModuleID is in excluded removed.
+//
+// A module that owns a dedicated pipeline must not also be analysed by the LLM
+// one. CrowdSec is the case this exists for: its decisions already travel
+// through /v1/threat-events into the blocklist, so shipping its log lines to the
+// model pays twice for the same signal and floods the gate with novelty churn.
+//
+// All three collections are filtered together. Dropping only Templates would
+// leave the digest firing deviation reasons for a module the prompt never
+// mentions, which is a gate decision nobody can explain from the stored data.
+//
+// An empty or nil excluded set returns b unchanged. The empty module id is the
+// host bucket (sshd, systemd, runagent) and is an ordinary module here: it is
+// excluded only if the caller explicitly lists it.
+func (b Bundle) ExcludeModules(excluded map[string]bool) Bundle {
+	if len(excluded) == 0 {
+		return b
+	}
+
+	out := b
+
+	out.Templates = make([]Template, 0, len(b.Templates))
+	for _, t := range b.Templates {
+		if !excluded[t.ModuleID] {
+			out.Templates = append(out.Templates, t)
+		}
+	}
+
+	out.Digest = make([]DigestEntry, 0, len(b.Digest))
+	for _, e := range b.Digest {
+		if !excluded[e.ModuleID] {
+			out.Digest = append(out.Digest, e)
+		}
+	}
+
+	out.Budget = b.Budget
+	out.Budget.TruncatedModules = make([]TruncatedModule, 0, len(b.Budget.TruncatedModules))
+	for _, tm := range b.Budget.TruncatedModules {
+		if !excluded[tm.ModuleID] {
+			out.Budget.TruncatedModules = append(out.Budget.TruncatedModules, tm)
+		}
+	}
+
+	return out
 }
