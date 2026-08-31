@@ -121,7 +121,12 @@ many entries are served and when, never the body.
    the same filtered bundle and cannot disagree about which modules are in
    scope. CrowdSec is excluded by default because it already has its own
    pipeline (`POST /v1/threat-events` → the blocklist); analysing its log
-   lines as well pays twice for one signal.
+   lines as well pays twice for one signal. `PIPELINE_EXCLUDE_SERVICES`
+   (default `insights`) then filters on a second axis — the `[service]` tag
+   `model.ServiceTag` reads off each masked host record — because host records
+   all carry `module_id: ""` and the module filter cannot reach them. A line
+   whose shape `ServiceTag` does not recognise is kept, and digest entries are
+   not filtered by service since they carry no service dimension.
 4. The bundle is handed to `queue.Publish`, which either enqueues it or
    returns `queue.ErrFull`.
 5. The handler answers **immediately** — `202 Accepted` on success, `503` if

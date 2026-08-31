@@ -41,7 +41,7 @@ func allowlistServer(st store.Store) http.Handler {
 			Feed:         &fakeFeed{},
 			MaxDecisions: 500,
 			Now:          func() int64 { return threatNow },
-		}, nil)
+		}, nil, nil)
 }
 
 func postAllowlistRequest(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {

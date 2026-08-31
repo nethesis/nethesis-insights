@@ -108,3 +108,96 @@ func TestExcludeModulesDoesNotMutateInput(t *testing.T) {
 		t.Fatalf("input bundle was mutated: %+v", in)
 	}
 }
+
+func TestServiceTag(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`<3> [insights] time=<TS> level=DEBUG msg="gate decision"`, "insights"},
+		{`<6> [sshd-session] Received disconnect from <IP> port <NUM>`, "sshd-session"},
+		{`<4>[node_exporter] collector failed`, "node_exporter"},
+		// Shapes ServiceTag must not claim to understand.
+		{`sshd: failed password for <USER>`, ""},
+		{`<6> no bracket here`, ""},
+		{`<6> [unterminated`, ""},
+		{`<6> []`, ""},
+		{``, ""},
+		{`<>`, ""},
+	}
+	for _, c := range cases {
+		if got := ServiceTag(c.in); got != c.want {
+			t.Errorf("ServiceTag(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExcludeServicesDropsOnlyTheNamedService(t *testing.T) {
+	in := Bundle{Templates: []Template{
+		{Template: `<3> [insights] msg="gate decision"`},
+		{Template: `<6> [sshd-session] Received disconnect from <IP>`},
+		{Template: `<4> [node_exporter] collector failed`},
+	}}
+	got := in.ExcludeServices(map[string]bool{"insights": true})
+
+	if len(got.Templates) != 2 {
+		t.Fatalf("expected 2 templates, got %d: %+v", len(got.Templates), got.Templates)
+	}
+	for _, tpl := range got.Templates {
+		if ServiceTag(tpl.Template) == "insights" {
+			t.Fatalf("excluded service survived: %+v", got.Templates)
+		}
+	}
+}
+
+// A line ServiceTag cannot parse must be kept. Dropping it would silently
+// discard evidence; failing open toward analysis is the safe direction.
+func TestExcludeServicesKeepsUnparseableLines(t *testing.T) {
+	in := Bundle{Templates: []Template{
+		{Template: `sshd: failed password for <USER>`},
+		{Template: `<3> [insights] msg="gate decision"`},
+	}}
+	got := in.ExcludeServices(map[string]bool{"insights": true, "": true})
+
+	if len(got.Templates) != 1 {
+		t.Fatalf("expected the unparseable line to survive, got %+v", got.Templates)
+	}
+	if got.Templates[0].Template != `sshd: failed password for <USER>` {
+		t.Fatalf("wrong template kept: %+v", got.Templates)
+	}
+}
+
+func TestExcludeServicesEmptySetIsIdentity(t *testing.T) {
+	in := Bundle{Templates: []Template{{Template: `<3> [insights] x`}}}
+	for _, set := range []map[string]bool{nil, {}} {
+		if got := in.ExcludeServices(set); len(got.Templates) != 1 {
+			t.Fatalf("empty exclusion set changed the bundle: %+v", got)
+		}
+	}
+}
+
+// Digest and truncation records carry no service dimension, so they must be
+// passed through untouched -- documented limitation, asserted so it stays
+// deliberate.
+func TestExcludeServicesLeavesDigestAlone(t *testing.T) {
+	in := Bundle{
+		Templates: []Template{{Template: `<3> [insights] x`}},
+		Digest:    []DigestEntry{{ModuleID: "", Priority: 3, Observed: 99}},
+		Budget:    Budget{TruncatedModules: []TruncatedModule{{ModuleID: ""}}},
+	}
+	got := in.ExcludeServices(map[string]bool{"insights": true})
+	if len(got.Templates) != 0 {
+		t.Fatalf("template not excluded: %+v", got.Templates)
+	}
+	if len(got.Digest) != 1 || len(got.Budget.TruncatedModules) != 1 {
+		t.Fatalf("digest/truncation were filtered: %+v", got)
+	}
+}
+
+func TestExcludeServicesDoesNotMutateInput(t *testing.T) {
+	in := Bundle{Templates: []Template{
+		{Template: `<3> [insights] x`},
+		{Template: `<6> [sshd] y`},
+	}}
+	_ = in.ExcludeServices(map[string]bool{"insights": true})
+	if len(in.Templates) != 2 {
+		t.Fatalf("input bundle was mutated: %+v", in)
+	}
+}

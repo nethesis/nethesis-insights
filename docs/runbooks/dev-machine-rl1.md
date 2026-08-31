@@ -123,11 +123,20 @@ LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
 LLM_API_KEY=<paste a fresh OpenRouter key>
 GATE_TOLERANCE=3.0
 PIPELINE_EXCLUDE_MODULES=crowdsec1
+PIPELINE_EXCLUDE_SERVICES=insights
 STALE_AFTER=24h
 EWMA_ALPHA=0.3
 LOG_LEVEL=debug
 EOF
 ```
+
+`PIPELINE_EXCLUDE_SERVICES=insights` matters specifically on this machine.
+`insightsd` and `loki1` are co-located here, so without it the server analyses
+its own journal output: every gate decision it logs becomes a novel template,
+which fires the novelty condition, which logs another gate decision. Measured on
+rl1, that was 452 of 564 host-bucket templates. A production node never runs
+`insightsd`, so the loop does not exist there — but the default is harmless and
+keeps the dev box honest.
 
 `PIPELINE_EXCLUDE_MODULES` is the default value, written out here because it is
 easy to be surprised by: CrowdSec log lines are deliberately **not** analysed by

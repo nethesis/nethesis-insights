@@ -87,20 +87,24 @@ type server struct {
 	mux    *http.ServeMux
 
 	// excludeModules names modules dropped from every bundle before it is
-	// queued. See model.Bundle.ExcludeModules for why this is applied here
-	// and not deeper in the pipeline.
-	excludeModules map[string]bool
+	// queued, and excludeServices names syslog identifiers dropped the same
+	// way. See model.Bundle.ExcludeModules for why this is applied here and
+	// not deeper in the pipeline.
+	excludeModules  map[string]bool
+	excludeServices map[string]bool
 }
 
 // NewServer builds the ingest and read API. tc wires the Threat Shield
 // endpoints, which are a separate pipeline sharing only this listener and the
-// Authenticator; its zero value leaves them unregistered. excludeModules names
-// modules stripped from every incoming bundle; nil keeps all of them.
-func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig, excludeModules map[string]bool) http.Handler {
+// Authenticator; its zero value leaves them unregistered. excludeModules and
+// excludeServices name modules and syslog identifiers stripped from every
+// incoming bundle; nil keeps all of them.
+func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig, excludeModules, excludeServices map[string]bool) http.Handler {
 	if tc.Now == nil {
 		tc.Now = func() int64 { return time.Now().UnixMilli() }
 	}
-	srv := &server{queue: q, store: s, auth: auth, threat: tc, excludeModules: excludeModules}
+	srv := &server{queue: q, store: s, auth: auth, threat: tc,
+		excludeModules: excludeModules, excludeServices: excludeServices}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
@@ -261,6 +265,7 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 	// modules are in scope.
 	receivedTemplates, receivedDigest := len(b.Templates), len(b.Digest)
 	b = b.ExcludeModules(s.excludeModules)
+	b = b.ExcludeServices(s.excludeServices)
 
 	slog.Debug("bundle accepted for analysis",
 		"system_id", b.SystemID,

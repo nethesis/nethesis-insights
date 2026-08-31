@@ -3,7 +3,10 @@
 
 package model
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 const SchemaVersion = 1
 
@@ -117,6 +120,61 @@ func SortFindings(f []Finding) {
 		}
 		return f[i].LastSeen > f[j].LastSeen
 	})
+}
+
+// ServiceTag returns the syslog identifier a masked host-record template
+// begins with, or "" if the line is not in that shape.
+//
+// The collector emits host-bucket records as "<PRI> [service] rest", e.g.
+//
+//	<3> [insights] time=<TS> level=DEBUG msg="gate decision" ...
+//	<6> [sshd-session] Received disconnect from <IP> port <NUM> ...
+//
+// This is the only service dimension on the wire: model.Template carries a
+// ModuleID but no unit name, and host records all share ModuleID "".
+func ServiceTag(template string) string {
+	if len(template) == 0 || template[0] != '<' {
+		return ""
+	}
+	end := strings.IndexByte(template, '>')
+	if end < 0 {
+		return ""
+	}
+	rest := strings.TrimLeft(template[end+1:], " \t")
+	if len(rest) == 0 || rest[0] != '[' {
+		return ""
+	}
+	close := strings.IndexByte(rest, ']')
+	if close < 1 {
+		return ""
+	}
+	return rest[1:close]
+}
+
+// ExcludeServices returns a copy of b without templates whose ServiceTag is in
+// excluded. A template whose shape ServiceTag does not recognise is always
+// kept: dropping an unparsed line would silently discard evidence, and failing
+// open toward analysis is the safe direction for a cost control.
+//
+// Only Templates are filtered. Digest entries and truncation records are keyed
+// by (module_id, priority) and carry no service dimension, so an excluded
+// service still contributes to its bucket's volume — a service that floods the
+// journal can therefore still trip the deviation condition for the host bucket.
+// Fixing that needs a per-service digest from the collector.
+func (b Bundle) ExcludeServices(excluded map[string]bool) Bundle {
+	if len(excluded) == 0 {
+		return b
+	}
+
+	out := b
+	out.Templates = make([]Template, 0, len(b.Templates))
+	for _, t := range b.Templates {
+		if tag := ServiceTag(t.Template); tag != "" && excluded[tag] {
+			continue
+		}
+		out.Templates = append(out.Templates, t)
+	}
+	return out
 }
 
 // LessTemplate orders templates by (ModuleID, Priority, Template).
