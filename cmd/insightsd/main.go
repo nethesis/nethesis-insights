@@ -235,6 +235,10 @@ func main() {
 	// CrowdSec has its own pipeline (/v1/threat-events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
 	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec1")
+	// Host records name their unit, e.g. "<3> [insights] ...". Excluding this
+	// server's own identifier stops a co-located deployment (the dev machine)
+	// from analysing its own log output and re-firing the gate forever.
+	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights")
 	staleAfter := getenvDuration("STALE_AFTER", 24*time.Hour)
 	ewmaAlpha := getenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := getenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
@@ -326,7 +330,7 @@ func main() {
 		Feed:         snapshot,
 		MaxDecisions: threatMaxDecisions,
 		Now:          func() int64 { return time.Now().UnixMilli() },
-	}, excludeModules)
+	}, excludeModules, excludeServices)
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
@@ -360,6 +364,7 @@ func main() {
 		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
 		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
 		{Name: "PIPELINE_EXCLUDE_MODULES", Value: strings.Join(sortedKeys(excludeModules), ",")},
+		{Name: "PIPELINE_EXCLUDE_SERVICES", Value: strings.Join(sortedKeys(excludeServices), ",")},
 		{Name: "STALE_AFTER", Value: staleAfter.String()},
 		{Name: "EWMA_ALPHA", Value: strconv.FormatFloat(ewmaAlpha, 'f', -1, 64)},
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},

@@ -35,7 +35,7 @@ const (
 )
 
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{}, nil)
+	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{}, nil, nil)
 }
 
 func validBundle() string {
@@ -152,7 +152,7 @@ func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
 func TestIngestExcludesConfiguredModules(t *testing.T) {
 	pub := &fakePublisher{}
 	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{}, map[string]bool{"crowdsec1": true})
+		ThreatConfig{}, map[string]bool{"crowdsec1": true}, nil)
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
@@ -217,5 +217,38 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 	}
 	if len(pub.published[0].Templates) != 2 || len(pub.published[0].Digest) != 1 {
 		t.Fatalf("bundle was filtered with no exclusion configured: %+v", pub.published[0])
+	}
+}
+
+// Host records name their unit, which is the only service dimension on the
+// wire -- module_id is "" for all of them. Excluding by service is what stops a
+// co-located deployment analysing its own log output.
+func TestIngestExcludesConfiguredServices(t *testing.T) {
+	pub := &fakePublisher{}
+	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
+		ThreatConfig{}, nil, map[string]bool{"insights": true})
+
+	body, err := json.Marshal(model.Bundle{
+		SchemaVersion: model.SchemaVersion,
+		SystemID:      testSystemID,
+		Window:        model.Window{Start: 1000, End: 2000},
+		Templates: []model.Template{
+			{Template: `<3> [insights] msg="gate decision"`, ModuleID: ""},
+			{Template: `<6> [sshd-session] Received disconnect from <IP>`, ModuleID: "", Category: "security"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if rec := postBundle(t, h, string(body), true); rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d (body %s)", rec.Code, rec.Body.String())
+	}
+	got := pub.published[0]
+	if len(got.Templates) != 1 {
+		t.Fatalf("expected 1 template to survive, got %+v", got.Templates)
+	}
+	if model.ServiceTag(got.Templates[0].Template) != "sshd-session" {
+		t.Fatalf("wrong template survived: %+v", got.Templates)
 	}
 }

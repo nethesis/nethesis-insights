@@ -283,6 +283,18 @@ unconditional form.
 only templates leaves the digest firing deviation reasons for a module the
 prompt never mentions.
 
+**Services are excluded on a second axis**, `PIPELINE_EXCLUDE_SERVICES`
+(default `insights`) via `model.Bundle.ExcludeServices`. Host records all carry
+`module_id: ""`, so the module filter cannot reach them; the only service
+dimension on the wire is the `[service]` tag the collector puts on each masked
+host line (`model.ServiceTag`). This exists because a co-located deployment
+analyses its own log output: on the dev machine 452 of 564 host templates were
+`insights` lines, 204 of them its own `gate decision` messages, each new
+template re-firing the gate that produced it. A line `ServiceTag` cannot parse
+is **kept** — failing open toward analysis is the safe direction. Digest and
+truncation records have no service dimension and are passed through, so an
+excluded service still contributes to its bucket's volume.
+
 **Gate reasons carry no computed values** — `new_templates` has no count,
 `deviation:<module>/<priority>` no ratio. The UI's `/gate` rollup groups on the
 stored string, and embedded floats made every deviating window a group of one.

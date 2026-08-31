@@ -95,6 +95,12 @@ its log lines to the AI as well would pay twice for one signal and bury the
 rest of the machine's logs in brute-force noise. That is why CrowdSec attacks
 show up on the **blocklist** pages rather than as findings.
 
+Individual services can be skipped the same way. The insights server itself is
+skipped by default, because if it is installed on a machine it is also watching,
+its own log lines become "new" log patterns, which look like something worth
+analysing, which makes it write more log lines. Left alone that loop never
+settles.
+
 Every window, gated out or not, gets one row in the **analyses** ledger, with
 a `gated` yes/no flag and the exact reasons behind that decision. This is
 where gated windows live and how you find them:

@@ -426,6 +426,14 @@ decisions already travel through §7's `POST /v1/threat-events` into the
 blocklist; analysing its log lines as well pays twice for one signal, and its
 templates were 982 of 1678 on the dev fleet.
 
+A second axis, `PIPELINE_EXCLUDE_SERVICES` (default `insights`), filters on the
+syslog identifier each masked host record carries, because §5.3.1's host bucket
+gives every host record `module_id: ""` and the module filter cannot address
+them individually. It exists because a server co-located with a collector
+analyses its own log output: each gate decision it logs becomes a novel
+template, which fires the novelty condition, which produces another logged gate
+decision. On the dev machine that accounted for 452 of 564 host templates.
+
 ### 8.1.1 Why the security condition is novelty-scoped
 
 This condition originally read "any template carries `category=security`", and
