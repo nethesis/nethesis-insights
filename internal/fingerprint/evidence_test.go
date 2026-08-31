@@ -118,3 +118,45 @@ func TestNormalizeIsNarrow(t *testing.T) {
 		}
 	}
 }
+
+// The bucket fallback must be a last resort, not the common path. Every
+// single-citation finding shares "one bucket" trivially, so keying on the
+// bucket there would merge unrelated problems that happen to sit in the same
+// module at the same priority -- and the host bucket carries hundreds of
+// distinct templates.
+func TestSingleCitationsInOneBucketStayDistinct(t *testing.T) {
+	ssh := fp([]model.Template{tpl("", 6, "sshd: failed password for <USER>")})
+	disk := fp([]model.Template{tpl("", 6, "disk almost full on <PATH>")})
+	if ssh == disk {
+		t.Fatal("two unrelated single-citation findings collapsed onto one fingerprint")
+	}
+}
+
+// Within one bucket, genuinely different templates that survive normalization
+// do fall back to the bucket -- that is the residual-variance case.
+func TestMultipleDistinctTemplatesInOneBucketUseTheBucket(t *testing.T) {
+	got := EvidenceKey([]model.Template{
+		tpl("crowdsec1", 3, "scenario-a on <IP>"),
+		tpl("crowdsec1", 3, "scenario-b on <IP>"),
+	})
+	if got[0] != "bucket:crowdsec1/3" {
+		t.Fatalf("expected the bucket key, got %q", got[0])
+	}
+}
+
+// Country-code variants normalize to one template, so they take the primary
+// path, not the bucket path -- which is what keeps them distinct from an
+// unrelated condition in the same bucket.
+func TestCountryVariantsUsePrimaryNotBucket(t *testing.T) {
+	got := EvidenceKey([]model.Template{
+		tpl("crowdsec1", 3, "ssh-bf by ip <IP> (US/<NUM>)"),
+		tpl("crowdsec1", 3, "ssh-bf by ip <IP> (DE/<NUM>)"),
+	})
+	if got[0] == "bucket:crowdsec1/3" {
+		t.Fatalf("country variants fell back to the bucket: %q", got[0])
+	}
+	other := EvidenceKey([]model.Template{tpl("crowdsec1", 3, "something else on <IP>")})
+	if got[0] == other[0] {
+		t.Fatalf("distinct conditions in one bucket collapsed: %q", got[0])
+	}
+}

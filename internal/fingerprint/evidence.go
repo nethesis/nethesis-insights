@@ -43,15 +43,22 @@ func Normalize(template string) string {
 // model cited a different subset of an unchanged condition. This returns a
 // single derived key instead, in three layers:
 //
-//  1. normalize each cited template, so a masking leak cannot split identity;
-//  2. if every cited template shares one (module_id, priority) bucket, key on
-//     the bucket -- residual text variance within one bucket is noise;
-//  3. otherwise key on the canonical primary template: the first of the
+//  1. normalize each cited template, so a masking leak cannot split identity.
+//     This alone settles the observed case: every country-code variant of one
+//     scenario normalizes to the same text, so citing more of them changes
+//     nothing;
+//  2. if the normalized set is a single distinct template, key on it;
+//  3. if it is several distinct templates that all share one
+//     (module_id, priority) bucket, key on the bucket -- residual variance
+//     inside a bucket the model chose to cite as one condition is noise;
+//  4. otherwise key on the canonical primary template: the first of the
 //     normalized set under model.LessTemplate.
 //
-// Layer 2 is bounded on purpose. It merges only within a single bucket a model
-// already chose to cite as one condition; two conditions in different modules or
-// at different priorities keep distinct identities.
+// Layer 3 is deliberately the last resort rather than the common path. Applying
+// it whenever the cited set shares a bucket would key every single-citation
+// finding on its bucket alone, merging unrelated problems that happen to live in
+// the same module at the same priority -- and the host bucket carries hundreds
+// of distinct templates.
 //
 // The returned slice always has exactly one element, which is what Compute's
 // evidence list receives.
@@ -66,21 +73,32 @@ func EvidenceKey(cited []model.Template) []string {
 		normalized[i].Template = Normalize(normalized[i].Template)
 	}
 
-	sameBucket := true
-	for _, t := range normalized[1:] {
-		if t.ModuleID != normalized[0].ModuleID || t.Priority != normalized[0].Priority {
-			sameBucket = false
-			break
-		}
-	}
-	if sameBucket {
-		return []string{fmt.Sprintf("bucket:%s/%d", normalized[0].ModuleID, normalized[0].Priority)}
-	}
-
 	sort.Slice(normalized, func(i, j int) bool {
 		return model.LessTemplate(normalized[i], normalized[j])
 	})
-	primary := normalized[0]
+
+	distinct := normalized[:0:0]
+	for i, t := range normalized {
+		if i == 0 || t.Template != normalized[i-1].Template ||
+			t.ModuleID != normalized[i-1].ModuleID || t.Priority != normalized[i-1].Priority {
+			distinct = append(distinct, t)
+		}
+	}
+
+	primary := distinct[0]
+	if len(distinct) > 1 {
+		sameBucket := true
+		for _, t := range distinct[1:] {
+			if t.ModuleID != primary.ModuleID || t.Priority != primary.Priority {
+				sameBucket = false
+				break
+			}
+		}
+		if sameBucket {
+			return []string{fmt.Sprintf("bucket:%s/%d", primary.ModuleID, primary.Priority)}
+		}
+	}
+
 	return []string{fmt.Sprintf("primary:%s/%d/%s",
 		primary.ModuleID, primary.Priority, strings.TrimSpace(primary.Template))}
 }
