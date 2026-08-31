@@ -1,0 +1,27 @@
+WINDOW
+start_ms=100 end_ms=200 collector=1.2.3 masking=2
+
+DIGEST (module priority observed expected ratio)
+modA 1 30 10.00 3.00
+modA 3 20 - -
+modB 1 10 5.00 2.00
+
+TEMPLATES (cite these identifiers in evidence)
+[T1] count=2 module=modA priority=1 category=-
+    tpl-a
+[T2] count=5 module=modA priority=1 category=security
+    tpl-z
+[T3] count=1 module=modB priority=2 category=-
+    tpl-m
+
+SAMPLING
+lines_seen=500 lines_kept=400 max_lines=1000
+under_sampled (module dropped)
+modA 1
+modZ 3
+
+ALREADY KNOWN (do not report these again)
+[high] Disk almost full
+    evidence: T2
+[low] Minor thing
+    evidence: T1

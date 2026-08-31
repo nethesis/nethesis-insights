@@ -360,3 +360,86 @@ func TestPermanentFailureClosesTheWindow(t *testing.T) {
 		t.Fatalf("a permanently failed window must not be reprocessed, got %d calls", retry.Calls)
 	}
 }
+
+// The reported symptom, as a test: the same recurring condition, but the model
+// cites a wider set of templates the second time because a new country code
+// showed up in that window. Under fingerprint v1 this inserted a second
+// finding; it must bump the first instead.
+func TestRecurrenceWithADifferentCitedSetIsBumped(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	crowdBundle := func(windowStart int64, templates ...model.Template) model.Bundle {
+		return model.Bundle{
+			SchemaVersion:    model.SchemaVersion,
+			SystemID:         "sys1",
+			CollectorVersion: "1.0",
+			Window:           model.Window{Start: windowStart, End: windowStart + 100},
+			Templates:        templates,
+			Digest:           []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: 5}},
+		}
+	}
+	us := model.Template{Template: "ssh-bf by ip <IP> (US/<NUM>)", Count: 9, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
+	de := model.Template{Template: "ssh-bf by ip <IP> (DE/<NUM>)", Count: 4, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
+
+	// First window: one template cited.
+	oneCitation := `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"SSH Brute-Force Activity Detected","summary":"s",` +
+		`"suggested_action":"a","modules":[],"evidence":["T1"]}]}`
+	a := New(st, &llm.Stub{Content: oneCitation, Model: "m"}, testConfig(), func() int64 { return 1000 })
+	if err := a.Process(ctx, crowdBundle(100, us)); err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+
+	// Second window: same condition, but a new country arrived and the model
+	// cites both templates, and words the title differently.
+	twoCitations := `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"Repeated failed SSH logins from many hosts","summary":"s",` +
+		`"suggested_action":"a","modules":[],"evidence":["T1","T2"]}]}`
+	b := New(st, &llm.Stub{Content: twoCitations, Model: "m"}, testConfig(), func() int64 { return 2000 })
+	if err := b.Process(ctx, crowdBundle(100000, de, us)); err != nil {
+		t.Fatalf("second window: %v", err)
+	}
+
+	found, err := st.OpenFindings(ctx, "sys1")
+	if err != nil {
+		t.Fatalf("OpenFindings: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected one deduplicated finding, got %d: %+v", len(found), found)
+	}
+	if found[0].OccurrenceCount != 2 {
+		t.Fatalf("expected occurrence_count 2, got %d", found[0].OccurrenceCount)
+	}
+}
+
+// A bundle emptied by module exclusion must still record an analyses row and
+// must never reach the LLM. Otherwise a CrowdSec-only window would look like a
+// window that never arrived.
+func TestEmptyBundleAfterExclusionIsGatedNotLost(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	full := steadyBundle("sys1")
+	emptied := full.ExcludeModules(map[string]bool{"mod1": true})
+
+	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`, Model: "m"}
+	a := New(st, stub, testConfig(), func() int64 { return 1000 })
+	if err := a.Process(ctx, emptied); err != nil {
+		t.Fatalf("process emptied bundle: %v", err)
+	}
+
+	if stub.Calls != 0 {
+		t.Fatalf("an emptied bundle reached the LLM: %d calls", stub.Calls)
+	}
+	rows, err := st.ListAnalyses(ctx, "sys1", 10)
+	if err != nil {
+		t.Fatalf("ListAnalyses: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one analyses row for the emptied window, got %d", len(rows))
+	}
+	if !rows[0].Gated {
+		t.Fatalf("expected the emptied window to be recorded as gated: %+v", rows[0])
+	}
+}

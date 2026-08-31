@@ -292,7 +292,12 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		}
 		sort.Strings(modules)
 
-		fp := fingerprint.Compute(b.SystemID, modules, evidence, category)
+		// Identity hashes a single derived key, not the cited set: the model
+		// picks which templates to cite, and letting that choice reach the
+		// hash made the same condition a new finding every window. The full
+		// cited list is still stored on the row -- it is what the operator
+		// reads -- it just does not decide identity.
+		fp := fingerprint.Compute(b.SystemID, modules, fingerprint.EvidenceKey(cited), category)
 
 		outcome, err := a.store.UpsertFinding(ctx, model.Finding{
 			SystemID:        b.SystemID,
