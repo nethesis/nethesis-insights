@@ -114,9 +114,17 @@ many entries are served and when, never the body.
 2. The body is decoded (gzip-aware, size-capped at 8 MiB) into a
    `model.Bundle` and validated: schema version, `system_id` matches the
    authenticated identity, a sane window, a template-count ceiling.
-3. The bundle is handed to `queue.Publish`, which either enqueues it or
+3. Modules named by `PIPELINE_EXCLUDE_MODULES` (default `crowdsec1`) are
+   stripped by `model.Bundle.ExcludeModules` — templates, digest entries and
+   truncation records together. This happens here, before the queue, so that
+   the gate, the prompt, `system_templates` and `module_baselines` all read
+   the same filtered bundle and cannot disagree about which modules are in
+   scope. CrowdSec is excluded by default because it already has its own
+   pipeline (`POST /v1/threat-events` → the blocklist); analysing its log
+   lines as well pays twice for one signal.
+4. The bundle is handed to `queue.Publish`, which either enqueues it or
    returns `queue.ErrFull`.
-4. The handler answers **immediately** — `202 Accepted` on success, `503` if
+5. The handler answers **immediately** — `202 Accepted` on success, `503` if
    the queue is full or the bundle is a duplicate still in flight. It never
    waits for analysis. This is what lets `ANALYSIS_TIMEOUT` be minutes long
    without ever risking the edge's own HTTP client timeout.
@@ -407,6 +415,31 @@ and category from that — never from the model's prose. This is what makes
 the same recurring problem collapse onto the same finding even when the model
 words its restatement differently each time.
 
+Refusing model-authored *text* is not enough on its own, because the model
+still chooses *which* templates to cite. `v1` hashed the whole cited set, so
+the same SSH brute-force condition cited as `(BG/…) (DE/…) (NL/…)` in one
+window and `(CA/…) (HK/…)` in the next produced two different fingerprints and
+two findings, each stuck at `occurrence_count=1`.
+
+`v2` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
+three layers:
+
+1. `fingerprint.Normalize` collapses the two masking leaks observed in the
+   field (a bracketed two-letter GeoIP country code, and a bare duration).
+   Fixing the masking belongs in the collector; this exists so a leak there
+   cannot silently split identity here. The stored evidence text shown to the
+   operator is never rewritten — only the identity path.
+2. If every cited template shares one `(module_id, priority)` bucket, the key
+   is that bucket. Text variance *within* a bucket the model already chose to
+   cite as one condition is noise.
+3. Otherwise the key is the canonical primary template: the first of the
+   normalized set under `model.LessTemplate`.
+
+`model.LessTemplate` is the single definition of template order, used by both
+`prompt.SortedTemplates` (to number the identifiers the model cites) and
+`EvidenceKey` (to pick the primary). If those two ever disagreed, a finding's
+identity would stop matching the evidence the operator is shown for it.
+
 Changing the fingerprint formula changes every existing finding's identity
 fleet-wide — that must be a deliberate versioned migration (bump the
 `fingerprint.Version` prefix), never a silent behavior change.
@@ -421,8 +454,13 @@ It fires (returns `Call: true`) if any of:
 - a digest entry's observed/expected ratio exceeds `GATE_TOLERANCE` — using
   the edge-supplied `expected` if present, otherwise the server's own EWMA
   baseline;
-- any template in the bundle carries `category=security` (assigned by the
-  edge, never computed server-side);
+- a **new** security-category template appears, or a **known** one whose
+  module is deviating (`security_new` / `security_surge`). The category is
+  assigned by the edge, never computed server-side. Mere presence does not
+  fire: `sshd` auth failures arrive continuously on any internet-facing node,
+  so the earlier unconditional form made the gate a no-op — 352 LLM calls out
+  of 352 windows on the dev fleet — and made the spend-cap degrade path
+  (`SystemState.SecurityOnly`) cost exactly as much as not degrading;
 - a module is both truncated (the edge dropped lines to stay under its line
   budget) **and** deviating — truncation alone never fires.
 
@@ -448,8 +486,14 @@ reasons, because the whole cost/identity model depends on it:
 - `prompt.SortedTemplates` sorts `(module_id, priority, template)`.
 - Digest entries are sorted `(module_id, priority)` in both `gate.Evaluate`
   and `prompt.Render`.
-- Gate reasons are appended in a fixed, sorted order (security first, then
+- Gate reasons are appended in a fixed order (security first, then
   new-templates, then deviation, then truncated+deviating).
+- Gate reasons carry no computed values. `new_templates` has no count and
+  `deviation:<module>/<priority>` has no ratio, because the operator UI's
+  `/gate` rollup groups on the stored `gate_reasons` string: with the ratio
+  embedded, every deviating window became a group of one and the page that
+  exists to answer "why are we paying" answered nothing. The ratio is still
+  logged per window by the analyzer at debug level.
 - `fingerprint.writeList` sorts and dedups before hashing.
 
 `prompt` has golden-file tests asserting byte-identical output for identical

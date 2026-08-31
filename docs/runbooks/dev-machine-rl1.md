@@ -122,11 +122,35 @@ LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
 LLM_API_KEY=<paste a fresh OpenRouter key>
 GATE_TOLERANCE=3.0
+PIPELINE_EXCLUDE_MODULES=crowdsec1
 STALE_AFTER=24h
 EWMA_ALPHA=0.3
 LOG_LEVEL=debug
 EOF
 ```
+
+`PIPELINE_EXCLUDE_MODULES` is the default value, written out here because it is
+easy to be surprised by: CrowdSec log lines are deliberately **not** analysed by
+the LLM. Its decisions already reach the server through Threat Shield's
+`POST /v1/threat-events`, so its findings appear on the blocklist pages, not on
+`/findings`. Set it to an empty value only to reproduce the pre-2026-08-31
+behaviour, which flooded the gate.
+
+**What rl1 actually ran as of 2026-08-31**, which differs from the block above
+and is worth knowing before assuming a bug:
+
+| Item | This runbook | rl1 as deployed |
+|---|---|---|
+| LLM provider | OpenRouter free tier | `https://api.openai.com/v1`, `gpt-4o-mini` |
+| Price knobs | absent | `LLM_PRICE_INPUT_PER_MTOK=0.15`, `LLM_PRICE_OUTPUT_PER_MTOK=0.60` |
+| `loki1` `base_url` | the Traefik route | `http://127.0.0.1:19595`, bypassing Traefik |
+| Route `lets_encrypt` | `false` | `true` |
+| `BLOCKLIST_MIN_SYSTEMS` | absent | `1` (dev override; real consensus is 3) |
+| `AUTH_PEPPER` | absent | still absent, so it is ephemeral and the auth cache is cold after every restart |
+| `ADMIN_API_KEY` | absent | set to a 4-character value; the admin plane stays off because `ADMIN_LISTEN_ADDR` is empty |
+
+`deploy.md` in the repo root holds the full captured state if it has not been
+cleaned up.
 
 Unit file:
 
@@ -319,7 +343,17 @@ curl -sk -u "<system_id>:<auth_token>" \
 ```
 
 A gated-out window is a success, not a failure: `bundle gated out` with `llm_called=0` in
-`analyses` is the cost control working.
+`analyses` is the cost control working. On a healthy deployment most windows look
+like this. If `journalctl -u insights | grep 'bundle gated out'` returns nothing
+at all after an hour of traffic, the gate is not gating — that was the state on
+2026-08-31 (352 LLM calls out of 352 windows) before the security condition was
+made novelty-scoped.
+
+Gate reasons changed spelling at the same time: `security_category` became
+`security_new`/`security_surge`, and `new_templates=N` / `deviation:mod/3=3.12`
+lost their embedded values. Rows written before and after that change group
+separately in the UI's `/gate` rollup. There is no migration; the old rows just
+age out.
 
 ## Updating after a push to main
 
