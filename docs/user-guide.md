@@ -69,8 +69,9 @@ unusual here? It says yes if:
 - a template in this bundle has **never been seen before** for this machine;
 - some module's log volume is **way higher than expected** (more than a
   configurable multiplier over its normal rate — see baselines);
-- any template is tagged **security**-related (the node itself marks this,
-  not the server);
+- a template tagged **security**-related is either new for this machine, or is
+  one we already know about whose module is suddenly much noisier than usual
+  (the node applies the security tag, not the server);
 - a module both **dropped lines** because it hit its own budget *and* is
   behaving unusually — either one alone is not enough.
 
@@ -78,6 +79,21 @@ unusual here? It says yes if:
 above is true.** If none are true, the window is "gated out": the server
 still does the cheap bookkeeping (remembers the templates, updates the
 baselines) and moves on — no AI call, no cost.
+
+Note the shape of the security rule: *new or surging*, not merely *present*.
+Any machine reachable from the internet gets a constant trickle of failed SSH
+logins, so "there is a security-tagged line in this window" is true of
+essentially every window forever. Treating that as a reason to call the AI
+made the gate stop gating — measured on the dev machine, 352 AI calls out of
+352 windows, not one gated out. Steady background noise is not news; a new
+kind of attack, or a sudden spike in a familiar one, is.
+
+Some log sources are skipped before the gate even sees them, because
+something else already handles them properly. CrowdSec is the built-in case:
+its decisions go through Threat Shield into the shared blocklist, so sending
+its log lines to the AI as well would pay twice for one signal and bury the
+rest of the machine's logs in brute-force noise. That is why CrowdSec attacks
+show up on the **blocklist** pages rather than as findings.
 
 Every window, gated out or not, gets one row in the **analyses** ledger, with
 a `gated` yes/no flag and the exact reasons behind that decision. This is
@@ -149,7 +165,18 @@ each finding from the machine, the modules involved, the evidence and the
 category — never from anything the AI wrote in prose. That means if the same
 underlying problem shows up again next window, it's recognized as *the same
 finding* rather than reported as a new one — its occurrence count goes up
-instead. A finding is:
+instead.
+
+Getting that right takes a little more than ignoring the AI's wording. The AI
+also picks *which* templates to cite as evidence, and it does not pick the same
+ones every time: one window it cites the brute-force attempts from four
+countries, the next window from two. Deriving identity from that raw list meant
+the same recurring SSH problem arrived as a brand-new finding every window,
+each stuck at an occurrence count of 1. The server now reduces the cited
+evidence to one stable key before fingerprinting it, so the wobble in what the
+AI cites no longer splits one problem into many.
+
+A finding is:
 
 - **open** — actively occurring, or has occurred recently;
 - **stale** — hasn't reoccurred in a while (see `STALE_AFTER`), so it's

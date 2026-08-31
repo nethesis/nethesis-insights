@@ -11,7 +11,19 @@ import (
 	"sort"
 )
 
-const Version = "v1"
+const Version = "v2"
+
+// v1 hashed the full set of evidence templates the model chose to cite. That
+// made identity depend on the model's citation generosity: the same SSH
+// brute-force condition cited (BG/..) (DE/..) (NL/..) (US/..) in one window and
+// (CA/..) (HK/..) in the next, producing a different hash and a fresh finding
+// every time. On the dev fleet that yielded ~160 restatements of the same
+// handful of conditions, nearly all stuck at occurrence_count=1.
+//
+// v2 hashes a single derived key instead -- see analyzer.evidenceKey. Bumping
+// the version re-identifies every existing finding, which spec section 6.2
+// requires to be a deliberate, visible migration rather than a silent
+// fleet-wide re-raise.
 
 // writeField writes an 8-byte big-endian length prefix followed by s.
 func writeField(h hash.Hash, s string) {

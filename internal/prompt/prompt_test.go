@@ -4,7 +4,10 @@
 package prompt
 
 import (
+	"flag"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,8 +45,11 @@ func sampleBundle() model.Bundle {
 
 func sampleOpen() []model.Finding {
 	return []model.Finding{
-		{Severity: "high", Title: "Disk almost full"},
-		{Severity: "low", Title: "Minor thing"},
+		// tpl-z and tpl-a are both in sampleBundle; "tpl-gone" is not, and
+		// must be omitted rather than rendered as an identifier the model
+		// could cite back at us.
+		{Severity: "high", Title: "Disk almost full", Evidence: []string{"tpl-z", "tpl-gone"}},
+		{Severity: "low", Title: "Minor thing", Evidence: []string{"tpl-a"}},
 	}
 }
 
@@ -145,5 +151,67 @@ func TestParseRejectsBlankTitleAndSummary(t *testing.T) {
 	_, _, err = Parse(body2)
 	if err == nil || !strings.Contains(err.Error(), "summary") {
 		t.Fatalf("expected summary error, got %v", err)
+	}
+}
+
+// The prompt is the LLM's entire input, so a change to it is a change to every
+// finding raised afterwards. The golden file makes that change visible in
+// review instead of silent. Regenerate deliberately with -update, never to make
+// a red test go green.
+var updateGolden = flag.Bool("update", false, "rewrite prompt golden files")
+
+func TestRenderMatchesGolden(t *testing.T) {
+	got := Render(sampleBundle(), sampleOpen())
+	golden := filepath.Join("testdata", "render.golden")
+
+	if *updateGolden {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatalf("mkdir testdata: %v", err)
+		}
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden (run: go test ./internal/prompt/ -update): %v", err)
+	}
+	if got != string(want) {
+		t.Fatalf("prompt does not match golden.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// The identifiers must be the ones THIS window uses, and a template the finding
+// was raised from but which is absent now must not be rendered at all.
+func TestRenderAlreadyKnownCitesCurrentIdentifiers(t *testing.T) {
+	out := Render(sampleBundle(), sampleOpen())
+
+	// SortedTemplates orders (modA,1,tpl-a), (modA,1,tpl-z), (modB,2,tpl-m),
+	// so tpl-a is T1 and tpl-z is T2.
+	if !strings.Contains(out, "[high] Disk almost full\n    evidence: T2\n") {
+		t.Fatalf("expected tpl-z rendered as T2 and tpl-gone omitted, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[low] Minor thing\n    evidence: T1\n") {
+		t.Fatalf("expected tpl-a rendered as T1, got:\n%s", out)
+	}
+	if strings.Contains(out, "tpl-gone") {
+		t.Fatalf("a template absent from this window leaked into the prompt:\n%s", out)
+	}
+}
+
+// A finding whose every template is gone from this window renders as a bare
+// title -- never as an empty "evidence:" line, which would read as a citation
+// the model could echo back.
+func TestRenderAlreadyKnownOmitsEmptyEvidenceLine(t *testing.T) {
+	out := Render(sampleBundle(), []model.Finding{
+		{Severity: "high", Title: "Vanished", Evidence: []string{"tpl-gone"}},
+	})
+	if !strings.Contains(out, "[high] Vanished\n") {
+		t.Fatalf("expected the title to still render, got:\n%s", out)
+	}
+	if strings.Contains(out, "evidence:") {
+		t.Fatalf("expected no evidence line when nothing resolves, got:\n%s", out)
 	}
 }

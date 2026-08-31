@@ -333,13 +333,25 @@ Edge `expected` is preferred when present; server EWMA is the fallback.
 One hash, in one place, `internal/fingerprint`:
 
 ```go
-// A finding's identity is the set of evidence templates it cites.
-sha256("v1\x00" + system_id + "\x00" + module_id + "\x00" + category + "\x00" +
-       strings.Join(sortedEvidenceTemplates, "\x1f"))
+// A finding's identity is a single key derived from the templates it cites.
+sha256("v2\x00" + system_id + "\x00" + category + "\x00" +
+       lengthPrefixed(sortedModules) + lengthPrefixed(evidenceKey))
 ```
 
 A variable-length set of templates needs a fixed-width dedup key, so this hash
 is earned where the template hash was not.
+
+`v1` hashed the full cited set, which left identity depending on how many
+templates the model chose to cite. Measured on the dev fleet: ~160 of 223
+findings were restatements of the same handful of SSH conditions, each with a
+distinct fingerprint and nearly all stuck at `occurrence_count=1`, because the
+mix of GeoIP country codes in the window changed which templates were cited.
+
+`v2` hashes one derived key instead (`fingerprint.EvidenceKey`): normalize the
+known masking leaks, key on the `(module_id, priority)` bucket when the whole
+cited set shares one, and otherwise key on the canonical primary template under
+`model.LessTemplate`. Refusing model-authored *text* was never sufficient on its
+own — the model still chose the *set*.
 
 The `v1` prefix is also earned: if the formula ever changes, every existing
 finding's identity changes with it, and that must be a deliberate versioned
@@ -396,8 +408,9 @@ A pure function. It calls the LLM if **any** condition holds:
 - a template is new for this `system_id`
 - a digest ratio exceeds tolerance (default 3.0), from edge `expected` or
   server EWMA
-- any template carries `category=security` (edge-assigned in the bundle; the
-  server does not classify)
+- a **new** security-category template appears, or a **known** one whose module
+  is deviating (edge-assigned category; the server does not classify).
+  Presence alone does not fire — see 8.1.1
 - a module appears in `truncated_modules` **and** deviates
 
 Every decision records `gate_reasons` in `analyses`, so both "why did this cost
@@ -406,6 +419,31 @@ money" and "why was this not caught" are answerable from stored data.
 The gate is the primary cost control, not an optimization. At 15-minute
 cadence, 2700 systems calling the LLM on every bundle is ~$16,000/month on
 `gpt-4o-mini` (§11). Steady-state systems must cost approximately zero.
+
+Modules that own a dedicated pipeline are excluded from this one before the
+gate ever sees them (`PIPELINE_EXCLUDE_MODULES`, default `crowdsec1`). CrowdSec
+decisions already travel through §7's `POST /v1/threat-events` into the
+blocklist; analysing its log lines as well pays twice for one signal, and its
+templates were 982 of 1678 on the dev fleet.
+
+### 8.1.1 Why the security condition is novelty-scoped
+
+This condition originally read "any template carries `category=security`", and
+that made the gate a no-op. §5.3.1 records that the host bucket — `sshd`,
+`systemd`, `runagent` — dominates the security signal. On any internet-facing
+node, failed SSH auth arrives continuously, so every 15-minute window contains
+a security template, so the gate fired on every window. Measured on the dev
+fleet before the fix: 352 LLM calls out of 352 windows, `gated=0` on every row,
+and 19 windows whose *only* reason was the security category.
+
+It also made §9.4's spend-cap valve dishonest. "Gate narrows to security only"
+is listed there as the cheap degraded mode, but if security-only fires on ~100%
+of windows then degrading saves nothing.
+
+A security template therefore fires the gate when it is **new** for the system
+(`security_new`), or when it is known but its module is deviating past
+tolerance (`security_surge`). A brute-force spike still fires; a steady
+background of the same rejected logins does not.
 
 ### 8.2 Consistency of model output
 
@@ -485,7 +523,7 @@ run:
 | edge metric query fails | server EWMA covers the deviation gate (§6.1) |
 | validator down | ingestion pauses, edge retries within the 6 h window |
 | LLM provider down | bundles accumulate in the in-memory queue (bounded by `QUEUE_SIZE`), analysed on recovery; if it fills before recovery, ingest returns `503` until it drains |
-| spend cap hit | gate narrows to security only |
+| spend cap hit | gate narrows to security only — genuinely cheap, because the security condition is novelty-scoped (§8.1.1) |
 | server process crash or restart | buffered-but-unprocessed bundles are lost (§3.1); the edge's next 15-minute bundle for the same window fills the gap if the condition persists |
 
 ## 10. Data protection

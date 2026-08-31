@@ -141,7 +141,8 @@ go build ./...
 go vet ./...
 go test ./... -race -count=1
 
-go test ./internal/gate/ -run TestSecurityAlwaysCalls -v   # single package / single test
+go test ./internal/gate/ -run TestKnownSecurityTemplateAloneNoCall -v  # one package / one test
+go test ./internal/prompt/ -update                                    # regenerate prompt goldens
 ```
 
 Once Task 1's tooling lands, prefer `make check` (license headers + lint + tests),
@@ -228,7 +229,7 @@ rejected as a duplicate and the window is lost. On a **permanent** error
 ### Finding identity is server-computed
 
 `fingerprint.Compute(systemID, modules, evidence, category)` — sha256 over
-length-prefixed fields, sorted/deduped lists, `"v1"` prefix. Never a `strings.Join`
+length-prefixed fields, sorted/deduped lists, `"v2"` prefix. Never a `strings.Join`
 (a separator is forgeable). Consequences to preserve:
 
 - The LLM cites templates by **ID** (`T1`, `T2`, … from `prompt.TemplateID`); the
@@ -236,21 +237,56 @@ length-prefixed fields, sorted/deduped lists, `"v1"` prefix. Never a `strings.Jo
   module set and category itself. **No model-authored string ever reaches the
   fingerprint** — an inconsistently worded restatement collapses onto the same
   finding.
+- Refusing model-authored text is **not sufficient**: the model still chooses
+  which templates to cite. `v1` hashed the whole cited set, so a changing mix of
+  GeoIP country codes split one SSH condition into ~160 findings on the dev
+  fleet, nearly all at `occurrence_count=1`. `v2` hashes one derived key from
+  `fingerprint.EvidenceKey`: normalize the known masking leaks, key on the
+  `(module_id, priority)` bucket when the cited set shares one, else on the
+  canonical primary template.
+- `model.LessTemplate` is the **single** definition of template order, shared by
+  `prompt.SortedTemplates` and `EvidenceKey`. Two orderings that must agree will
+  eventually disagree, and then a finding's identity stops matching the evidence
+  shown for it.
 - Changing the formula changes every existing finding's identity fleet-wide. That
-  is a deliberate versioned migration (bump the `v1` prefix), never a silent
-  re-raise.
+  is a deliberate versioned migration (bump `fingerprint.Version`), never a
+  silent re-raise. There is no backfill by design: the bump is what makes the
+  change visible.
 
 ### Gate = the cost control, not an optimization
 
 `gate.Evaluate` fires the LLM if any of: a template is new for this system; a
 digest ratio exceeds `GATE_TOLERANCE` (edge `expected` preferred, server EWMA
-baseline as fallback); any template carries `category=security`; or a module is
-both truncated **and** deviating. Every decision writes `gate_reasons` into the
+baseline as fallback); a security-category template is **new** (`security_new`)
+or **known but in a deviating module** (`security_surge`); or a module is both
+truncated **and** deviating. Every decision writes `gate_reasons` into the
 `analyses` row, so "why did this cost money" and "why was this missed" are both
 answerable from stored data. Ungated, the fleet is ~$16k/month on `gpt-4o-mini`.
 
 The server never classifies — `category=security` is assigned by the edge and
 propagated.
+
+**The security condition is novelty-scoped, and must stay that way.** It used to
+fire on the mere presence of a security template. Since the host bucket
+(`module_id: ""`, sshd) carries continuous failed-auth traffic on any
+internet-facing node, that fired on every window: 352 LLM calls out of 352 on
+the dev fleet, zero gated out. It also made spec §9.4's spend-cap degrade path
+(`SystemState.SecurityOnly`) cost the same as not degrading. Never restore the
+unconditional form.
+
+**Modules with their own pipeline are excluded at ingest**, via
+`PIPELINE_EXCLUDE_MODULES` (default `crowdsec1`) and
+`model.Bundle.ExcludeModules`, applied in `api.handleBundles` before
+`queue.Publish`. One place, so gate, prompt, `system_templates` and
+`module_baselines` cannot disagree about scope. The filter drops from
+`Templates`, `Digest` **and** `Budget.TruncatedModules` together — filtering
+only templates leaves the digest firing deviation reasons for a module the
+prompt never mentions.
+
+**Gate reasons carry no computed values** — `new_templates` has no count,
+`deviation:<module>/<priority>` no ratio. The UI's `/gate` rollup groups on the
+stored string, and embedded floats made every deviating window a group of one.
+The ratio stays in the analyzer's debug log.
 
 ### `module_id: ""` is a real bucket
 

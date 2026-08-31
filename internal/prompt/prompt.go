@@ -12,14 +12,17 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-const Version = "v1"
+const Version = "v2"
 
 const System = `You analyze NethServer logs. You receive a digest of log volumes and masked ` +
 	`log-line templates with counts for one time window. Report ONLY real problems: ` +
 	`things that indicate misconfiguration, failure, resource exhaustion, security ` +
 	`concerns, or other conditions an administrator would want to act on. Report only ` +
 	`NEW or CHANGED conditions -- never repeat anything listed in the ALREADY KNOWN ` +
-	`section, even if it is still occurring. ` +
+	`section, even if it is still occurring. Each ALREADY KNOWN entry shows the ` +
+	`template identifiers it was raised from; if a condition you are about to report ` +
+	`matches one of those entries, do not report it, and if you report it anyway you ` +
+	`must cite exactly the same identifiers. ` +
 	`In "evidence", list ONLY the bracketed template identifiers such as T1 or T7, ` +
 	`exactly as shown at the start of each TEMPLATES line. Do not copy template text, ` +
 	`counts, module names or any other part of the line into evidence, and never ` +
@@ -98,13 +101,7 @@ func SortedTemplates(b model.Bundle) []model.Template {
 	templates := make([]model.Template, len(b.Templates))
 	copy(templates, b.Templates)
 	sort.Slice(templates, func(i, j int) bool {
-		if templates[i].ModuleID != templates[j].ModuleID {
-			return templates[i].ModuleID < templates[j].ModuleID
-		}
-		if templates[i].Priority != templates[j].Priority {
-			return templates[i].Priority < templates[j].Priority
-		}
-		return templates[i].Template < templates[j].Template
+		return model.LessTemplate(templates[i], templates[j])
 	})
 	return templates
 }
@@ -216,8 +213,32 @@ func Render(b model.Bundle, open []model.Finding) string {
 			}
 			return known[i].Title < known[j].Title
 		})
+		// Map each known finding's stored evidence text back to the
+		// identifiers used in THIS window, so the model has something to
+		// match on. Printing only the title left it guessing, and a
+		// differently-worded restatement then arrived as a new finding.
+		idByTemplate := make(map[string]string, len(templates))
+		for i, t := range templates {
+			idByTemplate[t.Template] = TemplateID(i)
+		}
+
 		for _, f := range known {
 			sb.WriteString(fmt.Sprintf("[%s] %s\n", f.Severity, f.Title))
+			// A template the finding was raised from may be absent this
+			// window. Omit it rather than invent an identifier the model
+			// could cite back into ResolveEvidence as unknown.
+			ids := make([]string, 0, len(f.Evidence))
+			seen := map[string]bool{}
+			for _, ev := range f.Evidence {
+				if id, ok := idByTemplate[ev]; ok && !seen[id] {
+					seen[id] = true
+					ids = append(ids, id)
+				}
+			}
+			if len(ids) > 0 {
+				sort.Strings(ids)
+				sb.WriteString(fmt.Sprintf("    evidence: %s\n", strings.Join(ids, ", ")))
+			}
 		}
 	}
 

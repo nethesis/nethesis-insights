@@ -35,7 +35,7 @@ const (
 )
 
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{})
+	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{}, nil)
 }
 
 func validBundle() string {
@@ -143,5 +143,79 @@ func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("error %q leaks the presented secret", err)
+	}
+}
+
+// Exclusion happens at ingest, before the queue, so that the gate, the prompt,
+// system_templates and module_baselines all read the same filtered bundle and
+// cannot disagree about which modules are in scope.
+func TestIngestExcludesConfiguredModules(t *testing.T) {
+	pub := &fakePublisher{}
+	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
+		ThreatConfig{}, map[string]bool{"crowdsec1": true})
+
+	body, err := json.Marshal(model.Bundle{
+		SchemaVersion: model.SchemaVersion,
+		SystemID:      testSystemID,
+		Window:        model.Window{Start: 1000, End: 2000},
+		Templates: []model.Template{
+			{Template: "keep", ModuleID: "loki1"},
+			{Template: "drop", ModuleID: "crowdsec1"},
+		},
+		Digest: []model.DigestEntry{
+			{ModuleID: "loki1", Priority: 6, Observed: 1},
+			{ModuleID: "crowdsec1", Priority: 3, Observed: 2},
+		},
+		Budget: model.Budget{TruncatedModules: []model.TruncatedModule{{ModuleID: "crowdsec1", Dropped: 1}}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if rec := postBundle(t, h, string(body), true); rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("expected one published bundle, got %d", len(pub.published))
+	}
+
+	got := pub.published[0]
+	if len(got.Templates) != 1 || got.Templates[0].ModuleID != "loki1" {
+		t.Fatalf("excluded module survived in templates: %+v", got.Templates)
+	}
+	if len(got.Digest) != 1 || got.Digest[0].ModuleID != "loki1" {
+		t.Fatalf("excluded module survived in digest: %+v", got.Digest)
+	}
+	if len(got.Budget.TruncatedModules) != 0 {
+		t.Fatalf("excluded module survived in truncated_modules: %+v", got.Budget.TruncatedModules)
+	}
+}
+
+// With no exclusion configured the bundle must reach the queue untouched --
+// including the crowdsec1 content the default configuration would strip.
+func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
+	pub := &fakePublisher{}
+	body, err := json.Marshal(model.Bundle{
+		SchemaVersion: model.SchemaVersion,
+		SystemID:      testSystemID,
+		Window:        model.Window{Start: 1000, End: 2000},
+		Templates: []model.Template{
+			{Template: "keep", ModuleID: "loki1"},
+			{Template: "also-keep", ModuleID: "crowdsec1"},
+		},
+		Digest: []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: 2}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if rec := postBundle(t, testServer(pub), string(body), true); rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("expected one published bundle, got %d", len(pub.published))
+	}
+	if len(pub.published[0].Templates) != 2 || len(pub.published[0].Digest) != 1 {
+		t.Fatalf("bundle was filtered with no exclusion configured: %+v", pub.published[0])
 	}
 }

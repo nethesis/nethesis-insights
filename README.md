@@ -111,6 +111,7 @@ locally with `podman build -t nethesis-insights .`.
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative validator-outcome cache lifetimes (default `5m`/`30s`) |
 | `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
 | `GATE_TOLERANCE` | deviation ratio threshold (default `3.0`) |
+| `PIPELINE_EXCLUDE_MODULES` | comma-separated modules dropped from every bundle before analysis (default `crowdsec1`, which has its own pipeline); empty value analyses everything |
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |
 | `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |
 | `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | cost ledger prices (default `0`); e.g. gpt-4o-mini standard tier: `0.15`, `0.60` |
