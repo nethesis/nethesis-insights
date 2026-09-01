@@ -440,13 +440,22 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 		}
 	}
 
-	// systemID filter.
+	// systemID filter, exact.
 	sys1Only, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings systemID filter: %v", err)
 	}
 	if len(sys1Only) != 2 {
 		t.Fatalf("expected 2 findings for sys1, got %d", len(sys1Only))
+	}
+
+	// systemID filter, bare-value prefix match -- "sys" matches both systems.
+	sysPrefix, err := s.ListAllFindings(ctx, "sys", "", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("ListAllFindings systemID prefix filter: %v", err)
+	}
+	if len(sysPrefix) != 4 {
+		t.Fatalf("expected 4 findings for systemID prefix \"sys\", got %d", len(sysPrefix))
 	}
 
 	// status filter.

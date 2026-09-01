@@ -79,7 +79,7 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 	}
 	var out []model.Finding
 	for _, fnd := range f.findings {
-		if systemID != "" && fnd.SystemID != systemID {
+		if systemID != "" && !strings.HasPrefix(fnd.SystemID, strings.TrimSuffix(systemID, "%")) {
 			continue
 		}
 		if status != "" && fnd.Status != status {
