@@ -4,7 +4,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Baselines</h1>
-<p><small>EWMA rates &mdash; the gate's fallback when a bundle carries no <code>expected</code>.</small></p>
+<p><small>What "normal" log volume looks like for one system/module/priority bucket, used by
+the gate only when a bundle doesn't say how many lines it <code>expected</code> for that
+bucket. <strong>EWMA rate</strong> (Exponentially Weighted Moving Average) is a running
+estimate that leans mostly on history and shifts only a little toward each new window's
+count &mdash; not a hard threshold, just this bucket's baseline rate. The gate compares the
+actual count against this rate and fires if it's far enough above it (see
+<code>GATE_TOLERANCE</code>). Rows with module <code>(host)</code> are journal lines (sshd,
+systemd, &hellip;) that carry no module of their own.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">

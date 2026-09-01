@@ -4,7 +4,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Analyses</h1>
-<p><small>The cost ledger: why each window did or did not spend money.</small></p>
+<p><small>One row per 15-minute bundle window processed for a system &mdash; the cost ledger:
+why each window did or did not spend money. <strong>Gated</strong> means the gate decided
+nothing was new or unusual enough to bother the AI; <strong>LLM</strong> shows whether it
+was actually called (skipped windows are gated-out ones handled for free). Hover a
+truncated cell (gate reasons, error) for the full text.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">

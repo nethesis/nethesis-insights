@@ -4,7 +4,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Cost</h1>
-<p><small>Spend and token totals per UTC day and model.</small></p>
+<p><small>Fleet-wide LLM spend and token totals, grouped by UTC day and model. Each day
+sums the analyses across every system for that day (see <code>/analyses</code> for
+per-system detail, <code>/gate</code> for why calls happened at all).</small></p>
 <table>
 <thead>
 <tr>

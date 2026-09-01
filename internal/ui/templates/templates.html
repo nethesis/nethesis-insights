@@ -4,7 +4,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Templates</h1>
-<p><small>What the server already considers known for a system. A template listed here will not trigger the novelty gate again.</small></p>
+<p><small>The distinct <em>shapes</em> of log lines seen for each system &mdash; e.g.
+"Failed login for user X from Y" is one template regardless of which user or IP filled in
+the blanks. What's listed here is what the server already considers known: a template
+already in this table will not, by itself, trigger the gate again (it can still contribute
+to a deviation via its module's baseline). <strong>Count</strong> is how many times it has
+ever occurred.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">

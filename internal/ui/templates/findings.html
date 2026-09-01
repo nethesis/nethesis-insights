@@ -4,6 +4,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Findings</h1>
+<p><small>Problems the AI has reported, one row per distinct issue. Identity comes from a
+server-computed fingerprint (never the AI's wording), so the same problem recurring bumps
+<strong>occurrences</strong> instead of adding a new row. <strong>open</strong> means it's
+active or recent; <strong>stale</strong> means it hasn't reoccurred in a while and is
+presumed resolved &mdash; it can later reopen. Expand a row (click the title) for the
+summary, evidence and suggested action.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, partial ok, any if blank">
