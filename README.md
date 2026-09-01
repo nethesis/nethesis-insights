@@ -78,6 +78,26 @@ Get a key at <https://openrouter.ai>. This same combination is also what the
 `rl1` dev deployment runs — see `docs/runbooks/dev-machine-rl1.md` for the
 production-shaped systemd/quadlet setup instead of ad hoc `go run`.
 
+### Testing the edge collector without installing ns8-loki fork
+
+The collector script can be fetched and run standalone on any NS8 node — no
+module install needed:
+
+    runagent -m loki
+
+    wget https://raw.githubusercontent.com/NethServer/ns8-loki/refs/heads/anomaly_detector/imageroot/bin/insights-collector
+    INSIGHTS_SERVER_URL=https://<insights-server-host>/insights python3 insights-collector
+
+`INSIGHTS_SERVER_URL` is the one required variable — without it the script
+exits immediately with `INSIGHTS_SERVER_URL is not set`. On success it prints
+what it shipped and the server's response:
+
+    shipped 76 templates, 332 lines -> 202 {"accepted":true}
+
+Point it at the target `insightsd` instance's `/v1/bundles` base path (adjust
+for whatever reverse-proxy prefix fronts it). This is the fastest way to check
+ingest end to end against a real node's logs without deploying loki3 there.
+
 ## Container
 
 Published on every push to `main` and on every tag as a public multi-arch
