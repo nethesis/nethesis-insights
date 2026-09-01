@@ -85,7 +85,8 @@ module install needed:
 
     runagent -m loki
 
-    wget https://raw.githubusercontent.com/NethServer/ns8-loki/refs/heads/anomaly_detector/imageroot/bin/insights-collector
+    cd ../bin
+    curl https://raw.githubusercontent.com/NethServer/ns8-loki/refs/heads/anomaly_detector/imageroot/bin/insights-collector > insights-collector
     INSIGHTS_SERVER_URL=https://<insights-server-host>/insights python3 insights-collector
 
 `INSIGHTS_SERVER_URL` is the one required variable — without it the script
