@@ -159,7 +159,7 @@ type navGroup struct {
 
 var navGroups = []navGroup{
 	{"", []navPage{{"status", "/", "Status"}}},
-	{"Pipeline", []navPage{
+	{"Logs Pipeline", []navPage{
 		{"systems", "/systems", "Systems"},
 		{"findings", "/findings", "Findings"},
 		{"analyses", "/analyses", "Analyses"},
@@ -168,7 +168,7 @@ var navGroups = []navGroup{
 		{"templates", "/templates", "Templates"},
 		{"baselines", "/baselines", "Baselines"},
 	}},
-	{"Threat Shield", []navPage{
+	{"Blocklist Pipeline", []navPage{
 		{"blocklist", "/blocklist", "Blocklist"},
 		{"threat-events", "/threat-events", "Threat events"},
 		{"threat-stats", "/threat-stats", "Threat stats"},
