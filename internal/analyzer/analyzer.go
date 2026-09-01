@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/fingerprint"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
@@ -25,7 +26,8 @@ import (
 var ErrPermanent = errors.New("permanent failure")
 
 type Config struct {
-	Tolerance     float64
+	Gate          gate.Config
+	PromptAmbient int
 	StaleAfter    time.Duration
 	EWMAAlpha     float64
 	Model         string
@@ -34,14 +36,15 @@ type Config struct {
 }
 
 type Analyzer struct {
-	store store.Store
-	llm   llm.Client
-	cfg   Config
-	now   func() int64
+	store  store.Store
+	llm    llm.Client
+	budget *budget.Controller
+	cfg    Config
+	now    func() int64
 }
 
-func New(s store.Store, c llm.Client, cfg Config, now func() int64) *Analyzer {
-	return &Analyzer{store: s, llm: c, cfg: cfg, now: now}
+func New(s store.Store, c llm.Client, b *budget.Controller, cfg Config, now func() int64) *Analyzer {
+	return &Analyzer{store: s, llm: c, budget: b, cfg: cfg, now: now}
 }
 
 // analysisEntry carries the fields record() needs to finalize an analysis
@@ -58,6 +61,8 @@ type analysisEntry struct {
 	model        string
 	durationMs   int
 	errMsg       string
+	cachedTokens int
+	suppressedBy string
 }
 
 // record persists the durable side effects of processing a bundle -- template
@@ -88,10 +93,12 @@ func (a *Analyzer) record(ctx context.Context, b model.Bundle, entry analysisEnt
 		LLMCalled:    entry.llmCalled,
 		InputTokens:  entry.inputTokens,
 		OutputTokens: entry.outputTokens,
+		CachedTokens: entry.cachedTokens,
 		CostMicros:   entry.costMicros,
 		Model:        entry.model,
 		DurationMs:   entry.durationMs,
 		Error:        entry.errMsg,
+		SuppressedBy: entry.suppressedBy,
 	}); err != nil {
 		return fmt.Errorf("analyzer: finalize analysis: %w", err)
 	}
@@ -144,21 +151,44 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		"bundle_digest_entries", len(b.Digest),
 	)
 
-	// 4. Decide whether this bundle is worth an LLM call.
+	// 4. Ask the budget what this system may spend before asking the gate
+	// whether it should. A window stopped by the per-system cap is recorded
+	// and dropped: the gate's reasons describe why a window would be worth
+	// money, and storing them for a call that never happened would make
+	// "windows" and "LLM calls" stop being the same number for a reasoned row.
+	verdict, err := a.budget.Check(ctx, b.SystemID)
+	if err != nil {
+		return fmt.Errorf("analyzer: budget: %w", err)
+	}
+	if verdict.Suppressed != "" {
+		slog.Warn("window suppressed by budget",
+			"system_id", b.SystemID, "window_start", b.Window.Start, "limit", verdict.Suppressed)
+		return a.record(ctx, b, analysisEntry{
+			windowStart:  b.Window.Start,
+			windowEnd:    b.Window.End,
+			gated:        true,
+			suppressedBy: verdict.Suppressed,
+			durationMs:   int(time.Since(start).Milliseconds()),
+		})
+	}
+
+	// 5. Decide whether this bundle is worth an LLM call.
 	decision := gate.Evaluate(b, gate.SystemState{
 		KnownTemplates: knownTemplates,
 		Baselines:      baselines,
-	}, a.cfg.Tolerance)
+		SecurityOnly:   verdict.SecurityOnly,
+	}, a.cfg.Gate)
 
 	slog.Debug("gate decision",
 		"system_id", b.SystemID,
 		"window_start", b.Window.Start,
 		"call", decision.Call,
 		"reasons", decision.Reasons,
-		"tolerance", a.cfg.Tolerance,
+		"security_only", verdict.SecurityOnly,
+		"tolerance", a.cfg.Gate.Tolerance,
 	)
 
-	// 5. Gated out: record bookkeeping, no LLM call.
+	// 6. Gated out: record bookkeeping, no LLM call.
 	if !decision.Call {
 		slog.Info("bundle gated out", "system_id", b.SystemID, "window_start", b.Window.Start)
 		return a.record(ctx, b, analysisEntry{
@@ -170,22 +200,37 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		})
 	}
 
-	// 6. Call the LLM.
+	// 7. Call the LLM. The selection is built once and reused for
+	// ResolveEvidence below: prompt.TemplateID numbers whatever Select
+	// returns, so the identifiers the model cites only resolve against the
+	// same list it was shown.
 	open, err := a.store.OpenFindings(ctx, b.SystemID)
 	if err != nil {
 		return fmt.Errorf("analyzer: open findings: %w", err)
 	}
-	rendered := prompt.Render(b, open)
+	selection := prompt.Selection{
+		Novel:            decision.Novel,
+		DeviatingModules: decision.DeviatingModules,
+		MaxAmbient:       a.cfg.PromptAmbient,
+	}
+	rendered := prompt.Render(b, open, selection)
 
 	slog.Debug("calling llm",
 		"system_id", b.SystemID,
 		"model", a.cfg.Model,
 		"prompt_bytes", len(rendered),
+		"bundle_templates", len(b.Templates),
+		"prompt_templates", len(prompt.Select(b, selection)),
 		"open_findings", len(open),
 	)
 
+	release, err := a.budget.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("analyzer: budget acquire: %w", err)
+	}
 	llmStart := time.Now()
 	resp, err := a.llm.Complete(ctx, llm.Request{Model: a.cfg.Model, UserPrompt: rendered})
+	release()
 	if err != nil {
 		var httpErr *llm.HTTPError
 		permanent := errors.As(err, &httpErr) && httpErr.Permanent()
@@ -238,7 +283,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		"content_bytes", len(resp.Content),
 	)
 
-	// 7. Parse the response.
+	// 8. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
 		finalizeErr := a.store.FinalizeAnalysis(ctx, store.Analysis{
@@ -264,12 +309,12 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 
 	slog.Debug("response parsed", "system_id", b.SystemID, "findings", len(parsed))
 
-	// 8. Persist each finding, deduplicated by fingerprint.
+	// 9. Persist each finding, deduplicated by fingerprint.
 	for _, pf := range parsed {
 		// The model cites template identifiers; the server resolves them.
 		// Evidence text, module set and category are all derived here, so no
 		// model-authored string can reach the fingerprint.
-		cited, resolveErr := prompt.ResolveEvidence(b, pf.Evidence)
+		cited, resolveErr := prompt.ResolveEvidence(b, selection, pf.Evidence)
 		if resolveErr != nil {
 			slog.Warn("analyzer: discarding finding with unresolvable evidence",
 				"system_id", b.SystemID, "title", pf.Title, "error", resolveErr)
@@ -319,8 +364,16 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		}
 	}
 
-	// 9. Record bookkeeping now that the analysis fully succeeded.
-	costMicros := int64(math.Round(((float64(resp.InputTokens)/1e6)*a.cfg.InputPerMTok + (float64(resp.OutputTokens)/1e6)*a.cfg.OutputPerMTok) * 1e6))
+	// 10. Record bookkeeping now that the analysis fully succeeded.
+	// Cached input is billed at half rate. Clamp first: a provider that
+	// reported more cached than prompt tokens would otherwise produce a
+	// negative bill.
+	cached := resp.CachedTokens
+	if cached > resp.InputTokens {
+		cached = resp.InputTokens
+	}
+	billedInput := float64(resp.InputTokens-cached) + 0.5*float64(cached)
+	costMicros := int64(math.Round(((billedInput/1e6)*a.cfg.InputPerMTok + (float64(resp.OutputTokens)/1e6)*a.cfg.OutputPerMTok) * 1e6))
 
 	return a.record(ctx, b, analysisEntry{
 		windowStart:  b.Window.Start,
@@ -330,6 +383,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		llmCalled:    true,
 		inputTokens:  resp.InputTokens,
 		outputTokens: resp.OutputTokens,
+		cachedTokens: cached,
 		costMicros:   costMicros,
 		model:        resp.Model,
 		durationMs:   int(time.Since(start).Milliseconds()),

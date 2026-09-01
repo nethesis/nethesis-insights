@@ -7,8 +7,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <p><small>One row per 15-minute bundle window processed for a system &mdash; the cost ledger:
 why each window did or did not spend money. <strong>Gated</strong> means the gate decided
 nothing was new or unusual enough to bother the AI; <strong>LLM</strong> shows whether it
-was actually called (skipped windows are gated-out ones handled for free). Hover a
-truncated cell (gate reasons, error) for the full text.</small></p>
+was actually called (skipped windows are gated-out ones handled for free). A window with
+a <strong>suppressed</strong> value was not cheap &mdash; it was refused by a spend limit,
+and carries no gate reasons because no gate decision was acted on. <strong>Cached</strong>
+is the part of the input the model provider served from its prompt cache, at half price.
+Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
@@ -22,8 +25,8 @@ truncated cell (gate reasons, error) for the full text.</small></p>
 <tr>
 <th>ID</th><th>System</th><th>Window start</th>
 <th>Gated</th><th>LLM</th><th>Completed</th>
-<th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost</th><th class="num">ms</th>
-<th>Gate reasons</th><th>Error</th>
+<th class="num">In tok</th><th class="num">Cached</th><th class="num">Out tok</th><th class="num">Cost</th><th class="num">ms</th>
+<th>Gate reasons</th><th>Suppressed</th><th>Error</th>
 </tr>
 </thead>
 <tbody>
@@ -36,14 +39,16 @@ truncated cell (gate reasons, error) for the full text.</small></p>
 <td><span class="pill" data-status="{{if .LLMCalled}}llm-called{{else}}skipped{{end}}">{{if .LLMCalled}}llm_called{{else}}skipped{{end}}</span></td>
 <td>{{if .Completed}}yes{{else}}no{{end}}</td>
 <td class="num">{{.InputTokens}}</td>
+<td class="num">{{.CachedTokens}}</td>
 <td class="num">{{.OutputTokens}}</td>
 <td class="num">{{fmtCost .CostMicros}}</td>
 <td class="num">{{.DurationMs}}</td>
 <td class="mono truncate" title="{{join .GateReasons ", "}}">{{truncate (join .GateReasons ", ") 40}}</td>
+<td class="mono">{{.SuppressedBy}}</td>
 <td class="truncate" title="{{.Error}}">{{truncate .Error 30}}</td>
 </tr>
 {{else}}
-<tr><td colspan="12">no analyses yet</td></tr>
+<tr><td colspan="14">no analyses yet</td></tr>
 {{end}}
 </tbody>
 </table>

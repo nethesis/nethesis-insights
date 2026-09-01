@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nethesis/nethesis-insights/internal/budget"
+	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/store"
@@ -29,13 +31,27 @@ func newTestStore(t *testing.T) *store.SQLiteStore {
 	return s
 }
 
+func f(v float64) *float64 { return &v }
+
 func testConfig() Config {
 	return Config{
-		Tolerance:  3.0,
-		StaleAfter: 24 * time.Hour,
-		EWMAAlpha:  0.3,
-		Model:      "test-model",
+		Gate: gate.Config{
+			Tolerance:       3.0,
+			MinExpected:     1,
+			MinObserved:     1,
+			MinNewTemplates: 1,
+		},
+		PromptAmbient: 100,
+		StaleAfter:    24 * time.Hour,
+		EWMAAlpha:     0.3,
+		Model:         "test-model",
 	}
+}
+
+// testBudget is a controller with every limit off: these cases are about the
+// pipeline, and the budget's own limits have their own cases.
+func testBudget(r budget.Reader) *budget.Controller {
+	return budget.New(r, budget.Config{}, func() int64 { return 1000 })
 }
 
 func steadyBundle(systemID string) model.Bundle {
@@ -58,7 +74,7 @@ func TestGatedBundleNeverCallsLLM(t *testing.T) {
 	s := newTestStore(t)
 	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	// The very first bundle for a brand-new system always has novel
 	// templates, so it necessarily calls the LLM once -- use it to seed
@@ -89,7 +105,7 @@ func TestDuplicateWindowSkipped(t *testing.T) {
 	s := newTestStore(t)
 	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	b := steadyBundle("sys1")
 	b.Templates[0].Template = "novel-tpl" // force a call the first time
@@ -116,7 +132,7 @@ func TestFindingStoredWithValidFingerprint(t *testing.T) {
 			`]}`,
 	}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	b := steadyBundle("sys1")
 
@@ -144,7 +160,7 @@ func TestLLMFailureLeavesTemplatesUnrecorded(t *testing.T) {
 	s := newTestStore(t)
 	stub := &llm.Stub{Err: errors.New("boom")}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	b := steadyBundle("sys1")
 	b.Templates[0].Template = "novel-tpl"
@@ -168,7 +184,7 @@ func TestPermanentLLMErrorWraps(t *testing.T) {
 	s := newTestStore(t)
 	stub := &llm.Stub{Err: &llm.HTTPError{StatusCode: 400, Body: "bad request"}}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	b := steadyBundle("sys1")
 	b.Templates[0].Template = "novel-tpl"
@@ -187,7 +203,7 @@ func TestParseErrorWrapsPermanent(t *testing.T) {
 	s := newTestStore(t)
 	stub := &llm.Stub{Content: `not valid json at all`}
 	now := func() int64 { return 1000 }
-	a := New(s, stub, testConfig(), now)
+	a := New(s, stub, testBudget(s), testConfig(), now)
 
 	b := steadyBundle("sys1")
 	b.Templates[0].Template = "novel-tpl"
@@ -215,7 +231,7 @@ func TestIdentityIsStableWhenOnlyTheCountChanges(t *testing.T) {
 
 	first := steadyBundle("sys1")
 	first.Templates[0].Count = 37
-	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testConfig(), func() int64 { return 1000 })
+	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
 	if err := a.Process(ctx, first); err != nil {
 		t.Fatalf("first window: %v", err)
 	}
@@ -227,7 +243,7 @@ func TestIdentityIsStableWhenOnlyTheCountChanges(t *testing.T) {
 	second.Templates = append(second.Templates, model.Template{
 		Template: "a brand new line <NUM>", Count: 1, ModuleID: "mod1", Priority: 3,
 	})
-	b := New(st, &llm.Stub{Content: reply, Model: "m"}, testConfig(), func() int64 { return 2000 })
+	b := New(st, &llm.Stub{Content: reply, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 2000 })
 	if err := b.Process(ctx, second); err != nil {
 		t.Fatalf("second window: %v", err)
 	}
@@ -251,7 +267,7 @@ func TestEvidenceAndModulesAreResolvedNotTrusted(t *testing.T) {
 	reply := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"X","summary":"y","suggested_action":"z",` +
 		`"modules":["6"],"evidence":["T1"]}]}`
-	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testConfig(), func() int64 { return 1000 })
+	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
 	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
@@ -273,7 +289,7 @@ func TestFindingWithUnknownEvidenceIsDiscarded(t *testing.T) {
 	reply := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"Hallucinated","summary":"y","suggested_action":"z",` +
 		`"modules":[],"evidence":["T99"]}]}`
-	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testConfig(), func() int64 { return 1000 })
+	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
 	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
@@ -295,7 +311,7 @@ func TestTransientFailureLeavesTheWindowRetryable(t *testing.T) {
 	bundle := steadyBundle("sys1")
 
 	failing := &llm.Stub{Err: &llm.HTTPError{StatusCode: 503, Body: "upstream down"}}
-	a := New(st, failing, testConfig(), func() int64 { return 1000 })
+	a := New(st, failing, testBudget(st), testConfig(), func() int64 { return 1000 })
 	if err := a.Process(ctx, bundle); err == nil {
 		t.Fatal("expected the transient failure to surface")
 	}
@@ -305,7 +321,7 @@ func TestTransientFailureLeavesTheWindowRetryable(t *testing.T) {
 		`{"severity":"high","title":"Recovered","summary":"s","suggested_action":"a",` +
 		`"modules":[],"evidence":["T1"]}]}`
 	ok := &llm.Stub{Content: reply, Model: "m"}
-	b := New(st, ok, testConfig(), func() int64 { return 2000 })
+	b := New(st, ok, testBudget(st), testConfig(), func() int64 { return 2000 })
 	if err := b.Process(ctx, bundle); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -324,7 +340,7 @@ func TestCompletedWindowIsStillIdempotent(t *testing.T) {
 	st := newTestStore(t)
 	bundle := steadyBundle("sys1")
 	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`, Model: "m"}
-	a := New(st, stub, testConfig(), func() int64 { return 1000 })
+	a := New(st, stub, testBudget(st), testConfig(), func() int64 { return 1000 })
 
 	if err := a.Process(ctx, bundle); err != nil {
 		t.Fatalf("first: %v", err)
@@ -345,14 +361,14 @@ func TestPermanentFailureClosesTheWindow(t *testing.T) {
 	bundle := steadyBundle("sys1")
 
 	bad := &llm.Stub{Err: &llm.HTTPError{StatusCode: 400, Body: "bad schema"}}
-	a := New(st, bad, testConfig(), func() int64 { return 1000 })
+	a := New(st, bad, testBudget(st), testConfig(), func() int64 { return 1000 })
 	err := a.Process(ctx, bundle)
 	if !errors.Is(err, ErrPermanent) {
 		t.Fatalf("expected ErrPermanent, got %v", err)
 	}
 
 	retry := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
-	b := New(st, retry, testConfig(), func() int64 { return 2000 })
+	b := New(st, retry, testBudget(st), testConfig(), func() int64 { return 2000 })
 	if err := b.Process(ctx, bundle); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -369,14 +385,18 @@ func TestRecurrenceWithADifferentCitedSetIsBumped(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 
-	crowdBundle := func(windowStart int64, templates ...model.Template) model.Bundle {
+	// observed is what makes the second window fire at all: by then the
+	// country variants are neither novel nor new, so only a surge in volume
+	// pays for the call -- which is exactly the brute-force case the security
+	// condition exists to catch.
+	crowdBundle := func(windowStart, observed int64, templates ...model.Template) model.Bundle {
 		return model.Bundle{
 			SchemaVersion:    model.SchemaVersion,
 			SystemID:         "sys1",
 			CollectorVersion: "1.0",
 			Window:           model.Window{Start: windowStart, End: windowStart + 100},
 			Templates:        templates,
-			Digest:           []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: 5}},
+			Digest:           []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: observed, Expected: f(5)}},
 		}
 	}
 	us := model.Template{Template: "ssh-bf by ip <IP> (US/<NUM>)", Count: 9, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
@@ -386,18 +406,20 @@ func TestRecurrenceWithADifferentCitedSetIsBumped(t *testing.T) {
 	oneCitation := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"SSH Brute-Force Activity Detected","summary":"s",` +
 		`"suggested_action":"a","modules":[],"evidence":["T1"]}]}`
-	a := New(st, &llm.Stub{Content: oneCitation, Model: "m"}, testConfig(), func() int64 { return 1000 })
-	if err := a.Process(ctx, crowdBundle(100, us)); err != nil {
+	a := New(st, &llm.Stub{Content: oneCitation, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
+	if err := a.Process(ctx, crowdBundle(100, 5, us)); err != nil {
 		t.Fatalf("first window: %v", err)
 	}
 
 	// Second window: same condition, but a new country arrived and the model
-	// cites both templates, and words the title differently.
-	twoCitations := `{"window_assessment":"incident","findings":[` +
+	// words the title differently. The two country variants canonicalize to
+	// one line, so there is a single identifier to cite -- which is the point:
+	// the model cannot split the condition by citing a different subset.
+	oneCitationAgain := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"Repeated failed SSH logins from many hosts","summary":"s",` +
-		`"suggested_action":"a","modules":[],"evidence":["T1","T2"]}]}`
-	b := New(st, &llm.Stub{Content: twoCitations, Model: "m"}, testConfig(), func() int64 { return 2000 })
-	if err := b.Process(ctx, crowdBundle(100000, de, us)); err != nil {
+		`"suggested_action":"a","modules":[],"evidence":["T1"]}]}`
+	b := New(st, &llm.Stub{Content: oneCitationAgain, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 2000 })
+	if err := b.Process(ctx, crowdBundle(100000, 50, de, us)); err != nil {
 		t.Fatalf("second window: %v", err)
 	}
 
@@ -424,7 +446,7 @@ func TestEmptyBundleAfterExclusionIsGatedNotLost(t *testing.T) {
 	emptied := full.ExcludeModules(map[string]bool{"mod1": true})
 
 	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`, Model: "m"}
-	a := New(st, stub, testConfig(), func() int64 { return 1000 })
+	a := New(st, stub, testBudget(st), testConfig(), func() int64 { return 1000 })
 	if err := a.Process(ctx, emptied); err != nil {
 		t.Fatalf("process emptied bundle: %v", err)
 	}
@@ -441,5 +463,72 @@ func TestEmptyBundleAfterExclusionIsGatedNotLost(t *testing.T) {
 	}
 	if !rows[0].Gated {
 		t.Fatalf("expected the emptied window to be recorded as gated: %+v", rows[0])
+	}
+}
+
+// A window stopped by the per-system daily cap is recorded, costs nothing, and
+// carries no gate reasons: the reasons say why a window would be worth money,
+// and storing them for a call that never happened would break the rule that a
+// reasoned row is a called row.
+func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
+
+	capped := budget.New(st, budget.Config{MaxCallsPerSystemPerDay: 1}, func() int64 { return 1000 })
+	a := New(st, stub, capped, testConfig(), func() int64 { return 1000 })
+
+	// First window calls; it is novel.
+	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+	if stub.Calls != 1 {
+		t.Fatalf("expected the first window to call, got %d", stub.Calls)
+	}
+
+	second := steadyBundle("sys1")
+	second.Window = model.Window{Start: 100000, End: 100100}
+	second.Templates = []model.Template{
+		{Template: "<3> [svc] something entirely new", Count: 5, ModuleID: "mod1", Priority: 1},
+	}
+	if err := a.Process(ctx, second); err != nil {
+		t.Fatalf("second window: %v", err)
+	}
+	if stub.Calls != 1 {
+		t.Fatalf("the cap did not stop the second call, got %d calls", stub.Calls)
+	}
+
+	rows, err := st.ListAnalyses(ctx, "sys1", 10)
+	if err != nil {
+		t.Fatalf("ListAnalyses: %v", err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.WindowStart != 100000 {
+			continue
+		}
+		found = true
+		if !r.Gated || r.LLMCalled || r.CostMicros != 0 {
+			t.Fatalf("capped window recorded as gated=%v called=%v cost=%d", r.Gated, r.LLMCalled, r.CostMicros)
+		}
+		if len(r.GateReasons) != 0 {
+			t.Fatalf("a suppressed window must carry no gate reasons, got %v", r.GateReasons)
+		}
+		if r.SuppressedBy != budget.SuppressedSystemCap {
+			t.Fatalf("suppressed_by = %q, want %q", r.SuppressedBy, budget.SuppressedSystemCap)
+		}
+	}
+	if !found {
+		t.Fatal("the capped window was not recorded at all")
+	}
+
+	// The templates of a suppressed window must still be recorded, or the
+	// system never learns them and every later window looks novel.
+	known, err := st.KnownTemplates(ctx, "sys1")
+	if err != nil {
+		t.Fatalf("KnownTemplates: %v", err)
+	}
+	if !known[model.CanonicalKey("mod1", "<3> [svc] something entirely new")] {
+		t.Fatal("a suppressed window must still record its templates")
 	}
 }

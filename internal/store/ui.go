@@ -65,11 +65,16 @@ type AnalysisRow struct {
 	GateReasons            []string
 	InputTokens            int
 	OutputTokens           int
+	CachedTokens           int
 	CostMicros             int64
 	Model                  string
 	DurationMs             int
 	Error                  string
-	CreatedAt              int64
+
+	// SuppressedBy names the budget limit that stopped this window, if one
+	// did. A gated row with a value here was not cheap -- it was refused.
+	SuppressedBy string
+	CreatedAt    int64
 }
 
 // GateRow is one distinct gate-reason set, after the three empty spellings
@@ -210,7 +215,8 @@ func (s *SQLiteStore) ListSystems(ctx context.Context) ([]SystemRow, error) {
 func (s *SQLiteStore) ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, system_id, window_start, window_end, gated, llm_called, completed,
-		       gate_reasons, input_tokens, output_tokens, cost_micros, model, duration_ms, error, created_at
+		       gate_reasons, input_tokens, output_tokens, cached_tokens, cost_micros, model,
+		       duration_ms, error, suppressed_by, created_at
 		FROM analyses
 		WHERE (? = '' OR system_id = ?)
 		ORDER BY window_start DESC
@@ -226,11 +232,15 @@ func (s *SQLiteStore) ListAnalyses(ctx context.Context, systemID string, limit i
 		var r AnalysisRow
 		var gated, llmCalled, completed int
 		var gateReasons string
-		var errMsg sql.NullString
+		var errMsg, suppressedBy sql.NullString
+		var cachedTokens sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.SystemID, &r.WindowStart, &r.WindowEnd, &gated, &llmCalled, &completed,
-			&gateReasons, &r.InputTokens, &r.OutputTokens, &r.CostMicros, &r.Model, &r.DurationMs, &errMsg, &r.CreatedAt); err != nil {
+			&gateReasons, &r.InputTokens, &r.OutputTokens, &cachedTokens, &r.CostMicros, &r.Model,
+			&r.DurationMs, &errMsg, &suppressedBy, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan analysis row: %w", err)
 		}
+		r.CachedTokens = int(cachedTokens.Int64)
+		r.SuppressedBy = suppressedBy.String
 		r.Gated = gated != 0
 		r.LLMCalled = llmCalled != 0
 		r.Completed = completed != 0

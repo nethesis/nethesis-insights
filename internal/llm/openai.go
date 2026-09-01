@@ -59,9 +59,14 @@ type chatChoice struct {
 	Message chatMessage `json:"message"`
 }
 
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
 type chatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens        int                 `json:"prompt_tokens"`
+	CompletionTokens    int                 `json:"completion_tokens"`
+	PromptTokensDetails promptTokensDetails `json:"prompt_tokens_details"`
 }
 
 type chatResponse struct {
@@ -155,5 +160,6 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 		Model:        parsed.Model,
 		InputTokens:  parsed.Usage.PromptTokens,
 		OutputTokens: parsed.Usage.CompletionTokens,
+		CachedTokens: parsed.Usage.PromptTokensDetails.CachedTokens,
 	}, nil
 }

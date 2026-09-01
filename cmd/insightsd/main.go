@@ -24,6 +24,8 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/api"
 	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
+	"github.com/nethesis/nethesis-insights/internal/budget"
+	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	"github.com/nethesis/nethesis-insights/internal/store"
@@ -232,6 +234,23 @@ func main() {
 	authNegCacheTTL := getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
 	authTimeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
+	// Absolute floors under the deviation condition. A ratio is not evidence
+	// when the denominator is 2: the dev fleet's median bucket baseline was
+	// 3.1 lines per window, and the buckets that fired most often were the
+	// smallest ones in it.
+	gateMinExpected := getenvFloat("GATE_MIN_EXPECTED", 10)
+	gateMinObserved := getenvFloat("GATE_MIN_OBSERVED", 20)
+	// How many novel templates a window needs before novelty alone pays for a
+	// call. A new security template still fires on its own.
+	gateMinNewTemplates := getenvInt("GATE_MIN_NEW_TEMPLATES", 3)
+	// How many templates that are neither novel, security-classified nor in a
+	// deviating module the prompt carries as context.
+	promptMaxAmbient := getenvInt("PROMPT_MAX_AMBIENT", 60)
+	// The ceiling under LLM spend (internal/budget). The per-system cap is
+	// what makes the fleet's worst case arithmetic rather than emergent.
+	llmMaxConcurrency := getenvInt("LLM_MAX_CONCURRENCY", 4)
+	llmMaxCallsPerSystemPerDay := getenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 12)
+	llmDailySpendCapUSD := getenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
 	// CrowdSec has its own pipeline (/v1/threat-events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
 	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec1")
@@ -284,15 +303,29 @@ func main() {
 
 	client := llm.NewOpenAI(llmBaseURL, llmAPIKey, llmTimeout)
 
+	now := func() int64 { return time.Now().UnixMilli() }
+
+	bud := budget.New(s, budget.Config{
+		MaxConcurrency:          llmMaxConcurrency,
+		MaxCallsPerSystemPerDay: llmMaxCallsPerSystemPerDay,
+		DailySpendCapUSD:        llmDailySpendCapUSD,
+	}, now)
+
 	cfg := analyzer.Config{
-		Tolerance:     gateTolerance,
+		Gate: gate.Config{
+			Tolerance:       gateTolerance,
+			MinExpected:     gateMinExpected,
+			MinObserved:     gateMinObserved,
+			MinNewTemplates: gateMinNewTemplates,
+		},
+		PromptAmbient: promptMaxAmbient,
 		StaleAfter:    staleAfter,
 		EWMAAlpha:     ewmaAlpha,
 		Model:         llmModel,
 		InputPerMTok:  priceInput,
 		OutputPerMTok: priceOutput,
 	}
-	az := analyzer.New(s, client, cfg, func() int64 { return time.Now().UnixMilli() })
+	az := analyzer.New(s, client, bud, cfg, now)
 
 	// Ingest hands bundles to the queue and answers immediately; the workers
 	// own the analysis on their own context, so an edge that gives up waiting
@@ -363,6 +396,13 @@ func main() {
 		{Name: "AUTH_NEG_CACHE_TTL", Value: authNegCacheTTL.String()},
 		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
 		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
+		{Name: "GATE_MIN_EXPECTED", Value: strconv.FormatFloat(gateMinExpected, 'f', -1, 64)},
+		{Name: "GATE_MIN_OBSERVED", Value: strconv.FormatFloat(gateMinObserved, 'f', -1, 64)},
+		{Name: "GATE_MIN_NEW_TEMPLATES", Value: strconv.Itoa(gateMinNewTemplates)},
+		{Name: "PROMPT_MAX_AMBIENT", Value: strconv.Itoa(promptMaxAmbient)},
+		{Name: "LLM_MAX_CONCURRENCY", Value: strconv.Itoa(llmMaxConcurrency)},
+		{Name: "LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", Value: strconv.Itoa(llmMaxCallsPerSystemPerDay)},
+		{Name: "LLM_DAILY_SPEND_CAP_USD", Value: strconv.FormatFloat(llmDailySpendCapUSD, 'f', -1, 64)},
 		{Name: "PIPELINE_EXCLUDE_MODULES", Value: strings.Join(sortedKeys(excludeModules), ",")},
 		{Name: "PIPELINE_EXCLUDE_SERVICES", Value: strings.Join(sortedKeys(excludeServices), ",")},
 		{Name: "STALE_AFTER", Value: staleAfter.String()},
@@ -409,6 +449,13 @@ func main() {
 		"auth_neg_cache_ttl", authNegCacheTTL.String(),
 		"auth_timeout", authTimeout.String(),
 		"gate_tolerance", gateTolerance,
+		"gate_min_expected", gateMinExpected,
+		"gate_min_observed", gateMinObserved,
+		"gate_min_new_templates", gateMinNewTemplates,
+		"prompt_max_ambient", promptMaxAmbient,
+		"llm_max_concurrency", llmMaxConcurrency,
+		"llm_max_calls_per_system_per_day", llmMaxCallsPerSystemPerDay,
+		"llm_daily_spend_cap_usd", llmDailySpendCapUSD,
 		"stale_after", staleAfter.String(),
 		"ewma_alpha", ewmaAlpha,
 		"price_input_per_mtok", priceInput,

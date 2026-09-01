@@ -18,6 +18,12 @@ type Response struct {
 	Model        string
 	InputTokens  int
 	OutputTokens int
+
+	// CachedTokens is the part of InputTokens the provider served from its
+	// prompt cache, at half price. Providers that do not report it leave it
+	// zero, which prices the call as if nothing was cached -- the safe
+	// direction for a cost figure.
+	CachedTokens int
 }
 
 type Client interface {
