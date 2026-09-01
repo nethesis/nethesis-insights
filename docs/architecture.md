@@ -61,6 +61,7 @@ model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
 threat                      PURE — the Threat Shield sanitizer and allowlist
 llm  store                  interfaces, each with a real and a stub impl
+budget                      the ceiling under LLM spend; reads the cost ledger
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 api                         HTTP: ingest + read, auth via the Authenticator iface
@@ -75,12 +76,13 @@ and `ui` does not import `api` or `analyzer`.
 | Package | Responsibility |
 |---|---|
 | `internal/model` | Wire types (`Bundle`, `Finding`, `Template`, …) and the pure helpers (`SortFindings`, `SeverityRank`) that operate on them. |
-| `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, tolerance)`. |
+| `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
-| `internal/prompt` | Renders the deterministic LLM prompt from a bundle, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
+| `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
 | `internal/store` | `store.Store` interface; `SQLiteStore` is the only implementation today. `store/ui.go` adds the cross-system, read-only queries the operator UI needs. |
-| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties gate, fingerprint, prompt, llm and store together for one bundle. |
+| `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
+| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and store together for one bundle. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. |
 | `internal/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
@@ -154,25 +156,32 @@ requirement" for the two rules that must never move, and why. In order:
 1. **Claim the window** (`BeginAnalysis`) — a duplicate is a no-op.
 2. **Register the system** (`UpsertSystem`).
 3. **Read prior state** — `KnownTemplates` and `Baselines` — *before* writing
-   anything.
-4. **Gate** (`gate.Evaluate`) using that prior state.
-5. If the gate declines: **record** bookkeeping (templates, baselines, stale
+   anything. `KnownTemplates` is keyed by `model.CanonicalKey`, not by raw
+   template text.
+4. **Ask the budget** (`budget.Check`) what this system may spend. A window
+   over the per-system daily cap is recorded with `gated = 1`,
+   `suppressed_by = "system_call_cap"` and **no** gate reasons, and returns.
+   Over the daily spend cap the gate is narrowed to security-only instead.
+5. **Gate** (`gate.Evaluate`) using that prior state.
+6. If the gate declines: **record** bookkeeping (templates, baselines, stale
    sweep, the `analyses` ledger row) and return. No LLM call, no cost.
-6. If the gate fires: render the prompt (`prompt.Render`, including
-   currently-open findings so the model doesn't re-report them), call the
-   LLM.
+7. If the gate fires: build one `prompt.Selection` from what the gate found,
+   render the prompt (`prompt.Render`, including currently-open findings so the
+   model doesn't re-report them), take a slot from the budget's concurrency
+   bound, and call the LLM.
    - A **transient** failure (`RecordAttemptError`) leaves the window
      claimable for retry.
    - A **permanent** failure (`llm.HTTPError.Permanent()`, or a schema/parse
      failure) finalizes and closes the window — retrying would hit the same
      wall forever.
-7. Parse the strict-JSON response (`prompt.Parse`), resolve each finding's
-   cited template IDs back to real templates (`prompt.ResolveEvidence`) —
-   this is the *only* path from model output to stored data, and it is what
-   keeps model-authored prose out of the fingerprint.
-8. Compute the fingerprint (`fingerprint.Compute`) and `UpsertFinding` —
+8. Parse the strict-JSON response (`prompt.Parse`), resolve each finding's
+   cited template IDs back to real templates (`prompt.ResolveEvidence`, given
+   the **same** `Selection` used to render) — this is the *only* path from
+   model output to stored data, and it is what keeps model-authored prose out
+   of the fingerprint.
+9. Compute the fingerprint (`fingerprint.Compute`) and `UpsertFinding` —
    insert, bump the occurrence count, or reopen a stale finding.
-9. **Record** bookkeeping now that the whole analysis succeeded — this is the
+10. **Record** bookkeeping now that the whole analysis succeeded — this is the
    only path that writes templates/baselines after an LLM call, and it is
    what makes a failed call retry-safe: nothing looks "known" that wasn't
    actually processed.
@@ -271,9 +280,9 @@ without a goroutine to leak.
 | Table | Purpose |
 |---|---|
 | `systems` | One row per system seen; first/last-seen timestamps, collector version. |
-| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. |
+| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text; `template` keeps the raw text of the last variant seen, which is what the UI shows. |
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. |
-| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens, cost, duration, error. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
+| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
@@ -413,7 +422,7 @@ forgeable (`"ab"+"c"` could collide with `"a"+"bc"`).
 
 The critical invariant: **no model-authored string ever reaches the
 fingerprint**. The LLM cites templates by identifier only (`T1`, `T2`, …,
-assigned by `prompt.TemplateID` in the exact order `prompt.SortedTemplates`
+assigned by `prompt.TemplateID` in the exact order `prompt.Select`
 renders them); `prompt.ResolveEvidence` maps those IDs back to the server's
 own template records, and the server derives the evidence text, module set
 and category from that — never from the model's prose. This is what makes
@@ -429,11 +438,15 @@ two findings, each stuck at `occurrence_count=1`.
 `v2` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
 three layers:
 
-1. `fingerprint.Normalize` collapses the two masking leaks observed in the
-   field (a bracketed two-letter GeoIP country code, and a bare duration).
-   Fixing the masking belongs in the collector; this exists so a leak there
-   cannot silently split identity here. The stored evidence text shown to the
-   operator is never rewritten — only the identity path.
+1. `fingerprint.Normalize` collapses the fields the collector's masking leaves
+   literal. It is `model.CanonicalTemplate`, the same collapse the gate's
+   novelty check and the `system_templates` key use — one definition, because
+   if novelty and identity disagreed about whether two lines are the same
+   condition, a window could pay for a template the store already knew and the
+   finding would land on a fresh fingerprint each time. Fixing the masking
+   belongs in the collector; this exists so a leak there cannot silently split
+   identity here. The stored evidence text shown to the operator is never
+   rewritten — only the identity path.
 2. If every cited template shares one `(module_id, priority)` bucket, the key
    is that bucket. Text variance *within* a bucket the model already chose to
    cite as one condition is noise.
@@ -441,7 +454,7 @@ three layers:
    normalized set under `model.LessTemplate`.
 
 `model.LessTemplate` is the single definition of template order, used by both
-`prompt.SortedTemplates` (to number the identifiers the model cites) and
+`prompt.Select` (to number the identifiers the model cites) and
 `EvidenceKey` (to pick the primary). If those two ever disagreed, a finding's
 identity would stop matching the evidence the operator is shown for it.
 
@@ -455,10 +468,19 @@ fleet-wide — that must be a deliberate versioned migration (bump the
 month it would cost to send every window to an LLM (`gpt-4o-mini` pricing).
 It fires (returns `Call: true`) if any of:
 
-- a template is new for this system (never seen before in `system_templates`);
-- a digest entry's observed/expected ratio exceeds `GATE_TOLERANCE` — using
-  the edge-supplied `expected` if present, otherwise the server's own EWMA
-  baseline;
+- at least `GATE_MIN_NEW_TEMPLATES` (default 3) templates are new for this
+  system. Novelty is counted over `model.CanonicalKey`, so the many spellings
+  the collector's masking leaks produce for one line count once, and a quorum
+  is required because a real new condition arrives as a cluster of lines, not
+  as one Postgres checkpoint line with a different percentage;
+- a digest entry's observed/expected ratio exceeds `GATE_TOLERANCE` **and** the
+  bucket clears both absolute floors, `GATE_MIN_EXPECTED` (default 10) and
+  `GATE_MIN_OBSERVED` (default 20). A ratio is not evidence when the
+  denominator is 2: on the dev fleet the median bucket baseline was 3.1 lines
+  per window, 207 of 587 buckets were under 2, and the buckets that fired most
+  often were the smallest ones. `expected` is the edge-supplied value if
+  present, otherwise the server's own EWMA baseline, and the floors apply
+  identically to both;
 - a **new** security-category template appears, or a **known** one whose
   module is deviating (`security_new` / `security_surge`). The category is
   assigned by the edge, never computed server-side. Mere presence does not
@@ -469,9 +491,13 @@ It fires (returns `Call: true`) if any of:
 - a module is both truncated (the edge dropped lines to stay under its line
   budget) **and** deviating — truncation alone never fires.
 
+A **new security-category template always fires on its own**, before and
+independent of the novelty quorum: one is the entire signal that condition
+exists for.
+
 **A bundle is sent to the LLM if and only if `gate.Evaluate` returns
 `Call: true`** — i.e. at least one condition above holds. Otherwise the
-window is *gated out*: `analyzer.Process` step 5 records it and returns
+window is *gated out*: `analyzer.Process` step 6 records it and returns
 without ever calling `llm.Client.Complete`.
 
 Every window — gated out or sent to the LLM — gets exactly one row in the
@@ -482,6 +508,10 @@ called. This row is where a gated analysis "lives" — there is no separate
 gated-vs-analyzed table, only this one flag. So both "why did this cost
 money" and "why was this potentially missed" are answerable from stored data
 alone — see the `/gate` and `/analyses` routes in the operator UI.
+
+A third state exists alongside "gated out" and "called": a window the budget
+refused. It is stored with `gated = 1`, `suppressed_by` naming the limit, and
+**no** gate reasons — see "Cost control: the ceiling" below.
 
 Two consequences for anything that reads `gate_reasons` back:
 
@@ -499,12 +529,58 @@ Two consequences for anything that reads `gate_reasons` back:
   7 days; unbounded, the page groups two gates at once and is dominated by
   whichever era has more rows.
 
+### What the prompt carries
+
+The gate decides *whether* to pay; `prompt.Select` decides *how much*.
+
+A bundle from a real multi-module node carries 160-190 templates and rendered a
+32 KB prompt, of which roughly 70% was template text — almost none of it the
+reason the call happened. `Select` therefore shows: every novel template, every
+security-classified one, everything in a deviating module, and then the top
+`PROMPT_MAX_AMBIENT` (default 60) of the remainder by count as context.
+
+Before selecting, it **collapses**: templates sharing a canonical key within
+one `(module_id, priority)` become one line carrying the summed count, the
+number of variants folded, and the text of the busiest variant. Showing a model
+65 spellings of one Prometheus message invites 65 findings.
+
+`prompt.TemplateID` numbers whatever `Select` returns, so `Render` and
+`ResolveEvidence` must be given the **same** `Selection` — otherwise the
+identifiers the model cites resolve to different templates than the ones it was
+shown. `analyzer.Process` builds it once, from `gate.Decision.Novel` and
+`gate.Decision.DeviatingModules`, and passes that one value to both.
+
+## Cost control: the ceiling
+
+The gate is a per-window judgement and cannot answer the fleet-level question:
+what is the most this can cost if the judgement is wrong, or if a collector
+upgrade changes the masking rules and every node's templates go novel in the
+same window (spec §9.3). `internal/budget` answers it with three limits, each
+counted off the `analyses` ledger for the current UTC day — never an
+in-process counter, which a crash loop would reset:
+
+| Limit | Effect on breach |
+|---|---|
+| `LLM_MAX_CONCURRENCY` (default 4) | calls wait for a slot; the bounded queue absorbs the rest and ingest answers 503 when it fills |
+| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` (default 12) | the window is recorded `gated = 1`, `suppressed_by = "system_call_cap"`, no reasons, no cost |
+| `LLM_DAILY_SPEND_CAP_USD` (default 0 = off) | `gate.SystemState.SecurityOnly` is set: novel and surging security templates still fire, everything else declines |
+
+The per-system cap is the one that makes the worst case arithmetic rather than
+emergent. The spend cap deliberately degrades rather than stops: a cap that
+blinded the fleet to a break-in would be worse than the invoice it prevents.
+
+A suppressed window still records its templates and baselines. Skipping that
+would leave the system never learning what it saw, so every later window would
+look novel — the cap would make the next day more expensive, not less.
+
 ## Determinism
 
 Identical bundle input must produce byte-identical prompts and stable gate
 reasons, because the whole cost/identity model depends on it:
 
-- `prompt.SortedTemplates` sorts `(module_id, priority, template)`.
+- `prompt.Select` sorts `(module_id, priority, template)`, and breaks ties in
+  the ambient ranking on the same order so equal counts cannot depend on input
+  order.
 - Digest entries are sorted `(module_id, priority)` in both `gate.Evaluate`
   and `prompt.Render`.
 - Gate reasons are appended in a fixed order (security first, then
@@ -534,6 +610,15 @@ field — some providers reject any non-default value outright.
 `llm.HTTPError.Permanent()` distinguishes errors the analyzer should finalize
 (4xx-shaped, schema rejections) from transient ones it should leave
 retryable (timeouts, 5xx, connection failures).
+
+`Response.CachedTokens` carries `usage.prompt_tokens_details.cached_tokens`
+where the provider reports it. Cached input is billed at half rate, and
+`analyzer.Process` prices it that way; a provider that reports nothing leaves
+it zero, which prices the call as if nothing was cached — the safe direction
+for a cost figure. Earning those hits is why `prompt.Render` opens with an
+invariant header and ends with the per-window one: a provider caches the
+longest shared prefix of a request, and a prompt starting with
+`start_ms=1788269400000` shares nothing beyond the system message.
 
 ## Authentication
 

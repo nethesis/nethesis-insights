@@ -405,9 +405,12 @@ consume bundle
 
 A pure function. It calls the LLM if **any** condition holds:
 
-- a template is new for this `system_id`
+- at least `GATE_MIN_NEW_TEMPLATES` (default 3) templates are new for this
+  `system_id`, counted over canonical keys — see 8.1.2
 - a digest ratio exceeds tolerance (default 3.0), from edge `expected` or
-  server EWMA
+  server EWMA, **and** the bucket clears both absolute floors,
+  `GATE_MIN_EXPECTED` (default 10) and `GATE_MIN_OBSERVED` (default 20) — see
+  8.1.3
 - a **new** security-category template appears, or a **known** one whose module
   is deviating (edge-assigned category; the server does not classify).
   Presence alone does not fire — see 8.1.1
@@ -453,6 +456,52 @@ A security template therefore fires the gate when it is **new** for the system
 tolerance (`security_surge`). A brute-force spike still fires; a steady
 background of the same rejected logins does not.
 
+### 8.1.2 Why novelty is canonicalized and needs a quorum
+
+The collector masks the variable parts of a line it has a rule for, and leaks
+whatever it does not. Measured on three real multi-module nodes on 2026-09-01,
+512 of 710 live templates differed from another template only in such a leak: a
+percentage, a customer domain, a request path tail, a single-digit counter. One
+Prometheus message accounted for 65 templates; `metrics1` alone contributed 223
+templates that were 5 conditions.
+
+Two consequences, both paid for on every window:
+
+- every leaked variant is novel, so the novelty condition never settles;
+- every variant occupies a line in the prompt, and the model reads restatements
+  of one condition as many conditions.
+
+The server therefore collapses the known leak classes (`model.CanonicalTemplate`)
+and keys novelty, `system_templates` and finding identity on the result — one
+definition, because if novelty and identity disagreed a window could pay for a
+template the store already knew and the finding would land on a fresh
+fingerprint each time. The rules are deliberately narrow: a generic
+quoted-string rule would fold `msg="write block"` into `msg="compact blocks"`,
+and a short-hex rule matches ordinary English words. Fixing the leak at source
+is edge work and does not remove the need for this: the server cannot trust
+that every fleet node runs a fixed collector.
+
+Novelty additionally requires a quorum, because a real new condition arrives as
+a cluster of related lines while a single new template is nearly always one more
+spelling of something the node has emitted all week. A new **security** template
+is exempt and fires alone: one is the entire signal that condition exists for.
+
+### 8.1.3 Why the deviation condition has absolute floors
+
+A ratio is not evidence when the denominator is 2. On the dev fleet the median
+`module_baselines.ewma_rate` was 3.1 lines per window and 207 of 587 buckets
+were under 2, so `GATE_TOLERANCE=3.0` fired on a bucket that emitted seven
+lines. The buckets that fired most often over 24 hours were exactly the
+smallest: `<host>/5` (baseline 2.0) 28 times, `metrics1/3` (3.0-3.7) 23 times,
+`loki1/6` (3.2-4.0) 4 times. Deviation appeared in 44 of 49 reasoned windows,
+and `security_surge` -- which requires a deviating module -- rode along on 29.
+
+`GATE_MIN_EXPECTED` refuses to judge a bucket with no meaningful normal;
+`GATE_MIN_OBSERVED` refuses to call a handful of lines a surge however quiet the
+bucket usually is. Both apply identically to edge `expected` and to the server's
+EWMA fallback, or the absence of an edge baseline would be the cheap way past
+them.
+
 ### 8.2 Consistency of model output
 
 Five levers:
@@ -468,6 +517,22 @@ Five levers:
    instruction to report only new or changed conditions.
 5. Identity is server-computed (§6.2), so consistency of *wording* is not
    relied upon for dedup — only consistency of *evidence*.
+
+### 8.2.1 What the prompt carries
+
+The gate decides whether to pay; `prompt.Select` decides how much. It shows
+every novel template, every security-classified one, everything in a deviating
+module, and then the top `PROMPT_MAX_AMBIENT` (default 60) of the remainder by
+count as context. Templates sharing a canonical key within one
+`(module_id, priority)` are collapsed into one line carrying the summed count
+and a variant count.
+
+`prompt.TemplateID` numbers whatever `Select` returns, so `Render` and
+`ResolveEvidence` must receive the same `Selection` value; the analyzer builds
+it once from the gate's decision. A mismatch would resolve the model's
+citations to templates it was never shown, which is a fingerprint computed from
+the wrong evidence.
+
 
 ## 9. Error handling
 
@@ -518,8 +583,21 @@ Three defences, all required:
   `analyses` cost ledger. On breach, the gate degrades to
   security-category-only and logs loudly. Degraded is better than a surprise
   invoice, and better than silence.
+- **Per-system daily call cap** (`LLM_MAX_CALLS_PER_SYSTEM_PER_DAY`, default
+  12), also computed from the ledger. This is the defence that makes the worst
+  case arithmetic rather than emergent: whatever the gate concludes, one system
+  cannot cost more than its cap. An over-cap window is recorded with
+  `gated = 1`, `suppressed_by` naming the limit and **no** gate reasons — the
+  reasons say why a window would be worth money, and storing them for a call
+  that never happened would break the rule that a reasoned row is a called row.
+  Its templates and baselines are still recorded, or the system would never
+  learn what it saw and the next day would be more expensive, not less.
 - **Per-system ingest rate limit** — roughly 10 bundles/hour burst, so one
   misbehaving node cannot fill the queue on its own.
+
+All ledger-derived limits count from the start of the UTC day and are read back
+from `analyses`, never from an in-process counter: a counter would reset on
+restart, making a crash loop a way to spend without limit.
 
 ### 9.4 Degradation summary
 
@@ -564,13 +642,31 @@ steady-state systems should gate out almost every bundle, and template
 deduplication at the edge shrinks per-call input for exactly the noisiest
 windows.
 
+Measured on 2026-09-01, before the floors, quorum and prompt selection: three
+real multi-module nodes fired the gate on 9 windows out of 9, at 7,750-12,140
+input tokens per call, which is the ungated upper bound arriving despite the
+gate. Three levers were applied, and they multiply:
+
+| Lever | Effect |
+|---|---|
+| Deviation floors + novelty quorum (§8.1.2, §8.1.3) | fewer calls |
+| Prompt selection and collapse (§8.2.1) | ~10,100 → ~2,500 input tokens per call |
+| Per-system daily call cap (§9.3) | worst case becomes arithmetic: 2700 × 12 × ~$0.0006 ≈ $580/month |
+
+The cap is the only one of the three that is a guarantee rather than a
+measurement, which is why it exists even though the other two are expected to
+do the real work.
+
 `gpt-4o-mini` is the recommended tier. The task is bounded, schema-constrained
 log classification — the same complexity class already validated against free
 models on OpenRouter.
 
-The OpenRouter Batch API was evaluated and rejected: its documentation
-advertises no discount versus synchronous calls, and its 24-hour completion
-window is incompatible with 15-minute detection latency.
+A batch API is still rejected: a 24-hour completion window is incompatible with
+15-minute detection latency, whatever the discount. Prompt caching is the
+discount actually taken — the prompt opens with an invariant header and ends
+with the per-window block so that requests share a cacheable prefix, and
+`analyses.cached_tokens` records what the provider actually served from cache
+so the saving is measured rather than assumed.
 
 ## 12. Configuration
 
@@ -589,7 +685,11 @@ window is incompatible with 15-minute detection latency.
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | provider — key is secret |
 | `LLM_MAX_CONCURRENCY` | global inference cap |
 | `LLM_DAILY_SPEND_CAP_USD` | spend ceiling, gate degrades on breach |
+| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-system ceiling per UTC day, default 12 |
 | `GATE_TOLERANCE` | deviation ratio threshold, default 3.0 |
+| `GATE_MIN_EXPECTED`, `GATE_MIN_OBSERVED` | absolute floors under the deviation condition, defaults 10 and 20 |
+| `GATE_MIN_NEW_TEMPLATES` | novel templates required before novelty alone fires, default 3 |
+| `PROMPT_MAX_AMBIENT` | templates carried as context beyond those the gate fired on, default 60 |
 | `STALE_AFTER` | finding staleness threshold, default 24 h |
 | `LOG_LEVEL` | — |
 

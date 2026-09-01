@@ -132,6 +132,13 @@ locally with `podman build -t nethesis-insights .`.
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative validator-outcome cache lifetimes (default `5m`/`30s`) |
 | `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
 | `GATE_TOLERANCE` | deviation ratio threshold (default `3.0`) |
+| `GATE_MIN_EXPECTED` | smallest baseline a bucket needs before its ratio is trusted (default `10`) |
+| `GATE_MIN_OBSERVED` | smallest observed line count that can be called a surge (default `20`) |
+| `GATE_MIN_NEW_TEMPLATES` | novel templates required before novelty alone fires (default `3`); a new security template always fires on its own |
+| `PROMPT_MAX_AMBIENT` | templates carried as context beyond the ones the gate fired on (default `60`) |
+| `LLM_MAX_CONCURRENCY` | LLM calls in flight at once (default `4`) |
+| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-system ceiling, UTC day (default `12`); over-cap windows are recorded with `suppressed_by` and cost nothing |
+| `LLM_DAILY_SPEND_CAP_USD` | fleet spend ceiling for the UTC day (default `0` — off); on breach the gate narrows to security-only rather than stopping |
 | `PIPELINE_EXCLUDE_MODULES` | comma-separated modules dropped from every bundle before analysis (default `crowdsec1`, which has its own pipeline); empty value analyses everything |
 | `PIPELINE_EXCLUDE_SERVICES` | comma-separated syslog identifiers dropped the same way, matched against the `[service]` tag on host records (default `insights`, so a co-located server does not analyse its own logs) |
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |

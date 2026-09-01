@@ -66,12 +66,19 @@ mostly "nothing happened" windows. So before anything is sent to the AI, the
 **gate** looks at the bundle and asks: is there actually anything new or
 unusual here? It says yes if:
 
-- a template in this bundle has **never been seen before** for this machine;
-- some module's log volume is **way higher than expected** (more than a
-  configurable multiplier over its normal rate — see baselines);
+- **several templates have never been seen before** for this machine (three by
+  default, not one — see "what counts as new" below);
+- some module's log volume is **way higher than expected** — more than a
+  configurable multiplier over its normal rate (see baselines) *and* enough
+  lines for that to mean anything. A module that normally logs 2 lines per
+  window and logs 7 is not surging; it is a quiet module having a quiet day.
+  Both a minimum normal rate and a minimum line count must be cleared before a
+  ratio counts at all;
 - a template tagged **security**-related is either new for this machine, or is
   one we already know about whose module is suddenly much noisier than usual
-  (the node applies the security tag, not the server);
+  (the node applies the security tag, not the server). A single new
+  security-tagged template is enough on its own — it never has to wait for
+  company;
 - a module both **dropped lines** because it hit its own budget *and* is
   behaving unusually — either one alone is not enough.
 
@@ -79,6 +86,25 @@ unusual here? It says yes if:
 above is true.** If none are true, the window is "gated out": the server
 still does the cheap bookkeeping (remembers the templates, updates the
 baselines) and moves on — no AI call, no cost.
+
+**What counts as "never seen before".** The node masks variable parts out of
+each log line before sending it — timestamps, IP addresses, process ids — but
+it cannot mask what it has no rule for, and what leaks through changes every
+time the line is written. A PostgreSQL checkpoint line carries the percentage
+of buffers written and the number of files recycled; those two numbers made
+every checkpoint look like a brand-new kind of log line. Measured on three real
+machines, 512 of 710 stored templates differed from another one only in a field
+like that.
+
+So the server collapses those fields before asking "have we seen this": one
+condition is one template, however many spellings of it arrive. The same
+collapse is used when a finding's identity is computed, so a leak cannot split
+one problem into ten findings either. The full, unmodified line is still what
+you see in the UI and on the finding — only the comparison is collapsed.
+
+That is also why novelty needs more than one new template. A genuinely new
+condition arrives as a handful of related lines; a single new line is nearly
+always one more spelling of something the machine has been saying all week.
 
 Note the shape of the security rule: *new or surging*, not merely *present*.
 Any machine reachable from the internet gets a constant trickle of failed SSH
@@ -129,6 +155,26 @@ its own group. That is deliberate: a formula change should be visible, not
 silently rewritten. It also means an all-time grouping compares two different
 gates, which is why `/gate` defaults to a recent window.
 
+### 3a. The spending ceiling
+
+The gate answers "is this window worth money". It cannot answer "what is the
+most this can cost", because that depends on every machine at once. Three
+limits do:
+
+- **calls in flight** — how many AI requests may run at the same time. The rest
+  wait in the queue; if the queue fills, machines are told to come back later;
+- **calls per machine per day** — a hard ceiling, counted from midnight UTC. A
+  machine whose logs are pathological cannot spend the whole fleet's budget by
+  itself. A window stopped this way is recorded with a `suppressed_by` value in
+  `/analyses`, costs nothing, and carries no gate reasons — nobody decided it
+  was uninteresting, it simply was not affordable;
+- **spend per day for the whole fleet** — off unless configured. On breach the
+  gate *narrows* to security-only rather than stopping: a cost ceiling that
+  blinds you to a break-in is worse than the bill it prevents.
+
+The counts come from the stored ledger, not from memory, so restarting the
+server does not hand anybody a fresh allowance.
+
 ### 4. Baselines: "what's normal" for a module
 
 Not every node's log collector knows how many lines it expects to see for a
@@ -162,9 +208,19 @@ normal for that module on that machine.
 ### 5. The analysis: when the AI actually looks
 
 When the gate says yes, the server builds a prompt describing that window
-(the digest, the new/interesting templates, what got truncated) and sends it
+(the digest, the interesting templates, what got truncated) and sends it
 to an LLM, along with a reminder of what's *already* an open problem for this
-machine so the AI doesn't re-report it. The AI responds with a structured
+machine so the AI doesn't re-report it.
+
+The prompt does **not** carry every template in the bundle. A busy machine
+ships 160-190 of them per window and only a handful are why the call happened,
+so the AI is shown: everything new, everything security-tagged, everything from
+a module that is behaving unusually, and then the busiest of what remains as
+background context. Repeated spellings of one line are folded into a single
+entry with the counts added up and a `variants=` marker, so a message the
+machine logged 65 slightly different ways arrives as one thing to consider
+rather than 65. Sending the rest costs money on every call and buries the
+evidence the AI is supposed to weigh. The AI responds with a structured
 list of findings (or none, if on reflection nothing warrants it) — never free
 text, always following a strict format the server validates.
 
@@ -346,7 +402,7 @@ What each page shows, in plain terms:
 | `/` (home) | Is the server healthy? Queue backlog, uptime, build version, and the full effective configuration it's running with. |
 | `/systems` | Every machine the server has ever heard from, with a quick summary: how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/findings` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. Click a row to see the full summary, suggested action, evidence and fingerprint. |
-| `/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used, cost, how long it took, and any error. This answers "what did we spend, and on what." |
+| `/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
 | `/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. |
