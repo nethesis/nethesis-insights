@@ -97,6 +97,7 @@ type Store interface {
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error)
 	ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
+	ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
 
 	// Allowlist management: a client-facing request queue (internal/api),

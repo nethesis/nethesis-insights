@@ -115,6 +115,79 @@ func (s *SQLiteStore) ThreatIngestStats(ctx context.Context, limit int) ([]Threa
 	return result, rows.Err()
 }
 
+// ThreatSystemRow is one system's aggregate contribution to Threat Shield --
+// the blocklist pipeline's counterpart to store.SystemRow, which aggregates
+// the log pipeline instead.
+type ThreatSystemRow struct {
+	SystemID          string
+	FirstDay, LastDay string
+	Accepted          int
+	Duplicates        int
+	Dropped           int
+	Truncated         int
+	Events            int
+	DistinctIPs       int
+	DistinctScenarios int
+	TotalHits         int64
+	LastEventAt       *int64
+}
+
+// ListThreatSystems aggregates per system_id across both Threat Shield
+// tables. threat_ingest_daily is the driving table -- RecordIngestCounters
+// (internal/api/threat.go) writes one row there for every POST
+// /v1/threat-events regardless of outcome, so it is the complete set of
+// systems that have ever reported, including ones whose every event was
+// dropped or duplicate and therefore never made it into threat_events.
+func (s *SQLiteStore) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		WITH ingest AS (
+			SELECT system_id,
+			       min(day) AS first_day, max(day) AS last_day,
+			       sum(accepted) AS accepted, sum(duplicates) AS duplicates,
+			       sum(dropped_type + dropped_scope + dropped_origin + dropped_bad_ip
+			           + dropped_private_ip + dropped_time) AS dropped,
+			       sum(truncated) AS truncated
+			FROM threat_ingest_daily
+			GROUP BY system_id
+		), events AS (
+			SELECT system_id,
+			       count(*) AS events,
+			       count(DISTINCT attacker_ip) AS distinct_ips,
+			       count(DISTINCT scenario) AS distinct_scenarios,
+			       coalesce(sum(hit_count), 0) AS total_hits,
+			       max(observed_at) AS last_event_at
+			FROM threat_events
+			GROUP BY system_id
+		)
+		SELECT i.system_id, i.first_day, i.last_day, i.accepted, i.duplicates, i.dropped, i.truncated,
+		       coalesce(e.events, 0), coalesce(e.distinct_ips, 0), coalesce(e.distinct_scenarios, 0),
+		       coalesce(e.total_hits, 0), e.last_event_at
+		FROM ingest i
+		LEFT JOIN events e ON e.system_id = i.system_id
+		ORDER BY i.last_day DESC, i.system_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list threat systems: %w", err)
+	}
+	defer rows.Close()
+
+	result := []ThreatSystemRow{}
+	for rows.Next() {
+		var r ThreatSystemRow
+		var lastEventAt sql.NullInt64
+		if err := rows.Scan(&r.SystemID, &r.FirstDay, &r.LastDay, &r.Accepted, &r.Duplicates, &r.Dropped, &r.Truncated,
+			&r.Events, &r.DistinctIPs, &r.DistinctScenarios, &r.TotalHits, &lastEventAt); err != nil {
+			return nil, fmt.Errorf("store: scan threat system row: %w", err)
+		}
+		if lastEventAt.Valid {
+			v := lastEventAt.Int64
+			r.LastEventAt = &v
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 // ListThreatAllowlist returns every allowlist entry, expired ones included:
 // "this used to be excluded and no longer is" is a question the operator page
 // has to be able to answer.

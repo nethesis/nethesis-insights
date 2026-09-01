@@ -34,6 +34,7 @@ type fakeReader struct {
 	threatEvents     []store.ThreatEventRow
 	threatDaily      []store.ThreatDailyRow
 	threatIngest     []store.ThreatIngestRow
+	threatSystems    []store.ThreatSystemRow
 	allowlist        []store.AllowlistRow
 	allowlistRequest []store.AllowlistRequestRow
 

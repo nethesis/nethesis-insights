@@ -56,6 +56,10 @@ func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]store.Threat
 	return f.threatIngest, f.err
 }
 
+func (f *fakeReader) ListThreatSystems(_ context.Context) ([]store.ThreatSystemRow, error) {
+	return f.threatSystems, f.err
+}
+
 func (f *fakeReader) ListThreatAllowlist(_ context.Context) ([]store.AllowlistRow, error) {
 	return f.allowlist, f.err
 }
@@ -109,9 +113,18 @@ func threatReader() *fakeReader {
 	}
 	r.threatDaily = []store.ThreatDailyRow{
 		{Day: "2026-08-27", Scenario: "crowdsecurity/ssh-bf", DistinctIPs: 12, TotalHits: 240},
+		{Day: "2026-08-27", Scenario: "crowdsecurity/port-scan", DistinctIPs: 5, TotalHits: 60},
 	}
 	r.threatIngest = []store.ThreatIngestRow{
 		{Day: "2026-08-27", SystemID: "sys-1", Accepted: 40, Duplicates: 2},
+	}
+	lastEvent := int64(1700000100000)
+	r.threatSystems = []store.ThreatSystemRow{
+		{SystemID: "sys-1", FirstDay: "2026-08-20", LastDay: "2026-08-27",
+			Accepted: 40, Duplicates: 2, Events: 38, DistinctIPs: 12, DistinctScenarios: 2,
+			TotalHits: 300, LastEventAt: &lastEvent},
+		{SystemID: "sys-3", FirstDay: "2026-08-21", LastDay: "2026-08-21",
+			Accepted: 0, Dropped: 5},
 	}
 	r.allowlist = []store.AllowlistRow{
 		{CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1700000000000},
@@ -225,9 +238,34 @@ func TestThreatStatsPageRendersBothTables(t *testing.T) {
 		"crowdsecurity/ssh-bf", // rolled up per scenario, verbatim
 		"240",                  // its hit total
 		"sys-1",                // ingest accounting
+		"2026-08-27 total",     // the per-day subtotal row
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/threat-stats is missing %q", want)
+		}
+	}
+}
+
+// The per-day total must sum every scenario's hits for that day (240 + 60),
+// not just repeat one row's total.
+func TestThreatStatsPageDailyTotalSumsAcrossScenarios(t *testing.T) {
+	h := newTestServerWithFeed(t, threatReader(), nil, nil)
+	body := get(t, h, "/threat-stats").Body.String()
+	if !strings.Contains(body, "300") {
+		t.Fatalf("/threat-stats daily total: expected 300 (240+60) in body:\n%s", body)
+	}
+}
+
+func TestThreatSystemsPageRendersEveryReportingSystem(t *testing.T) {
+	h := newTestServerWithFeed(t, threatReader(), nil, nil)
+	body := get(t, h, "/threat-systems").Body.String()
+
+	for _, want := range []string{
+		"sys-1", // has stored events
+		"sys-3", // every report dropped, no stored events, must still appear
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/threat-systems is missing %q", want)
 		}
 	}
 }
@@ -237,7 +275,7 @@ func TestThreatPagesReportStoreFailures(t *testing.T) {
 	broken := &fakeReader{err: errStore}
 	h := newTestServerWithFeed(t, broken, nil, fakeFeed{ready: true})
 
-	for _, path := range []string{"/blocklist", "/threat-events", "/threat-stats"} {
+	for _, path := range []string{"/blocklist", "/threat-events", "/threat-stats", "/threat-systems"} {
 		rec := get(t, h, path)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: got %d, want 503", path, rec.Code)
@@ -253,6 +291,7 @@ func TestThreatPagesRenderEmpty(t *testing.T) {
 		{"/blocklist", "nothing promoted yet"},
 		{"/threat-events", "no threat events"},
 		{"/threat-stats", "no rollup yet"},
+		{"/threat-systems", "no systems have reported yet"},
 	} {
 		rec := get(t, h, tc.path)
 		if rec.Code != http.StatusOK {

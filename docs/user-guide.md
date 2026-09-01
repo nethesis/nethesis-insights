@@ -337,9 +337,10 @@ What each page shows, in plain terms:
 | `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. |
 | `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
+| `/threat-systems` | The blocklist pipeline's counterpart to `/systems`: one row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
 | `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |
 | `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
-| `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
+| `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, with a per-day total, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
 | `/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here. |
 
 If an admin key is configured, this UI also gains a small number of **buttons**

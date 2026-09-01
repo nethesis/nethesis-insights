@@ -336,6 +336,61 @@ func TestRecordIngestCountersAccumulates(t *testing.T) {
 	}
 }
 
+// ListThreatSystems must be driven by threat_ingest_daily, not threat_events,
+// so a system whose every report was a duplicate or dropped -- and therefore
+// never produced a threat_events row -- still shows up.
+func TestListThreatSystemsIncludesSystemsWithNoStoredEvents(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// sys-a: two accepted events, one duplicate retry.
+	_, _, _ = s.InsertThreatEvents(ctx, "sys-a", []model.ThreatEvent{
+		threatEvent("203.0.113.7", "ssh_bruteforce", 1000, 4),
+		threatEvent("203.0.113.8", "port_scan", 2000, 6),
+	})
+	if err := s.RecordIngestCounters(ctx, "2026-08-28", "sys-a", model.ThreatCounters{Accepted: 2}, 0); err != nil {
+		t.Fatalf("record sys-a: %v", err)
+	}
+	if err := s.RecordIngestCounters(ctx, "2026-08-29", "sys-a", model.ThreatCounters{Accepted: 0}, 1); err != nil {
+		t.Fatalf("record sys-a dup: %v", err)
+	}
+
+	// sys-b: every report dropped, nothing ever reached threat_events.
+	if err := s.RecordIngestCounters(ctx, "2026-08-28", "sys-b", model.ThreatCounters{DroppedPrivateIP: 3}, 0); err != nil {
+		t.Fatalf("record sys-b: %v", err)
+	}
+
+	rows, err := s.ListThreatSystems(ctx)
+	if err != nil {
+		t.Fatalf("ListThreatSystems: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 systems, got %d: %+v", len(rows), rows)
+	}
+
+	byID := map[string]ThreatSystemRow{}
+	for _, r := range rows {
+		byID[r.SystemID] = r
+	}
+
+	a, ok := byID["sys-a"]
+	if !ok {
+		t.Fatalf("sys-a missing: %+v", rows)
+	}
+	if a.Accepted != 2 || a.Duplicates != 1 || a.Events != 2 || a.DistinctIPs != 2 ||
+		a.DistinctScenarios != 2 || a.TotalHits != 10 || a.LastEventAt == nil || *a.LastEventAt != 2000 {
+		t.Fatalf("sys-a aggregate wrong: %+v", a)
+	}
+
+	b, ok := byID["sys-b"]
+	if !ok {
+		t.Fatalf("sys-b missing (dropped-only system must still appear): %+v", rows)
+	}
+	if b.Accepted != 0 || b.Dropped != 3 || b.Events != 0 || b.LastEventAt != nil {
+		t.Fatalf("sys-b aggregate wrong: %+v", b)
+	}
+}
+
 // The rollup is what turns a blocklist into fleet threat-trend data, and it
 // only works if it runs before the prune.
 func TestRollupSurvivesThePrune(t *testing.T) {

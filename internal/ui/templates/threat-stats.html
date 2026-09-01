@@ -14,11 +14,19 @@ retention window at a few rows per day.</small></p>
 </thead>
 <tbody>
 {{range .Daily}}
+{{$day := .Day}}
+{{range .Rows}}
 <tr>
-<td class="mono">{{.Day}}</td>
+<td class="mono">{{$day}}</td>
 <td class="mono">{{.Scenario}}</td>
 <td class="num">{{.DistinctIPs}}</td>
 <td class="num">{{.TotalHits}}</td>
+</tr>
+{{end}}
+<tr>
+<td class="mono"><strong>{{$day}} total</strong></td>
+<td></td><td></td>
+<td class="num"><strong>{{.TotalHits}}</strong></td>
 </tr>
 {{else}}
 <tr><td colspan="4">no rollup yet</td></tr>

@@ -1,0 +1,41 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Systems</h1>
+<p><small>One row per system that has ever reported to Threat Shield, including
+a system whose every report was a duplicate or was dropped by the sanitizer.
+Sourced from the ingest accounting, not from the log pipeline's own systems
+table, so a node running only crowdsec1 still shows up here.</small></p>
+<table>
+<thead>
+<tr>
+<th>System</th><th>First day</th><th>Last day</th>
+<th class="num">Accepted</th><th class="num">Dup</th><th class="num">Dropped</th><th class="num">Trunc</th>
+<th class="num">Events</th><th class="num">Distinct IPs</th><th class="num">Scenarios</th>
+<th class="num">Hits</th><th>Last event</th>
+</tr>
+</thead>
+<tbody>
+{{range .Systems}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td class="mono">{{.FirstDay}}</td>
+<td class="mono">{{.LastDay}}</td>
+<td class="num">{{.Accepted}}</td>
+<td class="num">{{.Duplicates}}</td>
+<td class="num">{{.Dropped}}</td>
+<td class="num">{{.Truncated}}</td>
+<td class="num">{{.Events}}</td>
+<td class="num">{{.DistinctIPs}}</td>
+<td class="num">{{.DistinctScenarios}}</td>
+<td class="num">{{.TotalHits}}</td>
+<td class="mono">{{fmtOptTime .LastEventAt}}</td>
+</tr>
+{{else}}
+<tr><td colspan="12">no systems have reported yet</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}

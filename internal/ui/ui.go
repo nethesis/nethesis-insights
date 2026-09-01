@@ -68,6 +68,7 @@ type Reader interface {
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]store.ThreatEventRow, error)
 	ThreatDailyStats(ctx context.Context, limit int) ([]store.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
+	ListThreatSystems(ctx context.Context) ([]store.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
 
 	// PendingAllowlistRequests backs the /allowlist-requests review queue.
@@ -169,6 +170,7 @@ var navGroups = []navGroup{
 		{"baselines", "/baselines", "Baselines"},
 	}},
 	{"Blocklist Pipeline", []navPage{
+		{"threat-systems", "/threat-systems", "Systems"},
 		{"blocklist", "/blocklist", "Blocklist"},
 		{"threat-events", "/threat-events", "Threat events"},
 		{"threat-stats", "/threat-stats", "Threat stats"},
@@ -258,7 +260,7 @@ func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey st
 var pages = []string{
 	"status.html", "systems.html", "findings.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html",
-	"blocklist.html", "threat-events.html", "threat-stats.html",
+	"blocklist.html", "threat-systems.html", "threat-events.html", "threat-stats.html",
 	"allowlist-requests.html",
 }
 
@@ -339,6 +341,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplates(w, r)
 	case "/baselines":
 		s.handleBaselines(w, r)
+	case "/threat-systems":
+		s.handleThreatSystems(w, r)
 	case "/blocklist":
 		s.handleBlocklist(w, r)
 	case "/threat-events":
@@ -799,6 +803,26 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 
 // --- Threat Shield pages ---
 
+type threatSystemsPageData struct {
+	pageData
+	Systems []store.ThreatSystemRow
+}
+
+// handleThreatSystems is the blocklist pipeline's counterpart to
+// handleSystems: one row per system that has ever reported threat events,
+// including a system whose every report was dropped or duplicate.
+func (s *server) handleThreatSystems(w http.ResponseWriter, r *http.Request) {
+	systems, err := s.reader.ListThreatSystems(r.Context())
+	if err != nil {
+		s.storeError(w, "threat-systems", err)
+		return
+	}
+	s.render(w, "threat-systems.html", threatSystemsPageData{
+		pageData: s.newPageData(r, "threat-systems"),
+		Systems:  systems,
+	})
+}
+
 type blocklistPageData struct {
 	pageData
 	Feed      feedState
@@ -873,15 +897,35 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 
 type threatStatsPageData struct {
 	pageData
-	Daily  []store.ThreatDailyRow
+	Daily  []threatDayGroup
 	Ingest []store.ThreatIngestRow
 }
 
+// threatDayGroup folds ThreatDailyStats' per-day-per-scenario rows into one
+// group per day, plus that day's total hits across every scenario -- the
+// same pattern as costDayGroup. TotalHits is additive so it sums cleanly;
+// DistinctIPs is deliberately not summed here, since the same address can
+// appear under more than one scenario and a naive sum would overcount it.
+type threatDayGroup struct {
+	Day       string
+	Rows      []store.ThreatDailyRow
+	TotalHits int64
+}
+
 func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
-	daily, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
+	dailyRows, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
 	if err != nil {
 		s.storeError(w, "threat-stats", err)
 		return
+	}
+	var daily []threatDayGroup
+	for _, row := range dailyRows {
+		if len(daily) == 0 || daily[len(daily)-1].Day != row.Day {
+			daily = append(daily, threatDayGroup{Day: row.Day})
+		}
+		g := &daily[len(daily)-1]
+		g.Rows = append(g.Rows, row)
+		g.TotalHits += row.TotalHits
 	}
 	ingest, err := s.reader.ThreatIngestStats(r.Context(), threatStatsLimit)
 	if err != nil {
