@@ -336,14 +336,24 @@ func (s *SQLiteStore) CostRollup(ctx context.Context) ([]CostRow, error) {
 	return result, nil
 }
 
+// SortRecent orders ListAllFindings' result by last_seen descending only,
+// ignoring severity -- the UI's alternative to the canonical
+// model.SortFindings order, for an operator who wants to see what just fired
+// regardless of severity. It is a display concern local to this package, not
+// a second definition of findings ordering: model.SortFindings (severity,
+// then last_seen) stays the one used everywhere else, per CLAUDE.md.
+const SortRecent = "recent"
+
 // ListAllFindings is the fleet-wide counterpart to ListFindings: no implicit
 // system scope, and systemID/status/severity/idLike are each optional filters
 // ("" means no filter). idLike matches against id and fingerprint with SQL
 // LIKE, letting an operator paste the short ID shown in the UI table; see
 // likePattern for how a bare value (no "%") is turned into a prefix match.
-// Results are capped to limit (most recently seen first) and then re-sorted
-// into the canonical severity/last_seen order.
-func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, severity, idLike string, limit int) ([]model.Finding, error) {
+// Results are capped to limit (most recently seen first). sort selects the
+// order of that capped page: "" (default) re-sorts into the canonical
+// severity/last_seen order via model.SortFindings; SortRecent leaves the
+// SQL's last_seen-descending order as is.
+func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
 	query := `
 		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version
 		FROM findings
@@ -360,7 +370,9 @@ func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, sev
 	if findings == nil {
 		findings = []model.Finding{}
 	}
-	model.SortFindings(findings)
+	if sort != SortRecent {
+		model.SortFindings(findings)
+	}
 	return findings, nil
 }
 

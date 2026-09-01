@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -72,7 +73,7 @@ func (f *fakeReader) CostRollup(ctx context.Context) ([]store.CostRow, error) {
 	return f.cost, f.err
 }
 
-func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity, idLike string, limit int) ([]model.Finding, error) {
+func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sortMode string, limit int) ([]model.Finding, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -92,7 +93,11 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 		}
 		out = append(out, fnd)
 	}
-	model.SortFindings(out)
+	if sortMode == store.SortRecent {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].LastSeen > out[j].LastSeen })
+	} else {
+		model.SortFindings(out)
+	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

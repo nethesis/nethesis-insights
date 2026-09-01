@@ -18,6 +18,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{$sev := .Severity}}
 {{range .Severities}}<option value="{{.}}"{{if eq $sev .}} selected{{end}}>{{.}}</option>{{end}}
 </select>
+<select name="sort">
+<option value=""{{if eq .Sort ""}} selected{{end}}>sort: severity, then last seen</option>
+<option value="recent"{{if eq .Sort "recent"}} selected{{end}}>sort: last seen (most recent first)</option>
+</select>
 <button type="submit">Filter</button>
 </fieldset>
 </form>
