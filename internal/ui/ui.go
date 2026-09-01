@@ -955,8 +955,7 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	force := r.FormValue("force") != ""
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), force)
+	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), false)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
