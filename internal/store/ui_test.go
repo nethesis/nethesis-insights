@@ -41,7 +41,7 @@ func TestUIMethodsOnEmptyDatabase(t *testing.T) {
 		t.Fatalf("ListAnalyses: expected empty, got %d", len(analyses))
 	}
 
-	gateRows, err := s.GateRollup(ctx)
+	gateRows, err := s.GateRollup(ctx, 0)
 	if err != nil {
 		t.Fatalf("GateRollup: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestGateRollupMergesTheThreeEmptySpellings(t *testing.T) {
 		t.Fatalf("finalize reasoned: %v", err)
 	}
 
-	rows, err := s.GateRollup(ctx)
+	rows, err := s.GateRollup(ctx, 0)
 	if err != nil {
 		t.Fatalf("GateRollup: %v", err)
 	}
@@ -318,6 +318,99 @@ func TestGateRollupMergesTheThreeEmptySpellings(t *testing.T) {
 	// Windows descending: 3 before 1.
 	if rows[0].Windows < rows[1].Windows {
 		t.Fatalf("expected Windows-descending order, got %+v", rows)
+	}
+}
+
+// The scope bound is what keeps the page describing the gate that is running
+// now: reasons are stored spelled as the formula that produced them spelled
+// them, so an unbounded rollup groups two eras side by side.
+func TestGateRollupHonoursSince(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	old := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC).UnixMilli()
+	recent := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC).UnixMilli()
+	cut := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC).UnixMilli()
+
+	seed := func(windowStart, createdAt int64, reason string) {
+		if _, err := s.BeginAnalysis(ctx, "sys1", windowStart, windowStart+100, createdAt); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := s.FinalizeAnalysis(ctx, Analysis{
+			SystemID: "sys1", WindowStart: windowStart, WindowEnd: windowStart + 100,
+			GateReasons: []string{reason}, LLMCalled: true, CostMicros: 10,
+		}); err != nil {
+			t.Fatalf("finalize: %v", err)
+		}
+	}
+	seed(100, old, "security_category") // pre-fix spelling
+	seed(300, recent, "security_surge") // current spelling
+
+	all, err := s.GateRollup(ctx, 0)
+	if err != nil {
+		t.Fatalf("GateRollup all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("since=0 must see both eras, got %d: %+v", len(all), all)
+	}
+
+	scoped, err := s.GateRollup(ctx, cut)
+	if err != nil {
+		t.Fatalf("GateRollup scoped: %v", err)
+	}
+	if len(scoped) != 1 || scoped[0].Reasons[0] != "security_surge" {
+		t.Fatalf("expected only the post-cut row, got %+v", scoped)
+	}
+	if scoped[0].Windows != 1 || scoped[0].CostMicros != 10 {
+		t.Fatalf("scoped row lost its own counts: %+v", scoped[0])
+	}
+}
+
+// llm_called is set on the analyzer's error paths too, which record no cost.
+// PaidCalls is what separates "we called and paid" from "we called and got
+// nothing", and the /gate summary reports the difference.
+func TestGateRollupCountsPaidCallsSeparately(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	reasons := []string{"new_templates"}
+	// A call that produced a priced result.
+	if _, err := s.BeginAnalysis(ctx, "sys1", 100, 200, 1000); err != nil {
+		t.Fatalf("begin paid: %v", err)
+	}
+	if err := s.FinalizeAnalysis(ctx, Analysis{
+		SystemID: "sys1", WindowStart: 100, WindowEnd: 200,
+		GateReasons: reasons, LLMCalled: true, CostMicros: 42,
+	}); err != nil {
+		t.Fatalf("finalize paid: %v", err)
+	}
+	// Same reason set, but the call failed: llm_called with cost_micros = 0.
+	if _, err := s.BeginAnalysis(ctx, "sys1", 300, 400, 1000); err != nil {
+		t.Fatalf("begin free: %v", err)
+	}
+	if err := s.FinalizeAnalysis(ctx, Analysis{
+		SystemID: "sys1", WindowStart: 300, WindowEnd: 400,
+		GateReasons: reasons, LLMCalled: true, Error: "llm: no choices in response",
+	}); err != nil {
+		t.Fatalf("finalize free: %v", err)
+	}
+
+	rows, err := s.GateRollup(ctx, 0)
+	if err != nil {
+		t.Fatalf("GateRollup: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one reason-set row, got %d: %+v", len(rows), rows)
+	}
+	got := rows[0]
+	if got.Windows != 2 || got.LLMCalls != 2 {
+		t.Fatalf("both windows called the LLM, got %+v", got)
+	}
+	if got.PaidCalls != 1 {
+		t.Fatalf("expected exactly one paid call, got %+v", got)
+	}
+	if got.CostMicros != 42 {
+		t.Fatalf("expected the one paid call's cost, got %+v", got)
 	}
 }
 

@@ -483,6 +483,22 @@ gated-vs-analyzed table, only this one flag. So both "why did this cost
 money" and "why was this potentially missed" are answerable from stored data
 alone — see the `/gate` and `/analyses` routes in the operator UI.
 
+Two consequences for anything that reads `gate_reasons` back:
+
+- **`llm_called` is derivable from the reason set, and `cost_micros` is not
+  derivable from `llm_called`.** `Call == len(Reasons) > 0` is a `gate.Evaluate`
+  invariant, so a non-empty reason set always means a call — never present
+  windows and calls as independent columns. `llm_called` counts *attempts*: the
+  transient-error, permanent-error and response-parse paths all set it with
+  `cost_micros = 0`, so "called and paid" needs a separate count
+  (`store.GateRow.PaidCalls`).
+- **Any rollup over `gate_reasons` must be time-bounded.** Reasons are stored as
+  the formula that produced them spelled them, and a rule change is a deliberate
+  visible break with no backfill (the same principle as `fingerprint.Version`).
+  `store.GateRollup(ctx, since)` takes an explicit bound and `/gate` defaults to
+  7 days; unbounded, the page groups two gates at once and is dominated by
+  whichever era has more rows.
+
 ## Determinism
 
 Identical bundle input must produce byte-identical prompts and stable gate
@@ -497,8 +513,9 @@ reasons, because the whole cost/identity model depends on it:
   `deviation:<module>/<priority>` has no ratio, because the operator UI's
   `/gate` rollup groups on the stored `gate_reasons` string: with the ratio
   embedded, every deviating window became a group of one and the page that
-  exists to answer "why are we paying" answered nothing. The ratio is still
-  logged per window by the analyzer at debug level.
+  exists to answer "why are we paying" answered nothing. The ratio is kept
+  nowhere: per-window numbers are in the rendered prompt, per-bucket normals
+  on `/baselines`.
 - `fingerprint.writeList` sorts and dedups before hashing.
 
 `prompt` has golden-file tests asserting byte-identical output for identical

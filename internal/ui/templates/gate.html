@@ -5,15 +5,41 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{define "content"}}
 <h1>Gate</h1>
 <p><small>Analyses grouped by their exact set of gate reasons, fleet-wide &mdash; the answer
-to "why are we paying". A window can have several reasons at once (e.g. a new template
+to "why are we paying". <strong>A reason set is not a description of a window, it is the
+trigger</strong>: the gate calls the AI if and only if at least one reason fired, so every
+row below with reasons went to the AI, and the <em>(none)</em> row is the windows that were
+gated out for free. A window can have several reasons at once (e.g. a new template
 <em>and</em> a deviating module); this groups on the whole combination, so the same reason
-mixed with different others counts as separate rows. A blank/none reason set means the
-window was gated out for free. <strong>Windows</strong> is how many analyses had this exact
-combination; <strong>LLM calls</strong> is how many of those actually made a paid AI
-call.</small></p>
+mixed with different others counts as separate rows. The number to watch is the
+<strong>gated out</strong> share above: that is the gate doing its job.</small></p>
+<p><small>Scope matters here. Gate reasons are stored spelled exactly as the formula that
+produced them spelled them, so <em>all time</em> mixes eras &mdash; rows written before the
+security condition became novelty-scoped say <code>security_category</code> and carry
+embedded counts and ratios (<code>new_templates=5</code>, <code>deviation:/3=3.03</code>),
+which group separately and describe a gate that no longer exists.</small></p>
+
+<form method="get">
+<fieldset role="group">
+<select name="range">
+{{$sel := .Range}}
+{{range .Ranges}}<option value="{{.Key}}"{{if eq $sel .Key}} selected{{end}}>{{.Label}}</option>{{end}}
+</select>
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+{{$s := .Summary}}
+<p><strong>{{$s.Windows}}</strong> windows &middot;
+<strong>{{$s.GatedOut}}</strong> gated out ({{fmtPct $s.GatedOut $s.Windows}}) &middot;
+<strong>{{$s.Called}}</strong> sent to the AI ({{fmtPct $s.Called $s.Windows}}) &middot;
+{{fmtCost $s.CostMicros}} total
+{{- if gt $s.Paid 0}} &middot; {{fmtCost $s.AvgMicros}} average per paid call{{end}}
+{{- if gt $s.ZeroCost 0}} &middot; <strong>{{$s.ZeroCost}}</strong> calls recorded no cost
+(a failed or unpriced attempt still counts as a call){{end}}</p>
+
 <table>
 <thead>
-<tr><th>Reasons</th><th class="num">Windows</th><th class="num">LLM calls</th><th class="num">Cost</th></tr>
+<tr><th>Reasons</th><th class="num">Windows</th><th class="num">Cost</th><th class="num">Per window</th></tr>
 </thead>
 <tbody>
 {{range .Rows}}
@@ -21,11 +47,11 @@ call.</small></p>
 <tr>
 <td class="mono truncate" title="{{$reasons}}">{{truncate $reasons 70}}</td>
 <td class="num">{{.Windows}}</td>
-<td class="num">{{.LLMCalls}}</td>
 <td class="num">{{fmtCost .CostMicros}}</td>
+<td class="num">{{fmtAvgCost .CostMicros .Windows}}</td>
 </tr>
 {{else}}
-<tr><td colspan="4">no analyses yet</td></tr>
+<tr><td colspan="4">no analyses in this range</td></tr>
 {{end}}
 </tbody>
 </table>

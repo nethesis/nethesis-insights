@@ -73,7 +73,7 @@ type Store interface {
 	Counts(ctx context.Context) (Counts, error)
 	ListSystems(ctx context.Context) ([]SystemRow, error)
 	ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error)
-	GateRollup(ctx context.Context) ([]GateRow, error)
+	GateRollup(ctx context.Context, since int64) ([]GateRow, error)
 	CostRollup(ctx context.Context) ([]CostRow, error)
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error)

@@ -74,10 +74,15 @@ type AnalysisRow struct {
 
 // GateRow is one distinct gate-reason set, after the three empty spellings
 // have been normalized and merged.
+//
+// LLMCalls counts *attempts*: the analyzer sets llm_called on the transient-error,
+// permanent-error and parse-error paths too, and those record no cost. PaidCalls
+// counts only the rows that actually cost money, so LLMCalls-PaidCalls is the
+// number of calls that were made and produced nothing.
 type GateRow struct {
-	Reasons           []string // nil means "no reasons"
-	Windows, LLMCalls int
-	CostMicros        int64
+	Reasons                      []string // nil means "no reasons"
+	Windows, LLMCalls, PaidCalls int
+	CostMicros                   int64
 }
 
 // CostRow is spend and token totals for one UTC day and model.
@@ -240,16 +245,31 @@ func (s *SQLiteStore) ListAnalyses(ctx context.Context, systemID string, limit i
 }
 
 // GateRollup reports, per distinct gate-reason set, how many windows fired
-// it, how many of those called the LLM, and their total cost. The three
-// stored spellings of "no reasons" are merged into one nil-Reasons row.
-// Ordered by Windows descending, with a stable tiebreak on the reason set so
-// output is deterministic.
-func (s *SQLiteStore) GateRollup(ctx context.Context) ([]GateRow, error) {
+// it, how many of those called the LLM, how many of those calls cost money,
+// and the total cost. The three stored spellings of "no reasons" are merged
+// into one nil-Reasons row. Ordered by Windows descending, with a stable
+// tiebreak on the reason set so output is deterministic.
+//
+// since bounds the scan to rows created at or after that unix-millis instant;
+// 0 means all time. The bound is not cosmetic: gate reasons are stored as the
+// formula that produced them spelled them, so an all-time rollup silently mixes
+// formulas. Every row written before the security condition became
+// novelty-scoped carries "security_category" and embedded counts and ratios
+// ("new_templates=5", "deviation:/3=3.03"), which both group as separate keys
+// and answer a question about a gate that no longer exists.
+func (s *SQLiteStore) GateRollup(ctx context.Context, since int64) ([]GateRow, error) {
+	// count(case when ...) rather than sum(cost_micros > 0): SQLite yields 1/0
+	// for a comparison, Postgres yields a boolean sum() will not take.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT gate_reasons, count(*) AS windows, coalesce(sum(llm_called), 0) AS llm_calls, coalesce(sum(cost_micros), 0) AS cost_micros
+		SELECT gate_reasons,
+		       count(*) AS windows,
+		       coalesce(sum(llm_called), 0) AS llm_calls,
+		       count(CASE WHEN cost_micros > 0 THEN 1 END) AS paid_calls,
+		       coalesce(sum(cost_micros), 0) AS cost_micros
 		FROM analyses
+		WHERE created_at >= ?
 		GROUP BY gate_reasons
-	`)
+	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("store: gate rollup: %w", err)
 	}
@@ -262,9 +282,9 @@ func (s *SQLiteStore) GateRollup(ctx context.Context) ([]GateRow, error) {
 	merged := map[string]*GateRow{}
 	for rows.Next() {
 		var raw string
-		var windows, llmCalls int
+		var windows, llmCalls, paidCalls int
 		var costMicros int64
-		if err := rows.Scan(&raw, &windows, &llmCalls, &costMicros); err != nil {
+		if err := rows.Scan(&raw, &windows, &llmCalls, &paidCalls, &costMicros); err != nil {
 			return nil, fmt.Errorf("store: scan gate row: %w", err)
 		}
 		reasons := normalizeGateReasons(raw)
@@ -272,12 +292,14 @@ func (s *SQLiteStore) GateRollup(ctx context.Context) ([]GateRow, error) {
 		if existing, ok := merged[key]; ok {
 			existing.Windows += windows
 			existing.LLMCalls += llmCalls
+			existing.PaidCalls += paidCalls
 			existing.CostMicros += costMicros
 		} else {
 			merged[key] = &GateRow{
 				Reasons:    reasons,
 				Windows:    windows,
 				LLMCalls:   llmCalls,
+				PaidCalls:  paidCalls,
 				CostMicros: costMicros,
 			}
 		}

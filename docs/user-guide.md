@@ -115,6 +115,20 @@ where gated windows live and how you find them:
 So "why did (or didn't) this window get analyzed" is always answerable after
 the fact from stored data — see the `/analyses` and `/gate` pages below.
 
+Two things to know when reading those reasons. First, **a reason is the trigger,
+not a description**: the gate calls the AI if and only if at least one reason
+fired, so "this window has reasons" and "this window cost money" are the same
+statement. Counting them as two separate numbers tells you nothing; the useful
+number is what share of windows had *no* reasons.
+
+Second, **reasons are stored spelled the way the gate spelled them at the time**.
+When a gate rule changes, old rows keep the old wording — rows written before the
+security rule became *new-or-surging* say `security_category`, and older ones
+still embed the counts and ratios that were later removed for making every window
+its own group. That is deliberate: a formula change should be visible, not
+silently rewritten. It also means an all-time grouping compares two different
+gates, which is why `/gate` defaults to a recent window.
+
 ### 4. Baselines: "what's normal" for a module
 
 Not every node's log collector knows how many lines it expects to see for a
@@ -333,7 +347,7 @@ What each page shows, in plain terms:
 | `/systems` | Every machine the server has ever heard from, with a quick summary: how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/findings` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. Click a row to see the full summary, suggested action, evidence and fingerprint. |
 | `/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used, cost, how long it took, and any error. This answers "what did we spend, and on what." |
-| `/gate` | The gate's decisions grouped by *why* — how many windows and how much money were spent for each distinct set of reasons. This answers "what's actually driving our AI spend." |
+| `/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. |
 | `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |

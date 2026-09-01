@@ -115,8 +115,13 @@ func Evaluate(b model.Bundle, s SystemState, tolerance float64) Decision {
 // Reasons carry the bucket but NOT the computed ratio. The ratio made every
 // deviating window a group of one in the operator UI's gate rollup, which
 // groups on the stored gate_reasons string -- so the page that exists to answer
-// "why are we paying" answered nothing. The ratio is still logged per window by
-// the analyzer at debug level.
+// "why are we paying" answered nothing.
+//
+// The ratio itself is deliberately not kept anywhere: it is a property of one
+// window, and the two questions it gets asked are answered better elsewhere.
+// "What was unusual in this window" is in the prompt body the analyzer built
+// (internal/prompt), and "what does this bucket normally do" is the /baselines
+// page. Do not put it back into a reason string.
 func deviations(b model.Bundle, s SystemState, tolerance float64) (map[string]bool, []string) {
 	deviating := map[string]bool{}
 	var reasons []string

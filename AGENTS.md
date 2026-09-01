@@ -298,7 +298,18 @@ excluded service still contributes to its bucket's volume.
 **Gate reasons carry no computed values** — `new_templates` has no count,
 `deviation:<module>/<priority>` no ratio. The UI's `/gate` rollup groups on the
 stored string, and embedded floats made every deviating window a group of one.
-The ratio stays in the analyzer's debug log.
+The ratio is not kept anywhere: per-window numbers live in the prompt the
+analyzer built, and per-bucket normals on the UI's `/baselines`.
+
+**A gate reason is the trigger, not a description**: `gate.Evaluate` returns
+`Call: len(reasons) > 0`, and every analyzer path that stores a non-empty
+`gate_reasons` also stores `llm_called = 1`. So "windows" and "LLM calls" are the
+same number for any reasoned row — never present them as independent columns.
+`llm_called` counts *attempts*: the transient-, permanent- and parse-error paths
+set it with `cost_micros = 0`. And because reasons are stored as the formula that
+produced them spelled them, **any rollup over them must be time-bounded**
+(`store.GateRollup(ctx, since)`, default 7 days on `/gate`) — an all-time
+grouping mixes eras and is dominated by pre-fix spellings.
 
 ### `module_id: ""` is a real bucket
 

@@ -57,7 +57,7 @@ type Reader interface {
 	Counts(ctx context.Context) (store.Counts, error)
 	ListSystems(ctx context.Context) ([]store.SystemRow, error)
 	ListAnalyses(ctx context.Context, systemID string, limit int) ([]store.AnalysisRow, error)
-	GateRollup(ctx context.Context) ([]store.GateRow, error)
+	GateRollup(ctx context.Context, since int64) ([]store.GateRow, error)
 	CostRollup(ctx context.Context) ([]store.CostRow, error)
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
@@ -704,13 +704,99 @@ func (s *server) handleAnalyses(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// gateRange is one option of the /gate page's time scope. An empty Window
+// means "all time".
+type gateRange struct {
+	Key    string // the ?range= value
+	Label  string
+	Window time.Duration
+}
+
+// gateRanges is the enumerated set of scopes /gate accepts. Anything else
+// falls back to gateDefaultRange -- the same shape as clampLimit, since a bad
+// query string on a dashboard is a typo, not an error worth a page for.
+//
+// The default is deliberately not "all time": gate reasons are stored exactly
+// as the formula that produced them spelled them, so an unbounded rollup mixes
+// eras and the page that answers "why are we paying" ends up describing a gate
+// that has since been fixed. See store.GateRollup.
+var gateRanges = []gateRange{
+	{Key: "24h", Label: "last 24 hours", Window: 24 * time.Hour},
+	{Key: "7d", Label: "last 7 days", Window: 7 * 24 * time.Hour},
+	{Key: "30d", Label: "last 30 days", Window: 30 * 24 * time.Hour},
+	{Key: "all", Label: "all time (mixes gate formulas)", Window: 0},
+}
+
+const gateDefaultRange = "7d"
+
+// resolveGateRange maps a ?range= value to its scope, falling back to the
+// default. The returned since is unix millis, 0 for all time.
+func resolveGateRange(v string, now time.Time) (key string, since int64) {
+	match := lookupGateRange(v)
+	if match == nil {
+		match = lookupGateRange(gateDefaultRange)
+	}
+	if match.Window == 0 {
+		return match.Key, 0
+	}
+	return match.Key, now.Add(-match.Window).UnixMilli()
+}
+
+func lookupGateRange(key string) *gateRange {
+	for i := range gateRanges {
+		if gateRanges[i].Key == key {
+			return &gateRanges[i]
+		}
+	}
+	return nil
+}
+
+// gateSummary is the /gate page's headline: whether the gate is gating at all.
+// Every field is derived from the rows already fetched, so the page costs one
+// query.
+type gateSummary struct {
+	Windows    int
+	GatedOut   int
+	Called     int
+	Paid       int
+	ZeroCost   int
+	CostMicros int64
+	AvgMicros  int64
+}
+
+// summarizeGate folds the rollup into the headline. GatedOut is derived as
+// Windows-Called rather than read off the nil-Reasons row: the two agree by
+// the gate's invariant (a non-empty reason set is what makes the call), and
+// deriving it means legacy rows written by an older formula cannot make the
+// summary contradict the table.
+func summarizeGate(rows []store.GateRow) gateSummary {
+	var g gateSummary
+	for _, row := range rows {
+		g.Windows += row.Windows
+		g.Called += row.LLMCalls
+		g.Paid += row.PaidCalls
+		g.CostMicros += row.CostMicros
+	}
+	g.GatedOut = g.Windows - g.Called
+	g.ZeroCost = g.Called - g.Paid
+	if g.Paid > 0 {
+		g.AvgMicros = g.CostMicros / int64(g.Paid)
+	}
+	return g
+}
+
 type gatePageData struct {
 	pageData
-	Rows []store.GateRow
+	Rows    []store.GateRow
+	Summary gateSummary
+	Range   string
+	Ranges  []gateRange
 }
 
 func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.reader.GateRollup(r.Context())
+	rangeKey, since := resolveGateRange(r.URL.Query().Get("range"), time.Now())
+
+	rows, err := s.reader.GateRollup(r.Context(), since)
 	if err != nil {
 		s.storeError(w, "gate", err)
 		return
@@ -718,6 +804,9 @@ func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "gate.html", gatePageData{
 		pageData: s.newPageData(r, "gate"),
 		Rows:     rows,
+		Summary:  summarizeGate(rows),
+		Range:    rangeKey,
+		Ranges:   gateRanges,
 	})
 }
 

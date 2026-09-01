@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/store"
@@ -25,6 +26,7 @@ type fakeReader struct {
 	systems   []store.SystemRow
 	analyses  []store.AnalysisRow
 	gate      []store.GateRow
+	gateSince int64 // the last since GateRollup was called with
 	cost      []store.CostRow
 	findings  []model.Finding
 	templates []store.TemplateRow
@@ -66,7 +68,8 @@ func (f *fakeReader) ListAnalyses(ctx context.Context, systemID string, limit in
 	return out, nil
 }
 
-func (f *fakeReader) GateRollup(ctx context.Context) ([]store.GateRow, error) {
+func (f *fakeReader) GateRollup(ctx context.Context, since int64) ([]store.GateRow, error) {
+	f.gateSince = since
 	return f.gate, f.err
 }
 
@@ -165,8 +168,8 @@ func seededReader() *fakeReader {
 			},
 		},
 		gate: []store.GateRow{
-			{Reasons: []string{"new_template"}, Windows: 4, LLMCalls: 4, CostMicros: 8000},
-			{Reasons: nil, Windows: 10, LLMCalls: 0, CostMicros: 0},
+			{Reasons: []string{"new_template"}, Windows: 4, LLMCalls: 4, PaidCalls: 3, CostMicros: 8000},
+			{Reasons: nil, Windows: 10, LLMCalls: 0, PaidCalls: 0, CostMicros: 0},
 		},
 		cost: []store.CostRow{
 			{Day: "2026-08-20", Model: "gpt-4o-mini", Windows: 4, LLMCalls: 4, InputTokens: 400, OutputTokens: 200, CostMicros: 8000},
@@ -495,6 +498,65 @@ func TestFindingsFilters(t *testing.T) {
 	}
 	if strings.Contains(body, `value="bogus"`) {
 		t.Fatalf("severity=bogus: raw invalid value was reflected into the page")
+	}
+}
+
+func TestGateRangeScopesTheRollup(t *testing.T) {
+	r := seededReader()
+	h := newTestServer(t, r, fakeRuntime{})
+
+	before := time.Now().UnixMilli()
+	if rec := get(t, h, "/gate?range=24h"); rec.Code != http.StatusOK {
+		t.Fatalf("range=24h: status = %d, want 200", rec.Code)
+	}
+	day := time.Duration(before-r.gateSince) * time.Millisecond
+	if day < 23*time.Hour || day > 25*time.Hour {
+		t.Fatalf("range=24h: since is %v ago, want ~24h", day)
+	}
+
+	if rec := get(t, h, "/gate?range=all"); rec.Code != http.StatusOK {
+		t.Fatalf("range=all: status = %d, want 200", rec.Code)
+	}
+	if r.gateSince != 0 {
+		t.Fatalf("range=all: since = %d, want 0 (no bound)", r.gateSince)
+	}
+
+	// The default is a bounded scope, not all time: an unbounded rollup mixes
+	// gate formulas. Both an absent and an unrecognized value must land there.
+	for _, target := range []string{"/gate", "/gate?range=bogus"} {
+		if rec := get(t, h, target); rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, want 200", target, rec.Code)
+		}
+		week := time.Duration(time.Now().UnixMilli()-r.gateSince) * time.Millisecond
+		if week < 6*24*time.Hour || week > 8*24*time.Hour {
+			t.Fatalf("GET %s: since is %v ago, want the ~7d default", target, week)
+		}
+	}
+}
+
+func TestGateSummaryReportsTheGatedShare(t *testing.T) {
+	h := newTestServer(t, seededReader(), fakeRuntime{})
+	body := get(t, h, "/gate?range=all").Body.String()
+
+	// Seeded rows: 14 windows, 4 called (3 of them priced), 10 gated out.
+	for _, want := range []string{
+		"<strong>14</strong> windows",
+		"<strong>10</strong> gated out (71%)",
+		"<strong>4</strong> sent to the AI (29%)",
+		"<strong>1</strong> calls recorded no cost", // 4 attempts, 3 priced
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("gate summary missing %q, got:\n%s", want, body)
+		}
+	}
+
+	// The tautological column must stay gone: a reasoned row's window count IS
+	// its call count, so showing both invites the reader to compare them.
+	if strings.Contains(body, "LLM calls") {
+		t.Fatalf("the LLM calls column is back; it restates the reason set")
+	}
+	if !strings.Contains(body, "gated out, no AI call") {
+		t.Fatalf("the nil-reason row must say what it means, got:\n%s", body)
 	}
 }
 

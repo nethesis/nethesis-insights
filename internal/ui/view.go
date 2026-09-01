@@ -19,6 +19,8 @@ var funcMap = template.FuncMap{
 	"fmtOptTime":    FmtOptTime,
 	"fmtAgo":        FmtAgo,
 	"fmtCost":       FmtCost,
+	"fmtPct":        FmtPct,
+	"fmtAvgCost":    FmtAvgCost,
 	"truncate":      Truncate,
 	"short":         Short,
 	"join":          strings.Join,
@@ -79,6 +81,25 @@ func FmtCost(micros int64) string {
 	return fmt.Sprintf("$%.6f", float64(micros)/1_000_000)
 }
 
+// FmtAvgCost renders total cost spread over n windows. It is what makes a
+// /gate row comparable: a reason set firing 40 cheap windows and one firing
+// 3 expensive ones look the same in the total column.
+func FmtAvgCost(micros int64, n int) string {
+	if n <= 0 {
+		return "—"
+	}
+	return FmtCost(micros / int64(n))
+}
+
+// FmtPct renders n out of total as a whole-percent string. A zero total is
+// "0%", not a division by zero -- an empty dashboard is an ordinary state.
+func FmtPct(n, total int) string {
+	if total <= 0 {
+		return "0%"
+	}
+	return fmt.Sprintf("%.0f%%", 100*float64(n)/float64(total))
+}
+
 // Truncate shortens s to at most n runes, appending an ellipsis marker when
 // it does. Callers pair this with a title="" attribute carrying the full
 // text (in the templates), so nothing is actually lost -- only the table
@@ -105,9 +126,13 @@ func Short(s string, n int) string {
 // ReasonsOrNone renders a gate-reason set for the /gate rollup. nil means
 // "no reasons fired" after store.GateRollup has already normalized the three
 // stored spellings of that (”, 'null', '[]') into a nil/empty slice.
+//
+// The nil case says what it means rather than just "(none)": a window with no
+// reasons is exactly a window the gate declined to spend money on, and that
+// row is the only one on the page whose window count is not also a call count.
 func ReasonsOrNone(reasons []string) string {
 	if len(reasons) == 0 {
-		return "(none)"
+		return "(none — gated out, no AI call)"
 	}
 	return strings.Join(reasons, ", ")
 }
