@@ -4,19 +4,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Gate</h1>
-<p><small>Analyses grouped by their exact set of gate reasons, fleet-wide &mdash; the answer
-to "why are we paying". <strong>A reason set is not a description of a window, it is the
-trigger</strong>: the gate calls the AI if and only if at least one reason fired, so every
-row below with reasons went to the AI, and the <em>(none)</em> row is the windows that were
-gated out for free. A window can have several reasons at once (e.g. a new template
-<em>and</em> a deviating module); this groups on the whole combination, so the same reason
-mixed with different others counts as separate rows. The number to watch is the
-<strong>gated out</strong> share above: that is the gate doing its job.</small></p>
-<p><small>Scope matters here. Gate reasons are stored spelled exactly as the formula that
-produced them spelled them, so <em>all time</em> mixes eras &mdash; rows written before the
-security condition became novelty-scoped say <code>security_category</code> and carry
-embedded counts and ratios (<code>new_templates=5</code>, <code>deviation:/3=3.03</code>),
-which group separately and describe a gate that no longer exists.</small></p>
+<p><small>Analyses grouped by their exact set of gate reasons, fleet-wide &mdash; shows why
+each window cost money. Each reason is a trigger: the gate calls the AI only if at least
+one reason fired. Rows with reasons went to the AI; the <em>(none)</em> row is windows
+gated out for free. A window can have several reasons at once, and each combination is
+its own row. Watch the gated out share above &mdash; that is the gate doing its job.</small></p>
+<p><small>Reasons are stored as text, exactly as the gate formula wrote them at the time.
+Older rows can use old wording (e.g. <code>security_category</code>) or embed numbers
+(e.g. <code>new_templates=5</code>), so an all-time view mixes formats from different
+versions of the gate.</small></p>
 
 <form method="get">
 <fieldset role="group">
