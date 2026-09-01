@@ -1,5 +1,15 @@
-WINDOW
-start_ms=100 end_ms=200 collector=1.2.3 masking=2
+SECTIONS
+DIGEST     one line per (module, priority) bucket: observed, expected, ratio.
+           Buckets the gate flagged as deviating are marked with *.
+TEMPLATES  the log lines worth your attention this window, each with an
+           identifier to cite. count is how many lines matched; variants is
+           how many spellings of the same line were folded into it. Templates
+           that are neither new, security-classified nor in a deviating module
+           are shown only as ambient context, most frequent first.
+SAMPLING   how much of the window survived the collector's line budget.
+ALREADY KNOWN  conditions already raised for this system. Do not report them
+           again.
+WINDOW     the time range and collector version this bundle covers.
 
 DIGEST (module priority observed expected ratio)
 modA 1 30 10.00 3.00
@@ -25,3 +35,6 @@ ALREADY KNOWN (do not report these again)
     evidence: T2
 [low] Minor thing
     evidence: T1
+
+WINDOW
+start_ms=100 end_ms=200 collector=1.2.3 masking=2

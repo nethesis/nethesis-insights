@@ -12,7 +12,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-const Version = "v2"
+const Version = "v3"
 
 const System = `You analyze NethServer logs. You receive a digest of log volumes and masked ` +
 	`log-line templates with counts for one time window. Report ONLY real problems: ` +
@@ -92,18 +92,120 @@ type responseBody struct {
 // read as a missing field rather than a real bucket.
 const HostBucketLabel = "<host>"
 
-// TemplateID is the identifier shown for the i-th template of SortedTemplates.
+// TemplateID is the identifier shown for the i-th line of Select.
 func TemplateID(i int) string { return fmt.Sprintf("T%d", i+1) }
 
-// SortedTemplates returns the bundle's templates in the exact order Render
-// numbers them, so the analyzer resolves the identifiers the model was shown.
-func SortedTemplates(b model.Bundle) []model.Template {
-	templates := make([]model.Template, len(b.Templates))
-	copy(templates, b.Templates)
-	sort.Slice(templates, func(i, j int) bool {
-		return model.LessTemplate(templates[i], templates[j])
+// Selection is what the gate found, and therefore what the prompt shows.
+//
+// A bundle from a real node carries 160-190 templates and renders a 32 KB
+// prompt, of which roughly 70% is template text. Almost none of it is why the
+// call happened: on the three multi-module systems measured on 2026-09-01, the
+// templates implicated by the gate's own reasons were 19 of 69, 9 of 72 and 46
+// of 159. Sending the rest costs money on every call and buries the evidence
+// the model is supposed to weigh.
+type Selection struct {
+	// Novel is the set of canonical keys new to this system, and
+	// DeviatingModules the modules over tolerance. Both come from
+	// gate.Decision, so the prompt shows exactly what paid for the call.
+	Novel            map[string]bool
+	DeviatingModules map[string]bool
+
+	// MaxAmbient caps how many of the remaining templates are shown, most
+	// frequent first. They are context, not evidence: without any, a model
+	// asked "is this window unusual" cannot see what usual looks like.
+	MaxAmbient int
+}
+
+// Line is one template as the prompt shows it: a representative template
+// carrying the summed count of every variant that canonicalizes to the same
+// key, and how many variants that was.
+type Line struct {
+	Template model.Template
+	Variants int
+}
+
+// Select returns the lines the prompt shows, in model.LessTemplate order.
+//
+// Two steps. First collapse: templates sharing a canonical key within one
+// (module_id, priority) become one line, because the collector's masking
+// leaves fields literal that cannot distinguish two conditions -- 65 spellings
+// of one Prometheus message are one condition, and showing all 65 invites the
+// model to report 65 findings. The representative is the highest-count
+// variant, so the text an operator eventually reads is the one that actually
+// dominated the window.
+//
+// Then select: everything novel, everything the edge classified as security,
+// everything in a deviating module, and the top MaxAmbient of the remainder by
+// count.
+//
+// Callers must pass the same Selection to Render and ResolveEvidence:
+// TemplateID numbers this list, so the identifiers the model cites only
+// resolve against the list it was shown.
+func Select(b model.Bundle, sel Selection) []Line {
+	type key struct {
+		moduleID string
+		priority int
+		canon    string
+	}
+
+	grouped := map[key]*Line{}
+	var order []key
+	for _, t := range b.Templates {
+		k := key{t.ModuleID, t.Priority, model.CanonicalTemplate(t.Template)}
+		line, ok := grouped[k]
+		if !ok {
+			cp := t
+			cp.Samples = nil
+			grouped[k] = &Line{Template: cp, Variants: 1}
+			order = append(order, k)
+			continue
+		}
+		line.Variants++
+		line.Template.Count += t.Count
+		// The representative is the busiest variant; ties break on template
+		// order so the choice does not depend on map or slice iteration.
+		if t.Count > line.Template.Count-t.Count ||
+			(t.Count == line.Template.Count-t.Count && t.Template < line.Template.Template) {
+			count := line.Template.Count
+			line.Template = t
+			line.Template.Samples = nil
+			line.Template.Count = count
+		}
+		if t.Category == "security" {
+			line.Template.Category = "security"
+		}
+	}
+
+	var kept, ambient []Line
+	for _, k := range order {
+		line := *grouped[k]
+		switch {
+		case sel.Novel[model.CanonicalKey(k.moduleID, line.Template.Template)],
+			line.Template.Category == "security",
+			sel.DeviatingModules[k.moduleID]:
+			kept = append(kept, line)
+		default:
+			ambient = append(ambient, line)
+		}
+	}
+
+	// Ambient lines are ranked by volume, then by template order so equal
+	// counts do not depend on input order.
+	sort.Slice(ambient, func(i, j int) bool {
+		if ambient[i].Template.Count != ambient[j].Template.Count {
+			return ambient[i].Template.Count > ambient[j].Template.Count
+		}
+		return model.LessTemplate(ambient[i].Template, ambient[j].Template)
 	})
-	return templates
+	if sel.MaxAmbient >= 0 && len(ambient) > sel.MaxAmbient {
+		ambient = ambient[:sel.MaxAmbient]
+	}
+
+	out := append(kept, ambient...)
+	sort.Slice(out, func(i, j int) bool {
+		return model.LessTemplate(out[i].Template, out[j].Template)
+	})
+	return out
 }
 
 // ResolveEvidence maps cited identifiers back to templates.
@@ -113,11 +215,11 @@ func SortedTemplates(b model.Bundle) []model.Template {
 // depend on the occurrence count printed beside the template, so the same
 // condition changed identity every window and was re-raised forever -- the
 // exact failure deduplication exists to prevent.
-func ResolveEvidence(b model.Bundle, ids []string) ([]model.Template, error) {
-	sorted := SortedTemplates(b)
-	index := make(map[string]model.Template, len(sorted))
-	for i, t := range sorted {
-		index[TemplateID(i)] = t
+func ResolveEvidence(b model.Bundle, sel Selection, ids []string) ([]model.Template, error) {
+	lines := Select(b, sel)
+	index := make(map[string]model.Template, len(lines))
+	for i, l := range lines {
+		index[TemplateID(i)] = l.Template
 	}
 	out := make([]model.Template, 0, len(ids))
 	seen := map[string]bool{}
@@ -139,15 +241,36 @@ func ResolveEvidence(b model.Bundle, ids []string) ([]model.Template, error) {
 	return out, nil
 }
 
+// header is the invariant opening of every user prompt. It is first, and the
+// per-window WINDOW block is last, so that everything a provider can cache
+// sits in a common prefix: OpenAI caches the longest shared prefix of a
+// request, and a prompt that opened with "start_ms=1788269400000" shared
+// nothing beyond the system message.
+//
+// It is also the only place the section layout is explained, which the model
+// previously had to infer.
+const header = `SECTIONS
+DIGEST     one line per (module, priority) bucket: observed, expected, ratio.
+           Buckets the gate flagged as deviating are marked with *.
+TEMPLATES  the log lines worth your attention this window, each with an
+           identifier to cite. count is how many lines matched; variants is
+           how many spellings of the same line were folded into it. Templates
+           that are neither new, security-classified nor in a deviating module
+           are shown only as ambient context, most frequent first.
+SAMPLING   how much of the window survived the collector's line budget.
+ALREADY KNOWN  conditions already raised for this system. Do not report them
+           again.
+WINDOW     the time range and collector version this bundle covers.
+
+`
+
 // Render produces a deterministic prompt for the given bundle and currently
 // open findings. Everything is sorted so the same inputs always produce the
 // same bytes, regardless of input slice order. Samples are never included.
-func Render(b model.Bundle, open []model.Finding) string {
+func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 	var sb strings.Builder
 
-	sb.WriteString("WINDOW\n")
-	sb.WriteString(fmt.Sprintf("start_ms=%d end_ms=%d collector=%s masking=%d\n\n",
-		b.Window.Start, b.Window.End, b.CollectorVersion, b.MaskingVersion))
+	sb.WriteString(header)
 
 	sb.WriteString("DIGEST (module priority observed expected ratio)\n")
 	digest := make([]model.DigestEntry, len(b.Digest))
@@ -167,13 +290,18 @@ func Render(b model.Bundle, open []model.Finding) string {
 				ratioStr = fmt.Sprintf("%.2f", float64(e.Observed)/(*e.Expected))
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s %d %d %s %s\n", e.ModuleID, e.Priority, e.Observed, expectedStr, ratioStr))
+		mark := ""
+		if sel.DeviatingModules[e.ModuleID] {
+			mark = " *"
+		}
+		sb.WriteString(fmt.Sprintf("%s %d %d %s %s%s\n", e.ModuleID, e.Priority, e.Observed, expectedStr, ratioStr, mark))
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("TEMPLATES (cite these identifiers in evidence)\n")
-	templates := SortedTemplates(b)
-	for i, t := range templates {
+	lines := Select(b, sel)
+	for i, l := range lines {
+		t := l.Template
 		cat := t.Category
 		if cat == "" {
 			cat = "-"
@@ -182,8 +310,12 @@ func Render(b model.Bundle, open []model.Finding) string {
 		if mod == "" {
 			mod = HostBucketLabel
 		}
-		sb.WriteString(fmt.Sprintf("[%s] count=%d module=%s priority=%d category=%s\n    %s\n",
-			TemplateID(i), t.Count, mod, t.Priority, cat, t.Template))
+		variants := ""
+		if l.Variants > 1 {
+			variants = fmt.Sprintf(" variants=%d", l.Variants)
+		}
+		sb.WriteString(fmt.Sprintf("[%s] count=%d module=%s priority=%d category=%s%s\n    %s\n",
+			TemplateID(i), t.Count, mod, t.Priority, cat, variants, t.Template))
 	}
 	sb.WriteString("\n")
 
@@ -217,9 +349,16 @@ func Render(b model.Bundle, open []model.Finding) string {
 		// identifiers used in THIS window, so the model has something to
 		// match on. Printing only the title left it guessing, and a
 		// differently-worded restatement then arrived as a new finding.
-		idByTemplate := make(map[string]string, len(templates))
-		for i, t := range templates {
-			idByTemplate[t.Template] = TemplateID(i)
+		//
+		// The lookup is by canonical text, not by exact text: the finding was
+		// raised from whichever variant the collector shipped that day, and
+		// this window may carry a different spelling of the same line.
+		idByText := make(map[string]string, len(lines))
+		for i, l := range lines {
+			canon := model.CanonicalTemplate(l.Template.Template)
+			if _, seen := idByText[canon]; !seen {
+				idByText[canon] = TemplateID(i)
+			}
 		}
 
 		for _, f := range known {
@@ -230,7 +369,7 @@ func Render(b model.Bundle, open []model.Finding) string {
 			ids := make([]string, 0, len(f.Evidence))
 			seen := map[string]bool{}
 			for _, ev := range f.Evidence {
-				if id, ok := idByTemplate[ev]; ok && !seen[id] {
+				if id, ok := idByText[model.CanonicalTemplate(ev)]; ok && !seen[id] {
 					seen[id] = true
 					ids = append(ids, id)
 				}
@@ -241,6 +380,10 @@ func Render(b model.Bundle, open []model.Finding) string {
 			}
 		}
 	}
+
+	sb.WriteString("\nWINDOW\n")
+	sb.WriteString(fmt.Sprintf("start_ms=%d end_ms=%d collector=%s masking=%d\n",
+		b.Window.Start, b.Window.End, b.CollectorVersion, b.MaskingVersion))
 
 	return sb.String()
 }
