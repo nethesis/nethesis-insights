@@ -11,19 +11,18 @@ import (
 	"sort"
 )
 
-const Version = "v2"
+const Version = "v3"
 
-// v1 hashed the full set of evidence templates the model chose to cite. That
-// made identity depend on the model's citation generosity: the same SSH
-// brute-force condition cited (BG/..) (DE/..) (NL/..) (US/..) in one window and
-// (CA/..) (HK/..) in the next, producing a different hash and a fresh finding
-// every time. On the dev fleet that yielded ~160 restatements of the same
-// handful of conditions, nearly all stuck at occurrence_count=1.
+// Identity hashes a single derived key, never the set of templates the model
+// chose to cite. Hashing the cited set made identity depend on the model's
+// citation generosity: the same SSH brute-force condition cited (BG/..) (DE/..)
+// (NL/..) in one window and (CA/..) (HK/..) in the next, producing a fresh
+// finding every time -- ~160 restatements of a handful of conditions on the dev
+// fleet, nearly all stuck at occurrence_count=1. See EvidenceKey for the
+// derivation, and model.CanonicalTemplate for the collapse it applies first.
 //
-// v2 hashes a single derived key instead -- see analyzer.evidenceKey. Bumping
-// the version re-identifies every existing finding, which spec section 6.2
-// requires to be a deliberate, visible migration rather than a silent
-// fleet-wide re-raise.
+// Version stamps every finding. Changing the formula changes every finding's
+// identity fleet-wide, so it is bumped deliberately rather than silently.
 
 // writeField writes an 8-byte big-endian length prefix followed by s.
 func writeField(h hash.Hash, s string) {

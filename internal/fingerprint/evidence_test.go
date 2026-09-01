@@ -106,16 +106,29 @@ func TestEvidenceKeyEmptyIsNil(t *testing.T) {
 }
 
 // Normalize must not rewrite text it does not understand: a lowercase or
-// longer token is not a country code, and a bare number is not a duration.
+// longer token is not a country code. Its full rule set, and the cases where
+// collapsing would be wrong, are covered in model.CanonicalTemplate's tests --
+// this asserts only that the delegation is in place and still narrow where it
+// was narrow.
 func TestNormalizeIsNarrow(t *testing.T) {
 	for _, s := range []string{
 		"connection from (us/<NUM>)",
 		"module (ABC/<NUM>) failed",
-		"retry count 4 exceeded",
 	} {
 		if got := Normalize(s); got != s {
 			t.Fatalf("Normalize over-reached on %q: got %q", s, got)
 		}
+	}
+}
+
+// v3 widened Normalize to model.CanonicalTemplate, so a counter that the
+// collector left literal no longer splits a finding's identity. This is the
+// behaviour change the version bump exists for.
+func TestNormalizeCollapsesCollectorLeaks(t *testing.T) {
+	a := Normalize("<3> [db] checkpoint complete: wrote <NUM> buffers (0.3%); 0 recycled")
+	b := Normalize("<3> [db] checkpoint complete: wrote <NUM> buffers (2.7%); 4 recycled")
+	if a != b {
+		t.Fatalf("leaked fields still split identity:\n a=%q\n b=%q", a, b)
 	}
 }
 

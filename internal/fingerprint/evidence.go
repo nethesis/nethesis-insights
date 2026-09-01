@@ -5,36 +5,26 @@ package fingerprint
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-// The edge masker leaves two fields literal in CrowdSec-derived templates, so
-// one scenario mints a new "template" per value:
+// Normalize collapses the variable fields the edge masker leaves literal, so a
+// masking leak cannot split a finding's identity.
 //
-//	ssh-time-based-bf by ip <IP> (US/<NUM>)   ... and (DE/<NUM>), (GB/<NUM>) ...
-//	ban on ip <IP> for 4m                     ... and 8m, 12m, 392m ...
+// It is model.CanonicalTemplate, which is also what the gate's novelty check
+// and the system_templates key use. One definition, because the three must
+// agree: if novelty and identity disagreed about whether two lines are the same
+// condition, a window could buy an LLM call for a template the store already
+// considered known, and the finding it produced would land on a fresh
+// fingerprint every time.
 //
-// Fixing that belongs in the collector, not here. These two rules exist so a
-// masking leak cannot silently split a finding's identity while it is being
-// fixed somewhere else. They are deliberately narrow: a bracketed two-letter
-// uppercase country code, and a bare duration. Anything broader risks merging
-// conditions that are genuinely distinct.
-var (
-	countryCode = regexp.MustCompile(`\(([A-Z]{2})/`)
-	duration    = regexp.MustCompile(`\b\d+(ms|s|m|h|d)\b`)
-)
-
-// Normalize collapses the known masking leaks in a template. It is applied only
-// on the identity path; the template text stored on the finding and shown to the
-// operator is never rewritten.
+// This is applied only on the identity path; the template text stored on the
+// finding and shown to the operator is never rewritten.
 func Normalize(template string) string {
-	t := countryCode.ReplaceAllString(template, "(<CC>/")
-	t = duration.ReplaceAllString(t, "<DUR>")
-	return t
+	return model.CanonicalTemplate(template)
 }
 
 // EvidenceKey derives the stable identity input from the templates a model cited.

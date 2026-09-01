@@ -218,8 +218,10 @@ func TestSamplesNeverStoredInSystemTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("known templates: %v", err)
 	}
-	if !known["tpl1"] {
-		t.Fatalf("expected tpl1 to be known")
+	// KnownTemplates is keyed by canonical key, not raw text: the gate asks
+	// "have we seen this condition", not "have we seen this exact string".
+	if !known[model.CanonicalKey("mod1", "tpl1")] {
+		t.Fatalf("expected tpl1 to be known, got %v", known)
 	}
 }
 

@@ -49,6 +49,16 @@ type Analysis struct {
 	Model        string
 	DurationMs   int
 	Error        string
+
+	// CachedTokens is the part of InputTokens the provider served from its
+	// prompt cache and charges at half rate. It is recorded rather than
+	// inferred so the cost column stays arithmetic anyone can check.
+	CachedTokens int
+
+	// SuppressedBy names the budget limit that stopped this window, if one
+	// did. A suppressed window carries no gate reasons: the gate is why a
+	// window is worth money, and this is why it did not get any.
+	SuppressedBy string
 }
 
 type Store interface {
@@ -66,6 +76,8 @@ type Store interface {
 	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
+	DailySpendMicros(ctx context.Context, since int64) (int64, error)
+	SystemCallsSince(ctx context.Context, systemID string, since int64) (int, error)
 	ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error)
 
 	// Cross-system, read-only paths for the operator UI (internal/ui).
@@ -145,8 +157,19 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			first_seen INTEGER,
 			last_seen INTEGER
 		)`,
+		// Keyed on template_key (model.CanonicalKey), not on the raw
+		// template text. Two consequences, both deliberate: the leaked
+		// variants of one line share a row instead of minting novelty every
+		// window, and the module is part of the key -- the old
+		// (system_id, template) key merged the same line seen in two modules,
+		// so a line genuinely new for one module read as known because
+		// another module had emitted it.
+		//
+		// `template` still holds the raw text of the variant last seen, which
+		// is what the operator UI shows.
 		`CREATE TABLE IF NOT EXISTS system_templates (
 			system_id TEXT,
+			template_key TEXT,
 			template TEXT,
 			module_id TEXT,
 			priority INTEGER,
@@ -154,7 +177,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			first_seen INTEGER,
 			last_seen INTEGER,
 			total_count INTEGER,
-			PRIMARY KEY (system_id, template)
+			PRIMARY KEY (system_id, module_id, template_key)
 		)`,
 		`CREATE TABLE IF NOT EXISTS module_baselines (
 			system_id TEXT,
@@ -197,6 +220,8 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			model TEXT,
 			duration_ms INTEGER,
 			error TEXT,
+			cached_tokens INTEGER,
+			suppressed_by TEXT,
 			completed INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER
 		)`,
@@ -322,6 +347,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			return fmt.Errorf("store: init: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -344,19 +370,24 @@ func (s *SQLiteStore) UpsertSystem(ctx context.Context, sys System) error {
 }
 
 func (s *SQLiteStore) KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT template FROM system_templates WHERE system_id = ?`, systemID)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT module_id, template_key FROM system_templates WHERE system_id = ?`, systemID)
 	if err != nil {
 		return nil, fmt.Errorf("store: known templates: %w", err)
 	}
 	defer rows.Close()
 
+	// The key the gate looks up joins the module and the canonical text. The
+	// two are stored in separate columns and joined here rather than stored
+	// pre-joined, so no separator byte has to survive a round trip through
+	// the database.
 	result := map[string]bool{}
 	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
+		var moduleID, key string
+		if err := rows.Scan(&moduleID, &key); err != nil {
 			return nil, fmt.Errorf("store: scan template: %w", err)
 		}
-		result[t] = true
+		result[model.CanonicalKey(moduleID, key)] = true
 	}
 	return result, rows.Err()
 }
@@ -381,15 +412,16 @@ func (s *SQLiteStore) UpsertTemplates(ctx context.Context, systemID string, ts [
 			lastSeen = now
 		}
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO system_templates (system_id, template, module_id, priority, category, first_seen, last_seen, total_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(system_id, template) DO UPDATE SET
-				module_id = excluded.module_id,
+			INSERT INTO system_templates (system_id, template_key, template, module_id, priority, category, first_seen, last_seen, total_count)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(system_id, module_id, template_key) DO UPDATE SET
+				template = excluded.template,
 				priority = excluded.priority,
 				category = excluded.category,
 				last_seen = excluded.last_seen,
 				total_count = system_templates.total_count + excluded.total_count
-		`, systemID, t.Template, t.ModuleID, t.Priority, t.Category, firstSeen, lastSeen, t.Count)
+		`, systemID, model.CanonicalTemplate(t.Template), t.Template, t.ModuleID,
+			t.Priority, t.Category, firstSeen, lastSeen, t.Count)
 		if err != nil {
 			return fmt.Errorf("store: upsert template: %w", err)
 		}
@@ -528,14 +560,43 @@ func (s *SQLiteStore) FinalizeAnalysis(ctx context.Context, a Analysis) error {
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE analyses SET
 			gated = ?, gate_reasons = ?, llm_called = ?, input_tokens = ?, output_tokens = ?,
-			cost_micros = ?, model = ?, duration_ms = ?, error = ?, completed = 1
+			cached_tokens = ?, cost_micros = ?, model = ?, duration_ms = ?, error = ?,
+			suppressed_by = ?, completed = 1
 		WHERE system_id = ? AND window_start = ?
 	`, boolToInt(a.Gated), string(reasonsJSON), boolToInt(a.LLMCalled), a.InputTokens, a.OutputTokens,
-		a.CostMicros, a.Model, a.DurationMs, a.Error, a.SystemID, a.WindowStart)
+		a.CachedTokens, a.CostMicros, a.Model, a.DurationMs, a.Error, a.SuppressedBy,
+		a.SystemID, a.WindowStart)
 	if err != nil {
 		return fmt.Errorf("store: finalize analysis: %w", err)
 	}
 	return nil
+}
+
+// DailySpendMicros sums what the fleet has spent since `since`. It reads the
+// analyses ledger rather than an in-process counter, so a restart cannot reset
+// the cap.
+func (s *SQLiteStore) DailySpendMicros(ctx context.Context, since int64) (int64, error) {
+	var total sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT SUM(cost_micros) FROM analyses WHERE created_at >= ?`, since).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("store: daily spend: %w", err)
+	}
+	return total.Int64, nil
+}
+
+// SystemCallsSince counts LLM calls attempted for one system since `since`.
+// It counts attempts, not successes: a system whose calls keep failing is
+// still spending, and is still the thing the cap exists to bound.
+func (s *SQLiteStore) SystemCallsSince(ctx context.Context, systemID string, since int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM analyses WHERE system_id = ? AND created_at >= ? AND llm_called = 1`,
+		systemID, since).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: system calls: %w", err)
+	}
+	return n, nil
 }
 
 func (s *SQLiteStore) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
