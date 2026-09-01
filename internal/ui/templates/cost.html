@@ -35,5 +35,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <tr><td colspan="7">no spend yet</td></tr>
 {{end}}
 </tbody>
+{{if .Days}}
+<tfoot>
+<tr>
+<td><strong>Grand total</strong></td>
+<td></td><td></td><td></td><td></td><td></td>
+<td class="num"><strong>{{fmtCost .GrandTotalCostMicros}}</strong></td>
+</tr>
+</tfoot>
+{{end}}
 </table>
 {{end}}

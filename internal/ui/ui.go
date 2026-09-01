@@ -719,7 +719,8 @@ func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
 
 type costPageData struct {
 	pageData
-	Days []costDayGroup
+	Days                 []costDayGroup
+	GrandTotalCostMicros int64
 }
 
 // costDayGroup folds CostRollup's per-day-per-model rows into one group per
@@ -739,6 +740,7 @@ func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var days []costDayGroup
+	var grandTotal int64
 	for _, row := range rows {
 		if len(days) == 0 || days[len(days)-1].Day != row.Day {
 			days = append(days, costDayGroup{Day: row.Day})
@@ -746,10 +748,12 @@ func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 		g := &days[len(days)-1]
 		g.Rows = append(g.Rows, row)
 		g.TotalCostMicros += row.CostMicros
+		grandTotal += row.CostMicros
 	}
 	s.render(w, "cost.html", costPageData{
-		pageData: s.newPageData(r, "cost"),
-		Days:     days,
+		pageData:             s.newPageData(r, "cost"),
+		Days:                 days,
+		GrandTotalCostMicros: grandTotal,
 	})
 }
 
