@@ -703,7 +703,17 @@ func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
 
 type costPageData struct {
 	pageData
-	Rows []store.CostRow
+	Days []costDayGroup
+}
+
+// costDayGroup folds CostRollup's per-day-per-model rows into one group per
+// day, plus that day's total across every model -- CostRollup is already
+// ordered by day, then model (internal/store/ui.go), so a single linear pass
+// suffices.
+type costDayGroup struct {
+	Day             string
+	Rows            []store.CostRow
+	TotalCostMicros int64
 }
 
 func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
@@ -712,9 +722,18 @@ func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, "cost", err)
 		return
 	}
+	var days []costDayGroup
+	for _, row := range rows {
+		if len(days) == 0 || days[len(days)-1].Day != row.Day {
+			days = append(days, costDayGroup{Day: row.Day})
+		}
+		g := &days[len(days)-1]
+		g.Rows = append(g.Rows, row)
+		g.TotalCostMicros += row.CostMicros
+	}
 	s.render(w, "cost.html", costPageData{
 		pageData: s.newPageData(r, "cost"),
-		Rows:     rows,
+		Days:     days,
 	})
 }
 

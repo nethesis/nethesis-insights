@@ -13,15 +13,23 @@ SPDX-License-Identifier: GPL-3.0-or-later
 </tr>
 </thead>
 <tbody>
+{{range .Days}}
+{{$day := .Day}}
 {{range .Rows}}
 <tr>
-<td class="mono">{{.Day}}</td>
+<td class="mono">{{$day}}</td>
 <td class="mono">{{.Model}}</td>
 <td class="num">{{.Windows}}</td>
 <td class="num">{{.LLMCalls}}</td>
 <td class="num">{{.InputTokens}}</td>
 <td class="num">{{.OutputTokens}}</td>
 <td class="num">{{fmtCost .CostMicros}}</td>
+</tr>
+{{end}}
+<tr>
+<td class="mono"><strong>{{$day}} total</strong></td>
+<td></td><td></td><td></td><td></td><td></td>
+<td class="num"><strong>{{fmtCost .TotalCostMicros}}</strong></td>
 </tr>
 {{else}}
 <tr><td colspan="7">no spend yet</td></tr>
