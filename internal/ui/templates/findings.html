@@ -7,6 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, any if blank">
+<input type="text" name="id" value="{{.ID}}" placeholder="id / fingerprint, partial ok">
 <select name="status">
 <option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
 <option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>

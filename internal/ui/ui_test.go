@@ -72,7 +72,7 @@ func (f *fakeReader) CostRollup(ctx context.Context) ([]store.CostRow, error) {
 	return f.cost, f.err
 }
 
-func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error) {
+func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity, idLike string, limit int) ([]model.Finding, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -85,6 +85,9 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 			continue
 		}
 		if severity != "" && fnd.Severity != severity {
+			continue
+		}
+		if idLike != "" && !strings.HasPrefix(fnd.ID, strings.TrimSuffix(idLike, "%")) && !strings.HasPrefix(fnd.Fingerprint, strings.TrimSuffix(idLike, "%")) {
 			continue
 		}
 		out = append(out, fnd)

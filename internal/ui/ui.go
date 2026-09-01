@@ -59,7 +59,7 @@ type Reader interface {
 	ListAnalyses(ctx context.Context, systemID string, limit int) ([]store.AnalysisRow, error)
 	GateRollup(ctx context.Context) ([]store.GateRow, error)
 	CostRollup(ctx context.Context) ([]store.CostRow, error)
-	ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error)
+	ListAllFindings(ctx context.Context, systemID, status, severity, idLike string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error)
 
@@ -635,6 +635,7 @@ type findingsPageData struct {
 	System     string
 	Status     string
 	Severity   string
+	ID         string
 	Severities []string
 }
 
@@ -643,8 +644,9 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 	systemID := q.Get("system")
 	status := sanitizeStatus(q.Get("status"))
 	severity := sanitizeSeverity(q.Get("severity"))
+	id := q.Get("id")
 
-	findings, err := s.reader.ListAllFindings(r.Context(), systemID, status, severity, findingsLimit)
+	findings, err := s.reader.ListAllFindings(r.Context(), systemID, status, severity, id, findingsLimit)
 	if err != nil {
 		s.storeError(w, "findings", err)
 		return
@@ -655,6 +657,7 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 		System:     systemID,
 		Status:     status,
 		Severity:   severity,
+		ID:         id,
 		Severities: model.Severities,
 	})
 }

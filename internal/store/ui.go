@@ -26,6 +26,17 @@ import (
 // is served to an unauthenticated UI, so "no limit" is never an option.
 const defaultListLimit = 200
 
+// likePattern turns operator search input into a SQL LIKE pattern: a value
+// already containing "%" is passed through so a caller can write %mid% for a
+// substring search, otherwise "%" is appended for a prefix match -- the
+// common case of pasting the short ID shown in the findings table.
+func likePattern(s string) string {
+	if s == "" || strings.Contains(s, "%") {
+		return s
+	}
+	return s + "%"
+}
+
 const dayMillis = 86400000
 
 // Counts is per-table row counts, for the status page.
@@ -326,18 +337,23 @@ func (s *SQLiteStore) CostRollup(ctx context.Context) ([]CostRow, error) {
 }
 
 // ListAllFindings is the fleet-wide counterpart to ListFindings: no implicit
-// system scope, and systemID/status/severity are each optional filters
-// ("" means no filter). Results are capped to limit (most recently seen
-// first) and then re-sorted into the canonical severity/last_seen order.
-func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, severity string, limit int) ([]model.Finding, error) {
+// system scope, and systemID/status/severity/idLike are each optional filters
+// ("" means no filter). idLike matches against id and fingerprint with SQL
+// LIKE, letting an operator paste the short ID shown in the UI table; see
+// likePattern for how a bare value (no "%") is turned into a prefix match.
+// Results are capped to limit (most recently seen first) and then re-sorted
+// into the canonical severity/last_seen order.
+func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, severity, idLike string, limit int) ([]model.Finding, error) {
 	query := `
 		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version
 		FROM findings
 		WHERE (? = '' OR system_id = ?) AND (? = '' OR status = ?) AND (? = '' OR severity = ?)
+		  AND (? = '' OR id LIKE ? OR fingerprint LIKE ?)
 		ORDER BY last_seen DESC
 		LIMIT ?
 	`
-	findings, err := s.queryFindings(ctx, query, systemID, systemID, status, status, severity, severity, clampLimit(limit))
+	pattern := likePattern(idLike)
+	findings, err := s.queryFindings(ctx, query, systemID, systemID, status, status, severity, severity, idLike, pattern, pattern, clampLimit(limit))
 	if err != nil {
 		return nil, err
 	}

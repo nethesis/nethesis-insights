@@ -57,7 +57,7 @@ func TestUIMethodsOnEmptyDatabase(t *testing.T) {
 		t.Fatalf("CostRollup: expected empty, got %d", len(costRows))
 	}
 
-	findings, err := s.ListAllFindings(ctx, "", "", "", 0)
+	findings, err := s.ListAllFindings(ctx, "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	seedFinding(t, ctx, s, "sys2", "fp3", "high", model.StatusOpen, 3000)
 
 	// No filters: all 4, in model.SortFindings order (severity asc rank, then last_seen desc).
-	all, err := s.ListAllFindings(ctx, "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// systemID filter.
-	sys1Only, err := s.ListAllFindings(ctx, "sys1", "", "", 0)
+	sys1Only, err := s.ListAllFindings(ctx, "sys1", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings systemID filter: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// status filter.
-	staleOnly, err := s.ListAllFindings(ctx, "", model.StatusStale, "", 0)
+	staleOnly, err := s.ListAllFindings(ctx, "", model.StatusStale, "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings status filter: %v", err)
 	}
@@ -459,12 +459,40 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// severity filter.
-	criticalOnly, err := s.ListAllFindings(ctx, "", "", "critical", 0)
+	criticalOnly, err := s.ListAllFindings(ctx, "", "", "critical", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings severity filter: %v", err)
 	}
 	if len(criticalOnly) != 1 || criticalOnly[0].Fingerprint != "fp2" {
 		t.Fatalf("expected only fp2 critical, got %+v", criticalOnly)
+	}
+
+	// idLike: a bare value (no "%") is a prefix match against id or fingerprint.
+	fpPrefix, err := s.ListAllFindings(ctx, "", "", "", "fp2", 0)
+	if err != nil {
+		t.Fatalf("ListAllFindings idLike prefix: %v", err)
+	}
+	if len(fpPrefix) != 1 || fpPrefix[0].Fingerprint != "fp2" {
+		t.Fatalf("expected only fp2 for idLike=fp2, got %+v", fpPrefix)
+	}
+
+	// idLike: an explicit "%" pattern is passed through, so an operator can
+	// search a substring anywhere in id/fingerprint.
+	fpSubstring, err := s.ListAllFindings(ctx, "", "", "", "%p3", 0)
+	if err != nil {
+		t.Fatalf("ListAllFindings idLike substring: %v", err)
+	}
+	if len(fpSubstring) != 1 || fpSubstring[0].Fingerprint != "fp3" {
+		t.Fatalf("expected only fp3 for idLike=%%p3, got %+v", fpSubstring)
+	}
+
+	// idLike also matches by the finding's ULID id, not just fingerprint.
+	byID, err := s.ListAllFindings(ctx, "", "", "", fpPrefix[0].ID, 0)
+	if err != nil {
+		t.Fatalf("ListAllFindings idLike by id: %v", err)
+	}
+	if len(byID) != 1 || byID[0].Fingerprint != "fp2" {
+		t.Fatalf("expected only fp2 for idLike=<its id>, got %+v", byID)
 	}
 }
 
@@ -476,7 +504,7 @@ func TestListAllFindingsHonoursLimitAndDefaultCap(t *testing.T) {
 		seedFinding(t, ctx, s, "sys1", "fp"+string(rune('0'+i)), "low", model.StatusOpen, int64(i*1000))
 	}
 
-	limited, err := s.ListAllFindings(ctx, "", "", "", 2)
+	limited, err := s.ListAllFindings(ctx, "", "", "", "", 2)
 	if err != nil {
 		t.Fatalf("ListAllFindings limit=2: %v", err)
 	}
@@ -484,7 +512,7 @@ func TestListAllFindingsHonoursLimitAndDefaultCap(t *testing.T) {
 		t.Fatalf("expected 2 findings with limit=2, got %d", len(limited))
 	}
 
-	all, err := s.ListAllFindings(ctx, "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllFindings default cap: %v", err)
 	}
