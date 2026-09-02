@@ -102,6 +102,21 @@ collapse is used when a finding's identity is computed, so a leak cannot split
 one problem into ten findings either. The full, unmodified line is still what
 you see in the UI and on the finding — only the comparison is collapsed.
 
+**Modules are counted by kind, not by copy.** A machine can run many copies of
+one application — a hosting node in the dev fleet runs 82 `nethvoice` and 71
+`openldap` instances, named `nethvoice1`, `nethvoice2` and so on. Every copy
+runs the same software and therefore says the same things, so the server groups
+them by *kind*: `nethvoice5` and `nethvoice39` are both `nethvoice`. Without
+that, one ordinary cron line occupied 82 separate templates on that machine,
+each of them "never seen before" the first time its copy said it. Measured on
+2026-09-02, grouping by kind and de-numbering the process names inside the line
+took 678 stored templates down to 230 for the same set of real conditions.
+
+The one place the individual copy still matters is volume: baselines and the
+"unusually chatty" comparison are kept per copy, so a single misbehaving
+instance is still visible on the `/baselines` page. The trade is that a finding
+names the kind (`openldap`) and not which of the 71 copies emitted it.
+
 That is also why novelty needs more than one new template. A genuinely new
 condition arrives as a handful of related lines; a single new line is nearly
 always one more spelling of something the machine has been saying all week.
@@ -405,7 +420,7 @@ What each page shows, in plain terms:
 | `/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
 | `/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
-| `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. |
+| `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
 | `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
 | `/threat-systems` | The blocklist pipeline's counterpart to `/systems`: one row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
 | `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |

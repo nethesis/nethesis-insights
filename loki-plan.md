@@ -67,6 +67,8 @@ This is a fresh template on every checkpoint. Also unmasked: hostnames and FQDNs
 
 Note: The server now has a narrow regex canonicalization (`model.CanonicalTemplate`) that collapses these leaks on receipt — measured 710 live templates down to 526 — but it is a workaround. The template is produced here.
 
+Note (2026-09-02): the server also keys novelty, `system_templates` and finding identity on the module *family* (`model.ModuleFamily`: `nethvoice5` → `nethvoice`) and collapses the bracketed instance identifier `[agent@openldap55]` → `[agent@openldap]`, which took 678 live rows over 185 module instances down to 230. That closes the server's exposure, not the edge's: see `loki_optimization_plan.md` for the three edge defects behind it, the largest being that `allocate()` degrades to 2 templates per module per window at 185 instances.
+
 ## Templates are near-duplicates of each other
 
 **Defect:** Templates within a window are often near-duplicates that differ only in variable tokens or trailing key=value pairs.

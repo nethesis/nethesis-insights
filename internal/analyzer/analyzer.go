@@ -326,7 +326,11 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		moduleSet := map[string]bool{}
 		for _, t := range cited {
 			evidence = append(evidence, t.Template)
-			moduleSet[t.ModuleID] = true
+			// Families, not instances: one condition seen on 71 openldap
+			// instances is one finding, the same way it is one template row.
+			// prompt.Select already rewrote ModuleID to the family, so this
+			// is belt and braces against a caller that did not.
+			moduleSet[model.ModuleFamily(t.ModuleID)] = true
 			if t.Category == "security" {
 				category = "security"
 			}

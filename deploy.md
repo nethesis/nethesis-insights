@@ -213,6 +213,17 @@ templates ~70% of prompt bytes.
   contributed 223 templates that are 5 conditions. The server's regex
   canonicalization (`model.CanonicalTemplate`) collapses these to 526 (74%);
   the rest is structural and is edge work — see `loki-plan.md`.
+- **One template per module instance.** Re-measured on 2026-09-02 against a
+  hosting node: 678 distinct `(module_id, priority, template)` rows over 185
+  module instances, which are only 16 module *families* — 82 `nethvoice*`, 71
+  `openldap*`. 301 of the 678 rows were one instance's copy of a line a
+  sibling had already emitted (`pam_unix(cron:session)` alone: 82), and a
+  further 154 were the agent's own `agent@<instance>` syslog identifier, which
+  the collector's de-instancing rule misses for want of an `@` in its
+  character class. Keying on `model.ModuleFamily` and collapsing the bracketed
+  identifier takes 678 to **230**. The edge side of this — `allocate()` giving
+  every one of 185 instances 2 templates per window — is in
+  `loki_optimization_plan.md`.
 - **No ceiling existed.** `internal/budget` was unbuilt.
 
 ## Configuration this deployment still needs

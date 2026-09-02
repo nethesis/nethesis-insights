@@ -157,7 +157,7 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			first_seen INTEGER,
 			last_seen INTEGER
 		)`,
-		// Keyed on template_key (model.CanonicalKey), not on the raw
+		// Keyed on template_key (model.CanonicalTemplate), not on the raw
 		// template text. Two consequences, both deliberate: the leaked
 		// variants of one line share a row instead of minting novelty every
 		// window, and the module is part of the key -- the old
@@ -165,8 +165,12 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		// so a line genuinely new for one module read as known because
 		// another module had emitted it.
 		//
-		// `template` still holds the raw text of the variant last seen, which
-		// is what the operator UI shows.
+		// `module_id` holds the module *family* (model.ModuleFamily), not the
+		// instance: 82 nethvoice instances emitting one cron line are one
+		// condition, not 82. `template` likewise holds the raw text of the
+		// variant last seen rather than the key. Both columns follow the same
+		// idiom -- the key is canonical, the column next to it keeps what an
+		// operator needs to read.
 		`CREATE TABLE IF NOT EXISTS system_templates (
 			system_id TEXT,
 			template_key TEXT,
@@ -420,7 +424,7 @@ func (s *SQLiteStore) UpsertTemplates(ctx context.Context, systemID string, ts [
 				category = excluded.category,
 				last_seen = excluded.last_seen,
 				total_count = system_templates.total_count + excluded.total_count
-		`, systemID, model.CanonicalTemplate(t.Template), t.Template, t.ModuleID,
+		`, systemID, model.CanonicalTemplate(t.Template), t.Template, model.ModuleFamily(t.ModuleID),
 			t.Priority, t.Category, firstSeen, lastSeen, t.Count)
 		if err != nil {
 			return fmt.Errorf("store: upsert template: %w", err)

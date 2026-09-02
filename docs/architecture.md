@@ -280,8 +280,8 @@ without a goroutine to leak.
 | Table | Purpose |
 |---|---|
 | `systems` | One row per system seen; first/last-seen timestamps, collector version. |
-| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text; `template` keeps the raw text of the last variant seen, which is what the UI shows. |
-| `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. |
+| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. |
+| `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
@@ -435,12 +435,14 @@ the same SSH brute-force condition cited as `(BG/…) (DE/…) (NL/…)` in one
 window and `(CA/…) (HK/…)` in the next produced two different fingerprints and
 two findings, each stuck at `occurrence_count=1`.
 
-`v2` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
+`v3` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
 three layers:
 
 1. `fingerprint.Normalize` collapses the fields the collector's masking leaves
    literal. It is `model.CanonicalTemplate`, the same collapse the gate's
-   novelty check and the `system_templates` key use — one definition, because
+   novelty check and the `system_templates` key use, and the module set hashed
+   alongside it is folded to families by `model.ModuleFamily` for the same
+   reason — one definition, because
    if novelty and identity disagreed about whether two lines are the same
    condition, a window could pay for a template the store already knew and the
    finding would land on a fresh fingerprint each time. Fixing the masking
@@ -540,9 +542,15 @@ security-classified one, everything in a deviating module, and then the top
 `PROMPT_MAX_AMBIENT` (default 60) of the remainder by count as context.
 
 Before selecting, it **collapses**: templates sharing a canonical key within
-one `(module_id, priority)` become one line carrying the summed count, the
+one `(module family, priority)` become one line carrying the summed count, the
 number of variants folded, and the text of the busiest variant. Showing a model
-65 spellings of one Prometheus message invites 65 findings.
+65 spellings of one Prometheus message invites 65 findings, and showing it the
+same line once per module instance invites 82.
+
+Because the group is a family and `gate.Decision.DeviatingModules` is a set of
+instances, `Select` folds that set to families itself before asking whether a
+group deviates. Skipping that would demote the very line that paid for the call
+into the ambient pool, where `PROMPT_MAX_AMBIENT` can drop it.
 
 `prompt.TemplateID` numbers whatever `Select` returns, so `Render` and
 `ResolveEvidence` must be given the **same** `Selection` — otherwise the

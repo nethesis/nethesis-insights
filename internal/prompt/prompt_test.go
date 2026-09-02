@@ -345,3 +345,58 @@ func TestRenderStartsWithInvariantHeader(t *testing.T) {
 		t.Fatal("the volatile window block must come after the stable sections")
 	}
 }
+
+// Instances of one module are collapsed the same way spellings are: 82
+// nethvoice instances emitting one cron line are one condition, and 82 prompt
+// lines invite 82 findings.
+func TestSelectCollapsesModuleInstances(t *testing.T) {
+	line := `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`
+	b := model.Bundle{
+		Templates: []model.Template{
+			{Template: line, Count: 3, ModuleID: "nethvoice5", Priority: 6},
+			{Template: line, Count: 7, ModuleID: "nethvoice39", Priority: 6},
+			{Template: line, Count: 1, ModuleID: "nethvoice-proxy4", Priority: 6},
+		},
+	}
+	lines := Select(b, Selection{MaxAmbient: 100})
+	if len(lines) != 2 {
+		t.Fatalf("expected nethvoice collapsed and nethvoice-proxy kept apart, got %d lines: %+v", len(lines), lines)
+	}
+	byModule := map[string]Line{}
+	for _, l := range lines {
+		byModule[l.Template.ModuleID] = l
+	}
+	nv, ok := byModule["nethvoice"]
+	if !ok {
+		t.Fatalf("representative must carry the family, got %v", byModule)
+	}
+	if nv.Variants != 2 || nv.Template.Count != 10 {
+		t.Fatalf("variants=%d count=%d, want 2 and the summed 10", nv.Variants, nv.Template.Count)
+	}
+	if _, ok := byModule["nethvoice-proxy"]; !ok {
+		t.Fatalf("nethvoice-proxy is its own image and must stay separate, got %v", byModule)
+	}
+}
+
+// The gate reports deviation per instance because module_baselines is keyed
+// that way, while lines are grouped per family. Without collapsing the set,
+// the line that paid for the call lands in the ambient pool and MaxAmbient
+// can drop it.
+func TestSelectKeepsLinesFromADeviatingInstance(t *testing.T) {
+	b := model.Bundle{
+		Templates: []model.Template{
+			{Template: `<3> [nethvoice] phonebook failed`, Count: 1, ModuleID: "nethvoice39", Priority: 3},
+			{Template: `<3> [mail] quiet line`, Count: 500, ModuleID: "mail1", Priority: 3},
+		},
+	}
+	lines := Select(b, Selection{
+		DeviatingModules: map[string]bool{"nethvoice39": true},
+		MaxAmbient:       0,
+	})
+	if len(lines) != 1 {
+		t.Fatalf("expected only the deviating family's line, got %d: %+v", len(lines), lines)
+	}
+	if lines[0].Template.ModuleID != "nethvoice" {
+		t.Fatalf("the deviating instance's line was dropped, kept %q", lines[0].Template.ModuleID)
+	}
+}

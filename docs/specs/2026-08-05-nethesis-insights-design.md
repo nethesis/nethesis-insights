@@ -207,16 +207,24 @@ body cap 1 MB · → `202 Accepted`
 }
 ```
 
-### 5.1 Template identity is the template text
+### 5.1 Template identity is the canonical template text
 
 There is no template hash. `system_templates` is keyed on
-`(system_id, template)` and the novelty gate is an indexed lookup. Templates are
-~150 bytes; 2700 systems × ~500 distinct templates ≈ 200 MB.
+`(system_id, module_id, template_key)` and the novelty gate is an indexed
+lookup. Templates are ~150 bytes; 2700 systems × ~500 distinct templates
+≈ 200 MB.
 
-This is a deliberate simplification over hashing. A hash column buys nothing at
-this scale and costs readability: `SELECT template FROM system_templates WHERE
+Not hashing is a deliberate simplification. A hash column buys nothing at this
+scale and costs readability: `SELECT template FROM system_templates WHERE
 system_id = ?` tells an operator what a system looks like, which a hash never
-does.
+does. `template_key` is therefore still text — `model.CanonicalTemplate` of the
+raw line (§8.1.2) — and `template` keeps the raw text of the variant last seen,
+which is what the operator UI shows.
+
+`module_id` holds the module **family**, not the instance: see §8.1.2's second
+half for why 82 instances of one module are one bucket, and note that
+`module_baselines` deliberately does *not* follow, because volume per instance
+is real signal.
 
 `masking_version` is recorded metadata only — it computes nothing. Its purpose
 is diagnostic: when a collector upgrade changes the masking rules, every
@@ -307,7 +315,7 @@ Six tables.
 | Table | Key | Contents |
 |---|---|---|
 | `systems` | `system_id` PK | tenant_id, collector_version, first_seen, last_seen |
-| `system_templates` | UNIQUE `(system_id, template)` | first_seen, last_seen, total_count |
+| `system_templates` | UNIQUE `(system_id, module_id, template_key)`, `module_id` a family | template (raw, last variant), priority, category, first_seen, last_seen, total_count |
 | `module_baselines` | UNIQUE `(system_id, module_id, priority)` | ewma_rate, updated_at |
 | `findings` | UNIQUE `(system_id, fingerprint)` | severity, title, summary, suggested_action, modules (JSON TEXT), evidence (JSON TEXT), status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version |
 | `analyses` | UNIQUE `(system_id, window_start)` | window_end, gated, gate_reasons (JSON TEXT), llm_called, input_tokens, output_tokens, cost_micros, model, duration_ms, error |
@@ -334,7 +342,7 @@ One hash, in one place, `internal/fingerprint`:
 
 ```go
 // A finding's identity is a single key derived from the templates it cites.
-sha256("v2\x00" + system_id + "\x00" + category + "\x00" +
+sha256("v3\x00" + system_id + "\x00" + category + "\x00" +
        lengthPrefixed(sortedModules) + lengthPrefixed(evidenceKey))
 ```
 
@@ -352,6 +360,17 @@ known masking leaks, key on the `(module_id, priority)` bucket when the whole
 cited set shares one, and otherwise key on the canonical primary template under
 `model.LessTemplate`. Refusing model-authored *text* was never sufficient on its
 own — the model still chose the *set*.
+
+`sortedModules` holds module **families** (`model.ModuleFamily`), for the
+reason §8.1.2 gives for the novelty key: one condition on 71 `openldap`
+instances is one problem, not 71. The cost is that a finding names the image
+and not which instance emitted it; per-instance volume stays on
+`module_baselines` and the UI's `/baselines` page.
+
+Debt, and a violation of the paragraph below taken knowingly while the project
+is pre-production: the family collapse changed every existing finding's
+identity *without* a version bump. `fingerprint.Version` is still `v3`. The
+bump to `v4` has to be paid before this reaches the real fleet.
 
 The `v1` prefix is also earned: if the formula ever changes, every existing
 finding's identity changes with it, and that must be a deliberate versioned
@@ -485,6 +504,29 @@ Novelty additionally requires a quorum, because a real new condition arrives as
 a cluster of related lines while a single new template is nearly always one more
 spelling of something the node has emitted all week. A new **security** template
 is exempt and fires alone: one is the entire signal that condition exists for.
+
+The same argument holds one axis over, and cost more. A node hosting one module
+per tenant runs many instances of one image -- 82 `nethvoice*` and 71
+`openldap*` on the dev fleet -- and every instance says the same things,
+because it *is* the same code. Keying novelty on `module_id` therefore charged
+once per instance for one condition: measured on 2026-09-02, 301 of 678 stored
+rows were an instance's copy of a line another instance had already emitted,
+and `pam_unix(cron:session)` alone occupied 82 of them. `model.ModuleFamily`
+reduces an instance id to its image name (`nethvoice5` -> `nethvoice`), and
+`model.CanonicalKey` keys on that. A further 154 rows were the NS8 agent's own
+syslog identifier, `agent@openldap55`, which the collector's de-instancing rule
+misses because its character class has no `@`; `CanonicalTemplate` collapses
+those too. Together: 678 rows down to 230 for the same set of conditions.
+
+Two boundaries this does **not** cross, both deliberate:
+
+- Two *different* modules keep separate keys. `mail` and `nethvoice` emitting
+  the same line are two conditions, and a family is not a prefix match --
+  `nethvoice-proxy` is its own image, not a numbered `nethvoice`.
+- `module_baselines` and the deviation condition stay keyed on the instance.
+  One instance flooding is signal about that instance, and diluting it across
+  82 siblings would hide it. The cost is that `gate_reasons` still spells
+  `deviation:<instance>/<priority>`, so the UI's rollup groups per instance.
 
 ### 8.1.3 Why the deviation condition has absolute floors
 

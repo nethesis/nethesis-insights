@@ -54,11 +54,31 @@ var (
 	percentage = regexp.MustCompile(`(?:\d+|<NUM>)(?:\.(?:\d+|<NUM>))?%`)
 	decimal    = regexp.MustCompile(`(?:\d+|<NUM>)\.(?:\d+|<NUM>)`)
 
+	// The instance digits of a bracketed syslog identifier. The collector has
+	// the same rule (its masking rule 10) and it works for [nethvoice84] ->
+	// [nethvoice], but its character class has no '@', so the identifier of an
+	// NS8 agent -- agent@openldap55 -- survives it. Its scrub pass protects
+	// those names on purpose, because a crash-looping module is named by
+	// exactly those PRIORITY=3 lines. Measured on the 2026-09-02 dump: one
+	// template,
+	//
+	//	<4> [agent@openldap55] Signal "user <USER> signal <NUM>" caught: ...
+	//
+	// occupied 154 of 678 rows across seven module families.
+	//
+	// Anchoring on the closing bracket is what keeps this narrow: [php7:error]
+	// and [nextcloud] do not match, because the digits have to be the last
+	// thing before the ']'.
+	bracketInstance = regexp.MustCompile(`\[([A-Za-z][\w@.-]*?)\d+\]`)
+
 	// Single digits, for the same reason: "0 WAL file(s) added, 0 removed,
 	// 1 recycled" differs from "... 8 recycled" in one character. \b never
-	// matches inside a word, so module instance names (traefik1, nethvoice5)
-	// and file references (head.go:12) are untouched; the leading priority
-	// marker is protected by splitting it off before any rule runs.
+	// matches inside a word, so file references (head.go:12) are untouched,
+	// and the leading priority marker is protected by splitting it off before
+	// any rule runs. Module instance names (traefik1, nethvoice5) survive this
+	// rule too, but no longer survive canonicalization as a whole: the
+	// bracketInstance rule above runs first and takes the ones that appear as
+	// a syslog identifier.
 	singleDigit = regexp.MustCompile(`\b\d\b`)
 
 	// Dotted hostnames. The collector has no rule at all for these and says so
@@ -109,6 +129,7 @@ func CanonicalTemplate(template string) string {
 	rest = percentage.ReplaceAllString(rest, "<PCT>")
 	rest = decimal.ReplaceAllString(rest, "<NUM>")
 	rest = duration.ReplaceAllString(rest, "<DUR>")
+	rest = bracketInstance.ReplaceAllString(rest, "[$1]")
 	rest = singleDigit.ReplaceAllString(rest, "<NUM>")
 
 	return prefix + rest
@@ -143,13 +164,49 @@ func replaceHostnames(s string) string {
 	})
 }
 
-// CanonicalKey returns the storage and novelty key for a template: its module
-// bucket plus its canonical text.
+// ModuleFamily reduces an NS8 module instance id to the module it is an
+// instance of: nethvoice5 and nethvoice39 are both nethvoice, and
+// nethvoice-proxy4 is nethvoice-proxy. An instance id is the image name
+// followed by a sequence number, so this is a naming convention rather than a
+// heuristic.
 //
-// The module is part of the key because system_templates is keyed on the
-// template text alone today, which silently merges the same line seen in two
-// different modules -- and the gate then treats a line that is new for
-// nethvoice20 as known because nethvoice47 emitted it last week.
+// The empty module id -- the host bucket, which carries sshd, systemd and
+// runagent -- maps to itself and stays an ordinary bucket.
+//
+// The result never ends in a digit, so ModuleFamily is idempotent. That
+// matters: store.KnownTemplates re-derives the key from a column that already
+// holds a family, the way it already re-applies CanonicalTemplate to a column
+// that already holds canonical text.
+//
+// The one shape this gets wrong is a module whose image name genuinely ends in
+// a digit, which would merge with a differently-numbered sibling. No NS8
+// module on the dev fleet does, and both would have to be installed on the
+// same system for it to matter.
+func ModuleFamily(moduleID string) string {
+	family := strings.TrimRight(moduleID, "0123456789")
+	if family == "" {
+		return moduleID
+	}
+	return family
+}
+
+// CanonicalKey returns the storage and novelty key for a template: its module
+// family plus its canonical text.
+//
+// The module is part of the key because the template text alone merges the
+// same line seen in two different modules, and a line genuinely new for one of
+// them then reads as known. It is the *family* rather than the instance
+// because two instances of one module run the same image, the same version and
+// the same code path: a line new to nethvoice20 that nethvoice47 emitted last
+// week is not news about the node, it is the same condition on a second
+// tenant. Measured on the 2026-09-02 dump, keying on the instance cost 301 of
+// 678 rows -- pam_unix(cron:session) alone occupied 82, one per nethvoice
+// instance.
+//
+// This is deliberately the only definition, shared by gate.Evaluate, the
+// system_templates key, prompt.Select and fingerprint.Normalize. If novelty
+// and identity disagreed, a window could pay for a template the store already
+// knew and the finding would land on a fresh fingerprint every time.
 func CanonicalKey(moduleID, template string) string {
-	return moduleID + "\x00" + CanonicalTemplate(template)
+	return ModuleFamily(moduleID) + "\x00" + CanonicalTemplate(template)
 }

@@ -105,8 +105,10 @@ func TemplateID(i int) string { return fmt.Sprintf("T%d", i+1) }
 // the model is supposed to weigh.
 type Selection struct {
 	// Novel is the set of canonical keys new to this system, and
-	// DeviatingModules the modules over tolerance. Both come from
+	// DeviatingModules the module instances over tolerance. Both come from
 	// gate.Decision, so the prompt shows exactly what paid for the call.
+	// Novel keys are already family-scoped (model.CanonicalKey); the
+	// deviating modules are not, and Select collapses them itself.
 	Novel            map[string]bool
 	DeviatingModules map[string]bool
 
@@ -119,6 +121,10 @@ type Selection struct {
 // Line is one template as the prompt shows it: a representative template
 // carrying the summed count of every variant that canonicalizes to the same
 // key, and how many variants that was.
+//
+// A "variant" is both a spelling and an instance. Lines are grouped on the
+// module *family*, so the same cron line emitted by 82 nethvoice instances is
+// one Line with Variants=82, and the representative's ModuleID is the family.
 type Line struct {
 	Template model.Template
 	Variants int
@@ -127,12 +133,17 @@ type Line struct {
 // Select returns the lines the prompt shows, in model.LessTemplate order.
 //
 // Two steps. First collapse: templates sharing a canonical key within one
-// (module_id, priority) become one line, because the collector's masking
+// (module family, priority) become one line, because the collector's masking
 // leaves fields literal that cannot distinguish two conditions -- 65 spellings
 // of one Prometheus message are one condition, and showing all 65 invites the
 // model to report 65 findings. The representative is the highest-count
 // variant, so the text an operator eventually reads is the one that actually
 // dominated the window.
+//
+// Grouping on the family rather than the instance is the same collapse one
+// axis over: 82 nethvoice instances running one image emit one condition
+// between them, and 82 prompt lines invite 82 findings just as 65 spellings
+// do.
 //
 // Then select: everything novel, everything the edge classified as security,
 // everything in a deviating module, and the top MaxAmbient of the remainder by
@@ -148,13 +159,25 @@ func Select(b model.Bundle, sel Selection) []Line {
 		canon    string
 	}
 
+	// The gate reports deviation per module instance, because module_baselines
+	// is keyed that way -- one instance flooding is signal about that
+	// instance. Lines here are grouped per family, so the question a group
+	// asks is whether *any* of its instances deviates. Collapsing the set once
+	// is what keeps a deviating line out of the ambient pool, where
+	// MaxAmbient can drop the very line that paid for the call.
+	deviatingFamilies := make(map[string]bool, len(sel.DeviatingModules))
+	for m := range sel.DeviatingModules {
+		deviatingFamilies[model.ModuleFamily(m)] = true
+	}
+
 	grouped := map[key]*Line{}
 	var order []key
 	for _, t := range b.Templates {
-		k := key{t.ModuleID, t.Priority, model.CanonicalTemplate(t.Template)}
+		k := key{model.ModuleFamily(t.ModuleID), t.Priority, model.CanonicalTemplate(t.Template)}
 		line, ok := grouped[k]
 		if !ok {
 			cp := t
+			cp.ModuleID = k.moduleID
 			cp.Samples = nil
 			grouped[k] = &Line{Template: cp, Variants: 1}
 			order = append(order, k)
@@ -168,6 +191,7 @@ func Select(b model.Bundle, sel Selection) []Line {
 			(t.Count == line.Template.Count-t.Count && t.Template < line.Template.Template) {
 			count := line.Template.Count
 			line.Template = t
+			line.Template.ModuleID = k.moduleID
 			line.Template.Samples = nil
 			line.Template.Count = count
 		}
@@ -182,7 +206,7 @@ func Select(b model.Bundle, sel Selection) []Line {
 		switch {
 		case sel.Novel[model.CanonicalKey(k.moduleID, line.Template.Template)],
 			line.Template.Category == "security",
-			sel.DeviatingModules[k.moduleID]:
+			deviatingFamilies[k.moduleID]:
 			kept = append(kept, line)
 		default:
 			ambient = append(ambient, line)

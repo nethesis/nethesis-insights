@@ -275,7 +275,9 @@ func TestEvidenceAndModulesAreResolvedNotTrusted(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(found))
 	}
-	if len(found[0].Modules) != 1 || found[0].Modules[0] != "mod1" {
+	// The cited template's module is mod1; a finding names the module family,
+	// so one condition on several instances of one module is one finding.
+	if len(found[0].Modules) != 1 || found[0].Modules[0] != "mod" {
 		t.Fatalf("modules must come from the cited template, got %v", found[0].Modules)
 	}
 	if len(found[0].Evidence) != 1 || found[0].Evidence[0] != "tpl1" {
@@ -530,5 +532,58 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 	}
 	if !known[model.CanonicalKey("mod1", "<3> [svc] something entirely new")] {
 		t.Fatal("a suppressed window must still record its templates")
+	}
+}
+
+// A hosted node runs one module per tenant -- 82 nethvoice instances on the
+// dev fleet -- and they all emit the same lines. The second instance's copy is
+// not novel, so it must not buy an LLM call, and it must not mint a second
+// system_templates row.
+func TestSecondInstanceOfAModuleIsNotNovel(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
+	a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+
+	first := steadyBundle("sys1")
+	first.Templates = []model.Template{{
+		Template: `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`,
+		Count:    5, ModuleID: "nethvoice5", Priority: 6,
+	}}
+	first.Digest = []model.DigestEntry{{ModuleID: "nethvoice5", Priority: 6, Observed: 5}}
+	if err := a.Process(ctx, first); err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+	if stub.Calls != 1 {
+		t.Fatalf("the first window is always novel, got %d calls", stub.Calls)
+	}
+
+	// Same line, second instance, second window.
+	second := first
+	second.Window = model.Window{Start: 100000, End: 100100}
+	second.Templates = []model.Template{{
+		Template: `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`,
+		Count:    5, ModuleID: "nethvoice39", Priority: 6,
+	}}
+	second.Digest = []model.DigestEntry{{ModuleID: "nethvoice39", Priority: 6, Observed: 5}}
+	if err := a.Process(ctx, second); err != nil {
+		t.Fatalf("second window: %v", err)
+	}
+	if stub.Calls != 1 {
+		t.Fatalf("a second instance of a known line bought a call, got %d calls", stub.Calls)
+	}
+
+	rows, err := s.ListTemplates(ctx, "sys1", 0)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one template row for the family, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].ModuleID != "nethvoice" {
+		t.Errorf("stored module must be the family, got %q", rows[0].ModuleID)
+	}
+	if rows[0].TotalCount != 10 {
+		t.Errorf("expected both instances' counts summed, got %d", rows[0].TotalCount)
 	}
 }

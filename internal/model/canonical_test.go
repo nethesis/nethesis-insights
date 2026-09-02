@@ -3,7 +3,10 @@
 
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Every pair below is two real templates taken from the dev fleet on
 // 2026-09-01 that describe one condition. Before canonicalization each pair
@@ -156,5 +159,76 @@ func TestCanonicalKeySeparatesModules(t *testing.T) {
 	}
 	if CanonicalKey("mattermost1", tpl) != CanonicalKey("mattermost1", tpl+" ") {
 		t.Log("trailing whitespace is significant; the collector already trims it")
+	}
+}
+
+// Two instances of one module run the same image, the same version and the
+// same code path, so a line new to one of them is not news about the node.
+// Measured on the 2026-09-02 dump, keying on the instance cost 301 of 678
+// rows.
+func TestCanonicalKeyMergesModuleInstances(t *testing.T) {
+	tpl := `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`
+	if CanonicalKey("nethvoice5", tpl) != CanonicalKey("nethvoice39", tpl) {
+		t.Error("two instances of one module did not share a key")
+	}
+	// A family is not a prefix match: nethvoice-proxy is its own image.
+	if CanonicalKey("nethvoice5", tpl) == CanonicalKey("nethvoice-proxy4", tpl) {
+		t.Error("nethvoice and nethvoice-proxy collided")
+	}
+}
+
+func TestModuleFamily(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"nethvoice5", "nethvoice"},
+		{"nethvoice89", "nethvoice"},
+		{"nethvoice-proxy4", "nethvoice-proxy"},
+		{"mail11", "mail"},
+		{"openldap15", "openldap"},
+		{"nethsecurity-controller", "nethsecurity-controller"},
+		// The host bucket is an ordinary module everywhere else, and here too.
+		{"", ""},
+		// Nothing left to strip: return the id rather than the empty string,
+		// which would merge every such module into the host bucket.
+		{"11", "11"},
+	}
+	for _, tc := range cases {
+		if got := ModuleFamily(tc.in); got != tc.want {
+			t.Errorf("ModuleFamily(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		// store.KnownTemplates re-derives the key from a column that already
+		// holds a family, so this has to be a fixed point.
+		if got := ModuleFamily(ModuleFamily(tc.in)); got != ModuleFamily(tc.in) {
+			t.Errorf("ModuleFamily not idempotent for %q", tc.in)
+		}
+	}
+}
+
+// The NS8 agent's syslog identifier carries the instance -- agent@openldap55 --
+// and the collector's own de-instancing rule misses it because its character
+// class has no '@'. One template occupied 154 of 678 rows on 2026-09-02.
+func TestCanonicalTemplateCollapsesBracketedInstances(t *testing.T) {
+	a := `<4> [agent@openldap15] Signal "user <USER> signal <NUM>" caught: shutdown started.`
+	b := `<4> [agent@openldap55] Signal "user <USER> signal <NUM>" caught: shutdown started.`
+	if CanonicalTemplate(a) != CanonicalTemplate(b) {
+		t.Errorf("instances not collapsed:\n%q\n%q", CanonicalTemplate(a), CanonicalTemplate(b))
+	}
+	if got := CanonicalTemplate(a); !strings.Contains(got, "[agent@openldap]") {
+		t.Errorf("identifier lost its family: %q", got)
+	}
+
+	// The digits have to be the last thing before the ']', which is what keeps
+	// the rule off identifiers whose digits mean something.
+	for _, in := range []string{
+		`<3> [freepbx] [Wed Sep <NUM> <TS> <NUM>] [php7:error] [pid <PID>] boom`,
+		`<3> [nextcloud] request failed`,
+		`<6> [sshd-session] Connection closed by <IP> port <NUM>`,
+		`<6> [systemd-logind] Removed session <NUM>.`,
+	} {
+		if got := CanonicalTemplate(in); got != CanonicalTemplate(got) {
+			t.Errorf("not idempotent: %q -> %q", in, got)
+		}
+	}
+	if got := CanonicalTemplate(`<3> [x] [php7:error] boom`); !strings.Contains(got, "[php7:error]") {
+		t.Errorf("php7:error was rewritten: %q", got)
 	}
 }

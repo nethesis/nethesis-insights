@@ -314,3 +314,45 @@ func TestUnfinishedWindowStaysClaimable(t *testing.T) {
 		t.Fatalf("a window whose attempt failed must remain claimable, or the retry is lost")
 	}
 }
+
+// system_templates stores the module family, so instances of one module share
+// a row and their counts sum. KnownTemplates joins that column back through
+// model.CanonicalKey, so the key the gate looks up has to come out the same.
+func TestUpsertTemplatesStoresTheModuleFamily(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	line := `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`
+
+	if err := s.UpsertTemplates(ctx, "sys1", []model.Template{
+		{Template: line, Count: 3, ModuleID: "nethvoice5", Priority: 6},
+		{Template: line, Count: 7, ModuleID: "nethvoice39", Priority: 6},
+	}, 1000); err != nil {
+		t.Fatalf("UpsertTemplates: %v", err)
+	}
+
+	rows, err := s.ListTemplates(ctx, "sys1", 0)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one row for the family, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].ModuleID != "nethvoice" {
+		t.Errorf("module_id = %q, want the family", rows[0].ModuleID)
+	}
+	if rows[0].TotalCount != 10 {
+		t.Errorf("total_count = %d, want the summed 10", rows[0].TotalCount)
+	}
+
+	known, err := s.KnownTemplates(ctx, "sys1")
+	if err != nil {
+		t.Fatalf("KnownTemplates: %v", err)
+	}
+	// Both instances resolve to the one stored key -- this is the round trip
+	// that makes the second instance of a line non-novel.
+	for _, m := range []string{"nethvoice5", "nethvoice39", "nethvoice"} {
+		if !known[model.CanonicalKey(m, line)] {
+			t.Errorf("%s: stored template did not read back as known", m)
+		}
+	}
+}
