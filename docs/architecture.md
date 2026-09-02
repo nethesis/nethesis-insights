@@ -60,10 +60,12 @@ reason.
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
 threat                      PURE — the Threat Shield sanitizer and allowlist
+sizing                      PURE — the sizing sanitizer, pressure score, cohort keying
 llm  store                  interfaces, each with a real and a stub impl
 budget                      the ceiling under LLM spend; reads the cost ledger
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
+baseline                    fleet-sizing cohort pass; same shape as blocklist
 api                         HTTP: ingest + read, auth via the Authenticator iface
 admin                       HTTP: allowlist admin plane, own listener, off by default
 ui                          HTTP: optional operator dashboard, off by default
@@ -87,7 +89,9 @@ and `ui` does not import `api` or `analyzer`.
 | `internal/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
-| `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `/healthz`. |
+| `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the cohort keying and the `FamilyClass` prior. Owns `PressureVersion`. |
+| `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
+| `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `POST /v1/allowlist-requests`, `POST /v1/sizing-reports`, `/healthz`. |
 | `internal/admin` | The allowlist admin plane: bearer-key auth, the seven `/admin/v1/allowlist*` handlers, on its own listener. A separate package from `internal/api` so the public ingest surface and the admin surface can never accidentally share a route table. |
 | `internal/ui` | Optional, zero-JavaScript operator dashboard on its own listener. `GET` is unauthenticated; an enumerated set of `POST` routes authenticates against `ADMIN_API_KEY`. |
 | `cmd/insightsd` | Reads environment config, wires every package together, runs the consensus ticker, runs graceful shutdown. |
@@ -101,8 +105,18 @@ fixtures, no clock, no I/O. `llm` and `store` being interfaces is what lets
 whether a third party's IP address is stored and published lives there, so a
 bug in it is a data-protection incident rather than a wrong answer.
 
-`internal/blocklist` and `internal/api` each declare their own narrow interface
-over the store (`blocklist.Reader`, `api.ThreatStore`, `api.Feed`) rather than
+`internal/sizing` is pure for both reasons at once. It decides what a sizing
+report is allowed to store — per-customer commercial data, derived from metrics
+that carry identifying labels — and it holds the whole `pressure` formula,
+which is computed **server-side only**: scoring at the edge would make every
+node an uncoordinated second implementation, and then a threshold
+recalibration would need the fleet's cooperation instead of one recompute pass.
+It imports `threat.CleanText` rather than declaring a second free-text
+sanitizer; that is the only edge between the two pure packages.
+
+`internal/blocklist`, `internal/baseline` and `internal/api` each declare their
+own narrow interface over the store (`blocklist.Reader`, `baseline.Reader`,
+`api.ThreatStore`, `api.SizingStore`, `api.Feed`) rather than
 taking `store.Store`, so both stay testable with a small fake and the layering
 stays a DAG. `ui.Feed` does the same for the snapshot's state — `ui` learns how
 many entries are served and when, never the body.
@@ -259,14 +273,117 @@ Before the first successful pass the snapshot is not ready and the handler
 answers `503`. That distinction matters: to a client importing the list, an
 empty body means "no threats" and silently disables protection.
 
+### Sizing ingest: `POST /v1/sizing-reports`
+
+Fleet sizing is a **third independent pipeline**, beside the bundle path and
+Threat Shield. It shares the listener, `internal/auth`, the SQLite file and
+`model.ModuleFamily` — deliberately, because that is already the single
+definition of module identity and a second one would eventually disagree — and
+nothing else: no LLM call, no gate, no fingerprint, no queue.
+
+```
+handleSizingReports
+  ├── authenticate (same forward-auth as /v1/bundles; fail-closed)
+  ├── 413 if Content-Length exceeds 8 MiB (declared over-cap, not truncated)
+  ├── gunzip if Content-Encoding: gzip, capped at 8 MiB
+  ├── decode; 400 on bad JSON or schema_version != model.SizingSchemaVersion
+  ├── 403 if body system_id is present and is not the authenticated system
+  ├── sizing.Sanitize   ← every drop rule, fail-open on content
+  ├── sizing.Evaluate   ← the pressure score, per node-day, server-side only
+  ├── store.UpsertSizingDays      (recompute)
+  ├── store.RecordSizingIngest    (accumulate; a failure never costs the 202)
+  └── 202 with the counters
+```
+
+Three rules are load-bearing:
+
+- **The unit is a cluster-day, and a day is absolute.** `day` is sent
+  explicitly and every value in it is computed over
+  `[day 00:00 UTC, day+1 00:00 UTC)`. That is what makes the reporter's three
+  daily sends byte-identical restatements — the upsert recomputes rather than
+  accumulates, so redelivery is free. A `day` outside `[today-15, today-1]` is
+  rejected: yesterday is the newest complete day, and older than Prometheus'
+  retention cannot have been computed from real data.
+- **`modules[].workload` is an open `string → number` map, and "number" is the
+  entire privacy control.** Open vocabulary for the same reason Threat Shield
+  accepts every scenario. Numbers-only because an FQDN, an IP address, a
+  hostname or a DMI serial cannot be encoded in a float — a stronger guarantee
+  than any field blocklist someone has to maintain. Caps bound shape, never
+  vocabulary, and truncate rather than reject.
+- **A coverage gate precedes the score.** `metrics_present == false`,
+  `sample_coverage < 0.80`, `cpu_cores < 1` or `mem_total_bytes <= 0` yields
+  `pressure = NULL`, not a clamped number: a node that was off for eighteen
+  hours is not a low-pressure node, and a score from missing data is worse than
+  no score. A missing individual input makes its penalty term **absent**, which
+  is not the same as zero.
+
+The contract clients build against is
+`docs/specs/2026-09-02-sizing-ingest-contract.md`; the reasoning is
+`docs/plans/2026-09-02-fleet-sizing-server.md`.
+
+### Cohort pass: `baseline.Runner.Run`
+
+Runs every `SIZING_PASS_INTERVAL` (default 1h — the inputs are whole days, so
+faster cannot produce a different answer), started after the listeners, first
+pass immediately. Same loop as the consensus pass: `cmd/insightsd`'s
+`runPassLoop` takes an `interface{ Run(context.Context, int64) error }`, which
+both runners satisfy.
+
+```
+1. recompute pressure where pressure_version is stale (bounded batch)
+2. recompute node verdicts over the trailing SIZING_WINDOW_DAYS
+3. recompute cluster imbalance for multi-node clusters
+4. build cohorts: per-node reduction, then across-node percentiles, applying
+   and counting the censoring / coverage / hardware-change exclusions
+5. upsert the baselines and workload buckets that clear the floor
+6. DELETE the cohorts and buckets that no longer clear it
+7. RollupSizingMonthly          housekeeping: logged, never fatal
+8. PruneSizingDaily             only if 7 succeeded
+```
+
+Two orderings must not move. **1 before 4**, or a `pressure_version` bump
+publishes a baseline mixing two score definitions. **7 before 8**, or the day
+being dropped loses its history permanently — the same constraint, and the same
+reason, as `RollupThreatDailyStats` before `PruneThreatEvents`. Steps 2, 3 and 4
+all read one `SizingWindow` query, because a second query would be a second
+chance for them to disagree.
+
+The correctness of the pass is in three places:
+
+- **Censoring.** An undersized node's memory demand is capped by the memory it
+  has: a node needing 12 GiB but holding 8 reports ~7.6 GiB. Feeding that into
+  an estimator of "how much RAM does a mail node need" biases the answer *down*,
+  which then declares more nodes adequately sized — the exact inverse of the
+  feature's purpose. That is systematic bias, not noise, so censored nodes are
+  excluded from the percentiles and **published as `censored_nodes`**. Nodes are
+  not excluded for being unhealthy in general, and disk-bound nodes stay in:
+  "what a healthy node uses", derived by deleting the unhealthy ones, is
+  survivorship bias with extra steps.
+- **Two-stage aggregation.** Each node is reduced to the p90 across its daily
+  `ram_used_bytes_p95` (p90, not the median: a 28-day window holds eight weekend
+  days on which a business workload is idle) and only then do percentiles run
+  across nodes. Without it, always-online nodes and one MSP's forty identical
+  clusters dominate every published number.
+- **The floor counts distinct `system_id`**, the same rule and the same reason as
+  Threat Shield's promotion, and a cohort that falls below it is **deleted**
+  rather than left stale — mirroring `ExpireBlocklist`.
+
+`pressure`'s versioning deliberately diverges from `fingerprint.Version`. A
+fingerprint is an identity and is never backfilled, because the point of a bump
+is that the change is visible. `pressure` is a derived analytic over inputs that
+are all stored as first-class columns, so leaving 100 days of mixed-definition
+scores would make every trailing verdict wrong and every cohort statistic
+incomparable — hence step 1.
+
 ### Operator UI
 
 `internal/ui` is a second, independent HTTP server on its own listener
 (`UI_LISTEN_ADDR`, off by default). It depends only on `model` and `store`
 (through a local `Reader` interface) plus a local `Runtime` interface
 (`Depth`/`Cap`, satisfied by `*queue.Queue`) and a local `Feed` interface
-(satisfied by `*blocklist.Snapshot`) for live process state. It never imports
-`api`, `analyzer` or `blocklist`, and it never writes. See `README.md` §
+(satisfied by `*blocklist.Snapshot`) for live process state, plus
+`internal/sizing` for the score's threshold table and its constants. It never
+imports `api`, `analyzer`, `blocklist` or `baseline`. See `README.md` §
 "Operator UI" for routes and exposure guidance, and the "what is a finding /
 template / baseline" explanations in `docs/user-guide.md`.
 
@@ -289,10 +406,38 @@ without a goroutine to leak.
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. No HTTP surface — this server has no admin auth plane. |
 | `threat_daily_stats` | Per day and scenario rollup, written before the prune so the trend outlives the raw events. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
+| `sizing_node_daily` | One node-day of measurements plus the derived `pressure`, its four axis penalties, `pressure_reasons` and `pressure_version`. Keyed `(system_id, node_id, day)` — a `system_id` is a *cluster*, so one report writes N rows. Every measurement column is nullable and `NULL` means **not measured**, never zero. |
+| `sizing_module_daily` | One module family per node-day: `instances`, `facts_ok`, and a display-only `versions` JSON array. |
+| `sizing_module_metric` | The open workload map, **normalised to rows** so the cohort pass groups it in SQL. A JSON blob would force ~1.4M rows through the single-writer connection and a JSON parse each, hourly. |
+| `sizing_cluster_daily` | Cluster-wide counters belonging to no single node — the summed `user_domains` totals from `cluster/get-facts`. |
+| `sizing_node` | The `(system_id, node_id)` dimension, and the fix for unstable node identity: `hw_changed_at` records when installed capacity last changed under a stable id, which is how the cohort pass excludes a node whose percentiles would straddle two physical machines. |
+| `sizing_ingest_daily` | Per day and cluster ingest accounting. The one sizing table that **accumulates**. |
+| `sizing_node_monthly` | Monthly rollup, `month TEXT 'YYYY-MM'`, kept indefinitely so history survives `SIZING_RETENTION`. |
+| `sizing_node_verdict` | The multi-day verdict per node, plus its cluster's placement answer denormalised onto every node of that cluster so one query renders the page. |
+| `sizing_cohort_baseline` | Published baselines per `(cohort_kind, cohort_key)` — absolute bytes and cores, with `censored_nodes` alongside. |
+| `sizing_workload_bucket` | Deterministic t-shirt sizes per `(module_family, metric, bucket)`. `hi` is `NULL` on the top bucket. |
 
 `attacker_ip` is stored as a normalized `netip.Addr.String()`, so text equality
 is address identity — that is what lets a portable `TEXT` column stand in for
 Postgres `INET`.
+
+The two day keys differ on purpose. `threat_daily_stats` uses `day TEXT
+'YYYY-MM-DD'`; every `sizing_*` daily table uses `day INTEGER`, a UTC day index
+(`unix_millis / 86400000`). `threat_daily_stats` is a display rollup read whole,
+while the sizing tables are range-queried constantly (a 28-day verdict window, a
+90-day UI, a prune below a cutoff) — an integer index does all three with the
+arithmetic this codebase already performs, and removes the bug class where a
+formatter with the wrong location writes two rows for one day. The monthly
+rollup goes back the other way (`month TEXT`) because nothing does arithmetic on
+months. The `sizing_*` tables also carry **no surrogate ULID**: the project bans
+`AUTOINCREMENT`/`SERIAL` but does not mandate a surrogate, and
+`threat_daily_stats` already uses a bare composite primary key.
+
+Two upsert idioms coexist in the sizing tables and the difference is
+load-bearing: the measurement tables **recompute** (a day is an absolute fact,
+so a reporter's second and third daily sends are byte-identical restatements)
+and `sizing_ingest_daily` **accumulates** (its counters count requests). Each
+table's DDL says which it is, because mixing them would be silent.
 
 Schema portability rules (SQLite today, Postgres later — see `CLAUDE.md` §
 Invariants) apply to every table: ULIDs generated in Go rather than

@@ -26,6 +26,17 @@ var funcMap = template.FuncMap{
 	"join":          strings.Join,
 	"reasonsOrNone": ReasonsOrNone,
 	"moduleLabel":   ModuleLabel,
+
+	// Fleet sizing.
+	"fmtDay":        FmtDay,
+	"fmtBytes":      FmtBytes,
+	"fmtBytesInt":   FmtBytesInt,
+	"fmtFracVal":    FmtFracVal,
+	"fmtOptBytes":   FmtOptBytes,
+	"fmtFrac":       FmtFrac,
+	"fmtNum":        FmtNum,
+	"fmtPressure":   FmtPressure,
+	"pressureClass": PressureClass,
 }
 
 // FmtTime renders a unix-millis timestamp as an ISO-8601-ish UTC string. A
@@ -180,4 +191,103 @@ func BuildInfo() string {
 		return info.Main.Version
 	}
 	return "unknown"
+}
+
+// --- fleet sizing ---
+
+// FmtDay renders a UTC day index (the sizing pipeline's day key) as its
+// "YYYY-MM-DD" label. Sizing stores an integer day index rather than a
+// formatted string, so this is the one place that turns one into the other for
+// display -- in Go, never in SQL.
+func FmtDay(day int64) string {
+	if day == 0 {
+		return "—"
+	}
+	return time.UnixMilli(day * 86_400_000).UTC().Format("2006-01-02")
+}
+
+// FmtBytes renders a byte count in binary units. Sizing publishes absolute
+// bytes rather than utilization, because utilization is a property of hardware
+// someone happened to buy and the deliverable is advice on what to buy -- so
+// these numbers are read directly by a human deciding what to order.
+func FmtBytes(v float64) string {
+	if v <= 0 {
+		return "—"
+	}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", v, units[i])
+}
+
+// FmtBytesInt is FmtBytes for an installed-capacity column, which is an
+// INTEGER byte count rather than a measured REAL.
+func FmtBytesInt(v int64) string {
+	return FmtBytes(float64(v))
+}
+
+// FmtFracVal is FmtFrac for a non-optional fraction (sample coverage, which
+// is always present -- an absent coverage is stored as 0 and fails the gate).
+func FmtFracVal(v float64) string {
+	return FmtFrac(&v)
+}
+
+// FmtOptBytes is FmtBytes for a measurement that may be absent. An em dash
+// means "not measured", which is never the same as zero.
+func FmtOptBytes(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return FmtBytes(*v)
+}
+
+// FmtFrac renders a 0..1 fraction as a whole percent. nil renders as an em
+// dash: a missing measurement is not 0 %.
+func FmtFrac(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", *v*100)
+}
+
+// FmtNum renders an optional number with two decimals, trimming a trailing
+// ".00" so integral counts read as integers.
+func FmtNum(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	s := fmt.Sprintf("%.2f", *v)
+	return strings.TrimSuffix(s, ".00")
+}
+
+// FmtPressure renders a pressure value. nil is not "0": it means the coverage
+// gate refused to score, and a node that was switched off for eighteen hours
+// is not a low-pressure node.
+func FmtPressure(v *float64) string {
+	if v == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.0f", *v)
+}
+
+// PressureClass maps a pressure onto a Pico-friendly severity word, for the
+// row highlight. The direction is fixed and asserted in a test: 0 is no
+// pressure, 100 is severe.
+func PressureClass(v *float64) string {
+	switch {
+	case v == nil:
+		return "unscored"
+	case *v >= 50:
+		return "severe"
+	case *v >= 25:
+		return "elevated"
+	default:
+		return "calm"
+	}
 }

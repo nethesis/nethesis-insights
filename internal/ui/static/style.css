@@ -87,3 +87,25 @@ nav details.dropdown > summary.active {
 .pill[data-status="skipped"] {
   color: var(--pico-muted-color);
 }
+
+/* Fleet sizing. Pressure has a fixed direction -- 0 is no pressure, 100 is
+   severe -- and these four values are the only places that direction is
+   rendered as colour, so an inverted comparison would be visible at a
+   glance. Reuses the same hues as the finding severities above rather than
+   inventing a second scale for the same idea. */
+.pill[data-pressure="severe"]   { color: var(--pico-del-color); }
+.pill[data-pressure="elevated"] { color: var(--sev-medium); }
+.pill[data-pressure="calm"]     { color: var(--pico-ins-color); }
+.pill[data-pressure="unscored"] { color: var(--pico-muted-color); }
+
+.pill[data-verdict="undersized"]        { color: var(--pico-del-color); }
+.pill[data-verdict="at_risk"]           { color: var(--sev-medium); }
+.pill[data-verdict="ok"]                { color: var(--pico-ins-color); }
+.pill[data-verdict="insufficient_data"] { color: var(--pico-muted-color); }
+
+/* A threshold's provenance. "guess" is deliberately the loudest of the
+   three: a dashboard that renders an uncalibrated number with no label
+   attached is presenting a guess as advice. */
+.pill[data-basis="guess"]      { color: var(--sev-high); }
+.pill[data-basis="convention"] { color: var(--pico-muted-color); }
+.pill[data-basis="physical"]   { color: var(--pico-ins-color); }

@@ -122,6 +122,35 @@ type Store interface {
 	DeleteAllowlistRequests(ctx context.Context, cidr string) (removed int, err error)
 	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 	ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error)
+
+	// Fleet sizing: ingest (internal/api), the cohort pass (internal/baseline)
+	// and the two operator UI pages. A third pipeline sharing this file, the
+	// listener and the Authenticator with the two above and nothing else --
+	// no LLM call, no gate, no fingerprint, no queue. See
+	// docs/specs/2026-09-02-sizing-ingest-contract.md.
+	UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []SizingDayRows, now int64) (stored int, err error)
+	RecordSizingIngest(ctx context.Context, day int64, systemID, reporterVersion string, c model.SizingCounters, now int64) error
+	StaleSizingScores(ctx context.Context, version, limit int) ([]SizingNodeDayRow, error)
+	UpdateSizingScores(ctx context.Context, rows []SizingNodeDayRow) error
+	SizingWindow(ctx context.Context, fromDay, toDay int64) ([]SizingWindowRow, error)
+	SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) ([]SizingNodeFamilyRow, error)
+	SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) ([]SizingFamilyMetricRow, error)
+	SizingVerdictStates(ctx context.Context) (map[string]string, error)
+	UpsertSizingVerdicts(ctx context.Context, rows []SizingVerdictRow) error
+	UpsertSizingCohorts(ctx context.Context, rows []SizingCohortRow) error
+	DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error)
+	UpsertSizingBuckets(ctx context.Context, rows []SizingBucketRow) error
+	DeleteStaleSizingBuckets(ctx context.Context, before int64) (int, error)
+	RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error
+	PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error)
+
+	// Fleet sizing cross-system reads for the operator UI.
+	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]SizingNodeUIRow, error)
+	ListSizingModules(ctx context.Context, systemID string, limit int) ([]SizingModuleUIRow, error)
+	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]SizingCohortRow, error)
+	ListSizingBuckets(ctx context.Context, limit int) ([]SizingBucketRow, error)
+	SizingIngestStats(ctx context.Context, limit int) ([]SizingIngestRow, error)
+	SizingCounts(ctx context.Context) (SizingCounts, error)
 }
 
 type SQLiteStore struct {
@@ -344,6 +373,276 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			detail TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_allowlist_audit_at ON threat_allowlist_audit(at)`,
+
+		// --- Fleet sizing ---
+		//
+		// A third pipeline, sharing this file, the listener and the
+		// Authenticator with the two above and nothing else: no LLM call, no
+		// gate, no fingerprint, no queue. The contract is
+		// docs/specs/2026-09-02-sizing-ingest-contract.md.
+		//
+		// Two conventions run through every table here.
+		//
+		// `day` is an INTEGER **UTC day index** (unix millis / 86400000), NOT
+		// the TEXT 'YYYY-MM-DD' that threat_daily_stats uses. The divergence
+		// is deliberate: threat_daily_stats is a display rollup read whole,
+		// while these tables are range-queried constantly (a 28-day verdict
+		// window, a 90-day UI, a prune below a cutoff). An integer index does
+		// all three with the arithmetic this codebase already performs, and
+		// it removes the bug class where a formatter with the wrong location
+		// writes two rows for one day. The monthly rollup goes the other way
+		// -- month TEXT 'YYYY-MM' -- because nothing does arithmetic on
+		// months.
+		//
+		// There are **no surrogate ULIDs** on these tables. The project bans
+		// AUTOINCREMENT/SERIAL; it does not mandate a surrogate, and
+		// threat_daily_stats already uses a bare composite PK. Said out loud
+		// here because a reader will otherwise over-apply the rule.
+		//
+		// One node-day of measurements, keyed (system_id, node_id, day). A
+		// system_id is a *cluster*, so one report carries N of these rows.
+		//
+		// Every measurement column is nullable, and NULL means "not
+		// measured" -- never zero. A zero says "measured, and fine", which is
+		// the opposite. pressure is NULL whenever the coverage gate refused
+		// to score, because a score derived from missing data is worse than
+		// no score.
+		//
+		// UPSERT IDIOM: **recompute**. A day is an absolute fact, so the
+		// second and third daily sends are byte-identical restatements and
+		// must overwrite rather than accumulate. sizing_ingest_daily below is
+		// the one table here that accumulates; mixing the two silently is
+		// exactly why each is commented.
+		`CREATE TABLE IF NOT EXISTS sizing_node_daily (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			received_at INTEGER,
+			reporter_version TEXT,
+			metrics_present INTEGER,
+			sample_coverage REAL,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			cpu_model TEXT,
+			os_id TEXT,
+			os_version TEXT,
+			kernel_release TEXT,
+			virtualization TEXT,
+			ram_util_p95 REAL,
+			ram_used_bytes_p95 REAL,
+			cpu_util_p95 REAL,
+			cpu_cores_used_p95 REAL,
+			load15_per_core_p95 REAL,
+			fs_used_frac_max REAL,
+			fs_days_to_full REAL,
+			disk_io_util_p95 REAL,
+			iowait_busy_frac REAL,
+			swapin_pps_p95 REAL,
+			oom_kills REAL,
+			reboots REAL,
+			pressure REAL,
+			p_mem REAL,
+			p_cpu REAL,
+			p_io REAL,
+			p_disk REAL,
+			pressure_top_axis TEXT,
+			pressure_reasons TEXT,
+			pressure_version INTEGER,
+			oom_suspect INTEGER,
+			PRIMARY KEY (system_id, node_id, day)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_node_daily_day ON sizing_node_daily(day)`,
+		// So a pressure_version bump can find the rows it has to recompute
+		// without a full scan of 100 days of node-days.
+		`CREATE INDEX IF NOT EXISTS idx_sizing_node_daily_version
+			ON sizing_node_daily(pressure_version, day)`,
+		// One module family per node-day. module_family is the family
+		// (model.ModuleFamily), never the instance. versions is JSON TEXT and
+		// display-only -- a version is not extensive, so it is never a
+		// workload metric and never a cohort key. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_module_daily (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			module_family TEXT,
+			instances INTEGER,
+			facts_ok INTEGER,
+			versions TEXT,
+			PRIMARY KEY (system_id, node_id, day, module_family)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_daily_day ON sizing_module_daily(day)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_daily_family
+			ON sizing_module_daily(module_family, day)`,
+		// The open workload map, NORMALISED TO ROWS rather than stored as a
+		// JSON blob. The project forbids json1/jsonb, so a blob would force
+		// the cohort pass to pull ~1.4M rows through a SetMaxOpenConns(1)
+		// connection and JSON-parse each one, hourly. The threat precedent
+		// parses JSON in Go for *display* fields only and groups in SQL,
+		// because the grouping is the correctness. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_module_metric (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			module_family TEXT,
+			metric TEXT,
+			value REAL,
+			PRIMARY KEY (system_id, node_id, day, module_family, metric)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_metric_day ON sizing_module_metric(day)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_metric_family
+			ON sizing_module_metric(module_family, metric, day)`,
+		// Cluster-wide counters that belong to no single node: the summed
+		// user_domains totals from cluster/get-facts. openldap has no
+		// get-facts of its own and needs none, so this is where its workload
+		// lives. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_cluster_daily (
+			system_id TEXT,
+			day INTEGER,
+			metric TEXT,
+			value REAL,
+			PRIMARY KEY (system_id, day, metric)
+		)`,
+		// The node dimension, and the fix for the unstable-identity problem:
+		// `node` is a small integer scoped to a cluster, so a rebuilt cluster
+		// reuses system_id with fresh ids and a replaced machine keeps its id
+		// with different hardware. hw_changed_at is when the installed
+		// capacity last changed under a stable (system_id, node_id) -- the
+		// cohort pass excludes nodes whose hardware changed inside its
+		// window, because those percentiles straddle two physical machines.
+		`CREATE TABLE IF NOT EXISTS sizing_node (
+			system_id TEXT,
+			node_id INTEGER,
+			first_seen INTEGER,
+			last_seen INTEGER,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			hw_changed_at INTEGER,
+			PRIMARY KEY (system_id, node_id)
+		)`,
+		// Per-rule drop accounting, one row per (day, system_id).
+		//
+		// UPSERT IDIOM: **accumulate** -- the opposite of every other sizing
+		// table. A day posted three times is one set of measurements and
+		// three requests' worth of counters, and that difference is what
+		// makes "this cluster sends but stores nothing, and here is the rule
+		// dropping it" answerable from the UI instead of from logs. There is
+		// a test asserting both halves.
+		`CREATE TABLE IF NOT EXISTS sizing_ingest_daily (
+			day INTEGER,
+			system_id TEXT,
+			reports INTEGER,
+			last_report_at INTEGER,
+			reporter_version TEXT,
+			accepted_nodes INTEGER,
+			accepted_modules INTEGER,
+			accepted_metrics INTEGER,
+			dropped_day INTEGER,
+			dropped_duplicate INTEGER,
+			dropped_node INTEGER,
+			dropped_family INTEGER,
+			dropped_metric_key INTEGER,
+			dropped_metric_value INTEGER,
+			dropped_resource_value INTEGER,
+			truncated_days INTEGER,
+			truncated_nodes INTEGER,
+			truncated_families INTEGER,
+			truncated_metrics INTEGER,
+			PRIMARY KEY (day, system_id)
+		)`,
+		// Monthly rollup, kept indefinitely (~49k rows/yr) so the fleet keeps
+		// a history after sizing_node_daily is pruned at SIZING_RETENTION.
+		// month is TEXT 'YYYY-MM': nothing does arithmetic on months, and the
+		// aggregates are computed in SQL over an explicit day range whose
+		// bounds Go supplies -- SQLite and Postgres share no date function.
+		//
+		// Every column names its own composition (pressure_max, not
+		// pressure): load15_avg holding a peak is exactly the bug this
+		// convention prevents.
+		`CREATE TABLE IF NOT EXISTS sizing_node_monthly (
+			system_id TEXT,
+			node_id INTEGER,
+			month TEXT,
+			days_present INTEGER,
+			days_scored INTEGER,
+			bad_days INTEGER,
+			pressure_avg REAL,
+			pressure_max REAL,
+			ram_util_p95_max REAL,
+			ram_used_bytes_p95_max REAL,
+			cpu_util_p95_max REAL,
+			cpu_cores_used_p95_max REAL,
+			fs_used_frac_max_max REAL,
+			oom_kills_total REAL,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			PRIMARY KEY (system_id, node_id, month)
+		)`,
+		// The multi-day verdict. cluster_* is denormalised onto every node of
+		// a cluster on purpose, so one query renders the page; placement is
+		// "rebalance" or "balanced" and is empty for a single-node cluster,
+		// which has no placement answer at all.
+		`CREATE TABLE IF NOT EXISTS sizing_node_verdict (
+			system_id TEXT,
+			node_id INTEGER,
+			verdict TEXT,
+			top_axis TEXT,
+			days_present INTEGER,
+			bad_days INTEGER,
+			risk_days INTEGER,
+			window_days INTEGER,
+			cluster_nodes INTEGER,
+			cluster_ram_util_spread REAL,
+			placement TEXT,
+			updated_at INTEGER,
+			PRIMARY KEY (system_id, node_id)
+		)`,
+		// Published cohort baselines. Absolute bytes and cores, not
+		// utilization: utilization is a property of hardware someone happened
+		// to buy, and the deliverable is advice on what to buy.
+		// installed_ram_* sits alongside so the residual bias (MemTotal -
+		// MemAvailable scales mildly with installed RAM) is visible rather
+		// than hidden, and censored_nodes is published rather than swallowed
+		// -- a cohort that is 40 % censored is the most valuable finding this
+		// pass can produce.
+		`CREATE TABLE IF NOT EXISTS sizing_cohort_baseline (
+			cohort_kind TEXT,
+			cohort_key TEXT,
+			nodes INTEGER,
+			distinct_systems INTEGER,
+			censored_nodes INTEGER,
+			ram_used_p50 REAL,
+			ram_used_p75 REAL,
+			ram_used_p90 REAL,
+			cpu_cores_used_p50 REAL,
+			cpu_cores_used_p75 REAL,
+			cpu_cores_used_p90 REAL,
+			installed_ram_p50 REAL,
+			installed_ram_p90 REAL,
+			installed_cores_p50 REAL,
+			installed_cores_p90 REAL,
+			window_days INTEGER,
+			min_distinct_systems INTEGER,
+			min_nodes INTEGER,
+			pressure_version INTEGER,
+			updated_at INTEGER,
+			PRIMARY KEY (cohort_kind, cohort_key)
+		)`,
+		// Deterministic t-shirt sizes per (family, metric). Quantile
+		// bucketing, never k-means: it gives the same sizes and it is stable
+		// run to run, which a number published to customers has to be. hi is
+		// NULL on the top bucket -- a finite ceiling there would silently
+		// drop the largest deployment.
+		`CREATE TABLE IF NOT EXISTS sizing_workload_bucket (
+			module_family TEXT,
+			metric TEXT,
+			bucket TEXT,
+			lo REAL,
+			hi REAL,
+			nodes INTEGER,
+			ram_bytes_median REAL,
+			updated_at INTEGER,
+			PRIMARY KEY (module_family, metric, bucket)
+		)`,
 	}
 
 	for _, stmt := range stmts {

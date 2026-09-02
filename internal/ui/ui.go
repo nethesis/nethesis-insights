@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
@@ -70,6 +71,18 @@ type Reader interface {
 	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
 	ListThreatSystems(ctx context.Context) ([]store.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
+
+	// Fleet sizing -- the third pipeline's two pages. These rows carry
+	// per-customer commercial data (mailbox and PBX user counts, product
+	// mix), so the loopback-bind advice that applies to every page here
+	// applies to them too, recorded explicitly rather than inherited by
+	// accident.
+	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]store.SizingNodeUIRow, error)
+	ListSizingModules(ctx context.Context, systemID string, limit int) ([]store.SizingModuleUIRow, error)
+	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]store.SizingCohortRow, error)
+	ListSizingBuckets(ctx context.Context, limit int) ([]store.SizingBucketRow, error)
+	SizingIngestStats(ctx context.Context, limit int) ([]store.SizingIngestRow, error)
+	SizingCounts(ctx context.Context) (store.SizingCounts, error)
 
 	// PendingAllowlistRequests backs the /allowlist-requests review queue.
 	// This is a read: the queue is visible to anyone who can reach this
@@ -143,6 +156,11 @@ const (
 	threatEventsDefLim = 50
 	threatEventsMaxLim = 500
 	threatStatsLimit   = 200
+	sizingNodesLimit   = 500
+	sizingModulesLimit = 2000
+	sizingCohortsLimit = 500
+	sizingBucketsLimit = 500
+	sizingIngestLimit  = 200
 )
 
 type navPage struct {
@@ -175,6 +193,10 @@ var navGroups = []navGroup{
 		{"threat-events", "/threat-events", "Threat events"},
 		{"threat-stats", "/threat-stats", "Threat stats"},
 		{"allowlist-requests", "/allowlist-requests", "Allowlist requests"},
+	}},
+	{"Sizing Pipeline", []navPage{
+		{"sizing", "/sizing", "Nodes"},
+		{"cohorts", "/cohorts", "Cohorts"},
 	}},
 }
 
@@ -262,6 +284,7 @@ var pages = []string{
 	"gate.html", "cost.html", "templates.html", "baselines.html",
 	"blocklist.html", "threat-systems.html", "threat-events.html", "threat-stats.html",
 	"allowlist-requests.html",
+	"sizing.html", "cohorts.html",
 }
 
 func parseTemplates() map[string]*template.Template {
@@ -351,6 +374,10 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleThreatStats(w, r)
 	case "/allowlist-requests":
 		s.handleAllowlistRequests(w, r)
+	case "/sizing":
+		s.handleSizing(w, r)
+	case "/cohorts":
+		s.handleCohorts(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and
@@ -1232,4 +1259,138 @@ func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"status", rec.status,
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
+}
+
+// --- Fleet sizing pages ---
+
+type sizingPageData struct {
+	pageData
+	Counts     store.SizingCounts
+	Nodes      []store.SizingNodeUIRow
+	Modules    []store.SizingModuleUIRow
+	Ingest     []store.SizingIngestRow
+	Thresholds []sizing.Threshold
+	Version    int
+	System     string
+}
+
+// handleSizing is the sizing pipeline's node view: one row per node, showing
+// its most recent day's utilization percentiles, the per-axis penalties, the
+// pressure they combine into and the multi-day verdict.
+//
+// The threshold table is on the page deliberately. Most of the score's knees
+// are guesses awaiting calibration against ~30 days of fleet data, and a
+// dashboard that renders a guess with no label attached is presenting it as
+// advice. See sizing.Thresholds.
+func (s *server) handleSizing(w http.ResponseWriter, r *http.Request) {
+	systemID := r.URL.Query().Get("system")
+
+	counts, err := s.reader.SizingCounts(r.Context())
+	if err != nil {
+		s.storeError(w, "sizing", err)
+		return
+	}
+	nodes, err := s.reader.ListSizingNodes(r.Context(), systemID, sizingNodesLimit)
+	if err != nil {
+		s.storeError(w, "sizing", err)
+		return
+	}
+	modules, err := s.reader.ListSizingModules(r.Context(), systemID, sizingModulesLimit)
+	if err != nil {
+		s.storeError(w, "sizing", err)
+		return
+	}
+	ingest, err := s.reader.SizingIngestStats(r.Context(), sizingIngestLimit)
+	if err != nil {
+		s.storeError(w, "sizing", err)
+		return
+	}
+
+	s.render(w, "sizing.html", sizingPageData{
+		pageData:   s.newPageData(r, "sizing"),
+		Counts:     counts,
+		Nodes:      nodes,
+		Modules:    modules,
+		Ingest:     ingest,
+		Thresholds: sizing.Thresholds(),
+		Version:    sizing.PressureVersion,
+		System:     systemID,
+	})
+}
+
+type cohortGroup struct {
+	Kind    string
+	Label   string
+	Caption string
+	Rows    []store.SizingCohortRow
+}
+
+type cohortsPageData struct {
+	pageData
+	Groups  []cohortGroup
+	Buckets []store.SizingBucketRow
+	Floors  struct {
+		DistinctSystems int
+		Nodes           int
+	}
+	CensorRAMUtil float64
+	Empty         bool
+}
+
+// handleCohorts shows the published baselines.
+//
+// An empty page is the **correct** output for a fleet below the floor, not a
+// bug: publishing a percentile computed from three nodes would be worse than
+// publishing nothing, and this pipeline's "never serve blank" is the other way
+// round from Threat Shield's for exactly that reason.
+//
+// Every group carries a caption saying what its numbers can and cannot be used
+// for, because the difference matters: `family` is co-tenanted with whatever
+// else happened to be installed and only `family_solo` is safe to quote as a
+// recommendation. And per-module cost is never *measured* by this stack -- it
+// can only be inferred from variation across nodes -- so the page must not read
+// as though it were.
+func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
+	cohorts, err := s.reader.ListSizingCohorts(r.Context(), "", sizingCohortsLimit)
+	if err != nil {
+		s.storeError(w, "cohorts", err)
+		return
+	}
+	buckets, err := s.reader.ListSizingBuckets(r.Context(), sizingBucketsLimit)
+	if err != nil {
+		s.storeError(w, "cohorts", err)
+		return
+	}
+
+	groups := []cohortGroup{
+		{Kind: sizing.CohortFamilySolo, Label: "Solo baselines",
+			Caption: "Nodes running only this module family plus lite modules. The only group safe to quote as a recommendation."},
+		{Kind: sizing.CohortFamily, Label: "Co-tenanted baselines",
+			Caption: "Every node that runs this family, alongside whatever else happens to be installed. Not a per-module cost."},
+		{Kind: sizing.CohortProfile, Label: "Deployment profiles",
+			Caption: "Keyed on the sorted non-lite family list. The long tail never clears the floor, which is intended."},
+	}
+	for i := range groups {
+		for _, c := range cohorts {
+			if c.CohortKind == groups[i].Kind {
+				groups[i].Rows = append(groups[i].Rows, c)
+			}
+		}
+	}
+
+	data := cohortsPageData{
+		pageData:      s.newPageData(r, "cohorts"),
+		Groups:        groups,
+		Buckets:       buckets,
+		CensorRAMUtil: sizing.CensorRAMUtil,
+		Empty:         len(cohorts) == 0,
+	}
+	// The floor is a property of the pass, not of this page; it is echoed
+	// from whichever cohort published so the page never states a floor the
+	// running configuration does not use.
+	if len(cohorts) > 0 {
+		data.Floors.DistinctSystems = cohorts[0].MinDistinctSystems
+		data.Floors.Nodes = cohorts[0].MinNodes
+	}
+	s.render(w, "cohorts.html", data)
 }

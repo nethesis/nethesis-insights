@@ -562,6 +562,190 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
+  /v1/sizing-reports:
+    servers:
+      - url: https://insights.nethesis.it
+      - url: http://localhost:9595
+    post:
+      operationId: postSizingReports
+      tags: [sizing]
+      summary: Report one cluster's complete-day workload and performance metrics
+      description: |
+        An NS8 cluster **leader** posts one report per complete UTC day, one
+        entry per node in the cluster. Fleet sizing is a third pipeline beside
+        the log-bundle path and Threat Shield, sharing only this listener, the
+        forward-auth `Authenticator`, the SQLite file and `model.ModuleFamily`:
+        no LLM call, no gate, no fingerprint, no queue.
+
+        **The unit is a cluster-day, and a day is absolute.** One `system_id`
+        is a *cluster*, so the storage key is `(system_id, node_id, day)`.
+        `day` is sent explicitly as `YYYY-MM-DD` and every value in it must be
+        computed over the absolute range `[day 00:00 UTC, day+1 00:00 UTC)` --
+        never a relative `[24h]` window. That is what makes the three
+        daily sends byte-identical restatements: the upsert **recomputes** the
+        measurement rows rather than accumulating into them, so a retry after a
+        network failure costs nothing. A `day` outside `[today-15, today-1]`
+        is rejected and counted: yesterday is the newest complete day, and
+        anything older than Prometheus' 15-day retention cannot have been
+        computed from real data.
+
+        **`modules[].workload` is an open `string -> number` map, and "number"
+        is the entire privacy control.** Open vocabulary for the same reason
+        Threat Shield accepts every CrowdSec scenario -- the NS8 module set
+        grows continuously, and a typed column per product would silently
+        discard every new product's metric until a server release. Numbers-only
+        because an FQDN, an IP address, a hostname or a DMI serial cannot be
+        encoded in a float, which is a stronger guarantee than any field
+        blocklist somebody has to maintain. Values must be finite,
+        non-negative and *extensive* (summable across instances of a family).
+
+        **Ingest is fail-closed on authentication and fail-open on content**: a
+        malformed node, family or metric is dropped and counted, the rest of
+        the report is stored. A cluster with one broken module must not lose the
+        other fifteen.
+
+        **`metrics_present: false` is a supported degraded report** --
+        Prometheus unreachable, or the metrics module removed. Send hardware, OS
+        and the module inventory anyway: it still answers "what is deployed on
+        what hardware", and dropping it would bias the fleet view toward
+        metrics-healthy clusters. Such a node stores with no pressure.
+
+        Never send `node_uname_info{nodename}`, `ns8_node_info{fqdn}`,
+        `ns8_node_main_ip_address{address}`, a DMI `serial` or a
+        `board_asset_tag`. The only free text accepted anywhere in the payload
+        is `cpu_model`, `os_id`, `os_version`, `kernel_release`,
+        `virtualization` and `versions[]`.
+
+        Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
+        after decompression, at most `SIZING_MAX_NODES_PER_REPORT` nodes
+        (default 16) per day and 15 days per report -- all truncating and
+        counting rather than rejecting.
+
+        The full contract, including the fixed `resources` / `stress`
+        vocabulary and its units, is
+        `docs/specs/2026-09-02-sizing-ingest-contract.md`.
+      security:
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SizingReport"
+            example:
+              schema_version: 1
+              system_id: <system_id>
+              reporter_version: 1.0.0
+              days:
+                - day: "2026-09-01"
+                  nodes:
+                    - node_id: 1
+                      metrics_present: true
+                      sample_coverage: 0.998
+                      hardware:
+                        cpu_cores: 4
+                        mem_total_bytes: 8054087680
+                        cpu_model: AMD EPYC 7282 16-Core Processor
+                        os_id: rocky
+                        os_version: "9.4"
+                        kernel_release: 5.14.0-427.el9.x86_64
+                        virtualization: kvm
+                      resources:
+                        ram_util_p95: 0.41
+                        ram_used_bytes_p95: 3300000000
+                        cpu_util_p95: 0.12
+                        cpu_cores_used_p95: 0.48
+                        load15_per_core_p95: 0.31
+                        fs_used_frac_max: 0.62
+                        fs_days_to_full: 412
+                        disk_io_util_p95: 0.03
+                      stress:
+                        iowait_busy_frac: 0.01
+                        swapin_pps_p95: 0
+                        oom_kills: 0
+                        reboots: 0
+                      modules:
+                        - family: nethvoice
+                          instances: 2
+                          facts_ok: 2
+                          versions: ["1.4.2"]
+                          workload: { users: 130, trunks: 4, queues: 6 }
+                  cluster:
+                    user_domains:
+                      - { total_users: 210, total_groups: 18, active_users: 190 }
+      responses:
+        "202":
+          description: >-
+            Accepted, always, unless the request was rejected outright --
+            including when every node in the report was dropped. The counters
+            are the way a reporter (and the operator UI) sees why. They
+            **accumulate** per day, unlike the measurement rows, which
+            recompute: three sends of one day show three reports and exactly
+            one set of measurements.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SizingIngestResponse"
+              example:
+                accepted: true
+                stored_days: 1
+                stored_nodes: 3
+                dropped:
+                  accepted_nodes: 3
+                  accepted_modules: 11
+                  accepted_metrics: 34
+                  dropped_day: 0
+                  dropped_duplicate: 0
+                  dropped_node: 0
+                  dropped_family: 1
+                  dropped_metric_key: 0
+                  dropped_metric_value: 2
+                  dropped_resource_value: 0
+                  truncated_days: 0
+                  truncated_nodes: 0
+                  truncated_families: 0
+                  truncated_metrics: 0
+        "400":
+          description: Unparseable body, bad gzip, or `schema_version` other than 1.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "unsupported schema_version" }
+        "401":
+          description: Invalid or missing credentials.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "invalid credentials" }
+        "403":
+          description: >-
+            `system_id` in the body does not match the authenticated system.
+            `system_id` is optional -- the credential already identifies the
+            reporter -- but a mismatch when present means a broken reporter,
+            never something to silently override.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "system_id does not match authenticated system" }
+        "405":
+          description: Method other than `POST`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "method not allowed" }
+        "413":
+          description: Declared body length over 8 MiB.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "report too large" }
+        "503":
+          description: Forward-auth validator unreachable, or the store failed to write.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "temporarily unavailable" }
+
   /admin/v1/allowlist:
     servers:
       - url: http://localhost:9597
@@ -1281,6 +1465,246 @@ components:
         stored: { type: integer, description: New rows written. Normally lower than dropped.accepted, since same-second same-scenario decisions for one IP fold into one row with a summed hit count. }
         duplicates: { type: integer, description: Decisions that matched an existing row via the redelivery-safe unique key and were ignored. }
         dropped: { $ref: "#/components/schemas/ThreatCounters" }
+
+    SizingReport:
+      type: object
+      description: "POST /v1/sizing-reports body -- mirrors internal/model.SizingReport."
+      required: [schema_version, days]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        system_id:
+          type: string
+          description: Optional. When present, must equal the authenticated system or the request is 403.
+        reporter_version:
+          type: string
+          description: "Display only. Never parsed, never compared, never a cohort key."
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/SizingDay" }
+          maxItems: 15
+          description: "One entry per complete UTC day. Over-cap reports are truncated, not rejected."
+
+    SizingDay:
+      type: object
+      description: One complete UTC day for one cluster.
+      required: [day, nodes]
+      properties:
+        day:
+          type: string
+          format: date
+          description: >-
+            "YYYY-MM-DD", UTC. Must fall in [today-15, today-1]: yesterday is
+            the newest complete day, and older than Prometheus' retention
+            cannot have been computed from real data.
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/SizingNode" }
+          maxItems: 16
+          description: "Capped at SIZING_MAX_NODES_PER_REPORT (default 16); over-cap is truncated and counted."
+        cluster: { $ref: "#/components/schemas/SizingCluster" }
+
+    SizingNode:
+      type: object
+      description: "One node's day. node_id is the cluster-scoped numeric NS8 node id."
+      required: [node_id, metrics_present, hardware]
+      properties:
+        node_id: { type: integer, minimum: 1 }
+        metrics_present:
+          type: boolean
+          description: >-
+            false marks a degraded report -- Prometheus unreachable or the
+            metrics module removed. Send hardware, OS and the module inventory
+            anyway; the node stores with no pressure.
+        sample_coverage:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >-
+            Fraction of the day for which samples exist. Below 0.80 the row is
+            stored but no pressure is computed: a node that was off for
+            eighteen hours is not a low-pressure node.
+        hardware: { $ref: "#/components/schemas/SizingHardware" }
+        resources: { $ref: "#/components/schemas/SizingResources" }
+        stress: { $ref: "#/components/schemas/SizingStress" }
+        modules:
+          type: array
+          items: { $ref: "#/components/schemas/SizingModule" }
+          maxItems: 64
+
+    SizingHardware:
+      type: object
+      description: >-
+        Installed capacity plus the only free-text descriptors accepted.
+        Deliberately absent: nodename, fqdn, main IP, DMI serial, asset tag.
+      required: [cpu_cores, mem_total_bytes]
+      properties:
+        cpu_cores: { type: integer, minimum: 0 }
+        mem_total_bytes: { type: integer, format: int64, minimum: 0 }
+        cpu_model: { type: string }
+        os_id: { type: string }
+        os_version: { type: string }
+        kernel_release: { type: string }
+        virtualization: { type: string }
+
+    SizingResources:
+      type: object
+      description: >-
+        The day's utilization percentiles -- a FIXED vocabulary, unlike
+        workload. Every field is optional and an absent field makes its penalty
+        term absent, not zero: a zero says "measured, and fine", which is the
+        opposite. Percentiles come from quantile_over_time(0.95, expr[1d:5m]).
+        Memory must be derived from MemAvailable, never MemFree, or every
+        healthy Linux box reads as full.
+      properties:
+        ram_util_p95: { type: number, minimum: 0, maximum: 1, description: "p95 of 1 - MemAvailable/MemTotal." }
+        ram_used_bytes_p95: { type: number, minimum: 0, description: "p95 of MemTotal - MemAvailable, in bytes." }
+        cpu_util_p95: { type: number, minimum: 0, maximum: 1 }
+        cpu_cores_used_p95: { type: number, minimum: 0, description: "cpu_util_p95 x cores, sent explicitly." }
+        load15_per_core_p95: { type: number, minimum: 0, description: "p95 of node_load15 / cores." }
+        fs_used_frac_max: { type: number, minimum: 0, maximum: 1, description: "The worst filesystem's used fraction." }
+        fs_days_to_full: { type: number, minimum: 0, description: "Linear projection. Omit when not shrinking." }
+        disk_io_util_p95:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "Stored but NOT scored -- io_time saturation is meaningless on NVMe. A diagnostic."
+
+    SizingStress:
+      type: object
+      description: >-
+        The day's stress evidence. Same absent-is-not-zero rule as
+        SizingResources.
+      properties:
+        iowait_busy_frac:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >-
+            A DURATION -- the fraction of the day above the iowait threshold,
+            from avg_over_time((expr > bool T)[1d:5m]). Never a 24-hour max: a
+            max of a 5-minute average cannot tell a 25-minute nightly backup
+            (1.7% of the day) from a node starved for seven hours (30%).
+        swapin_pps_p95:
+          type: number
+          minimum: 0
+          description: >-
+            Swap IN, not out. Eviction is routine; a page read back from swap
+            is the one that proves a stall.
+        oom_kills: { type: number, minimum: 0 }
+        reboots:
+          type: number
+          minimum: 0
+          description: >-
+            changes(node_boot_time_seconds[1d]). Sent so the verdict can
+            discount a day whose counters were reset, rather than the server
+            trying to correct oom_kills for it.
+
+    SizingModule:
+      type: object
+      description: "One module family's presence and workload on one node."
+      required: [family, instances, facts_ok]
+      properties:
+        family:
+          type: string
+          description: >-
+            The module FAMILY, never the instance -- "nethvoice", not
+            "nethvoice20". Normalised with model.ModuleFamily server-side
+            regardless. Shape ^[a-z0-9._-]+$, at most 64 characters.
+        instances: { type: integer, minimum: 0 }
+        facts_ok:
+          type: integer
+          minimum: 0
+          description: >-
+            How many of those instances answered get-facts. Load-bearing and
+            must be honest: a zero mailbox count from a failed call is
+            indistinguishable from a genuinely empty mail server, and the
+            cohort pass's idle handling turns on exactly that difference.
+        versions:
+          type: array
+          items: { type: string }
+          maxItems: 8
+          description: "Display only. A version is not extensive, so it never belongs in workload."
+        workload:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: number
+            minimum: 0
+          propertyNames:
+            pattern: "^[a-z][a-z0-9_]{0,39}$"
+          description: >-
+            Open string -> number map. Values must be finite, non-negative and
+            EXTENSIVE (summable across instances of a family): counts, bytes,
+            rates. Not versions, ratios, percentages, timestamps or ids.
+            Numbers-only is the privacy control -- an FQDN, an IP, a hostname
+            or a DMI serial cannot be encoded in a float.
+
+    SizingCluster:
+      type: object
+      description: >-
+        Cluster-wide counters belonging to no single node. This is where
+        cluster/get-facts' user_domains totals land; openldap has no get-facts
+        of its own and needs none.
+      properties:
+        user_domains:
+          type: array
+          description: >-
+            One open number map per user domain, same rules as
+            SizingModule.workload. Summed across domains server-side, because
+            they are extensive.
+          items:
+            type: object
+            maxProperties: 32
+            additionalProperties: { type: number, minimum: 0 }
+            propertyNames:
+              pattern: "^[a-z][a-z0-9_]{0,39}$"
+
+    SizingCounters:
+      type: object
+      description: >-
+        Full per-rule accounting for one ingested report -- mirrors
+        internal/model.SizingCounters. Accumulated per (day, system_id) in
+        sizing_ingest_daily, which is the one sizing table that accumulates
+        rather than recomputes.
+      required:
+        - accepted_nodes
+        - accepted_modules
+        - accepted_metrics
+        - dropped_day
+        - dropped_duplicate
+        - dropped_node
+        - dropped_family
+        - dropped_metric_key
+        - dropped_metric_value
+        - dropped_resource_value
+        - truncated_days
+        - truncated_nodes
+        - truncated_families
+        - truncated_metrics
+      properties:
+        accepted_nodes: { type: integer }
+        accepted_modules: { type: integer }
+        accepted_metrics: { type: integer }
+        dropped_day: { type: integer, description: "Unparseable, in the future, or outside [today-15, today-1]." }
+        dropped_duplicate: { type: integer, description: "A day or node repeated inside one report; the first wins." }
+        dropped_node: { type: integer, description: "node_id below 1." }
+        dropped_family: { type: integer, description: "A family name that was empty or failed the shape check." }
+        dropped_metric_key: { type: integer, description: "A workload key failing ^[a-z][a-z0-9_]{0,39}$." }
+        dropped_metric_value: { type: integer, description: "A workload value that was not finite and non-negative." }
+        dropped_resource_value: { type: integer, description: "A fixed-vocabulary resources/stress field rejected the same way; its penalty term becomes absent." }
+        truncated_days: { type: integer }
+        truncated_nodes: { type: integer }
+        truncated_families: { type: integer }
+        truncated_metrics: { type: integer }
+
+    SizingIngestResponse:
+      type: object
+      required: [accepted, stored_days, stored_nodes, dropped]
+      properties:
+        accepted: { type: boolean }
+        stored_days: { type: integer, description: "Days that survived the day-range check." }
+        stored_nodes: { type: integer, description: "Node-day rows written or recomputed." }
+        dropped: { $ref: "#/components/schemas/SizingCounters" }
 
     AllowlistRequestInput:
       type: object

@@ -23,11 +23,13 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	"github.com/nethesis/nethesis-insights/internal/api"
 	"github.com/nethesis/nethesis-insights/internal/auth"
+	"github.com/nethesis/nethesis-insights/internal/baseline"
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/queue"
+	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui"
@@ -275,6 +277,16 @@ func main() {
 	blocklistMaxEntries := getenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
 	threatRetention := getenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
 	threatMaxDecisions := getenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
+	// Fleet sizing. Every one has a default, so an existing deployment picks
+	// the pipeline up without being reconfigured. The pass interval is an
+	// hour because the inputs are whole days: running it faster cannot
+	// produce a different answer.
+	sizingRetention := getenvDuration("SIZING_RETENTION", 100*24*time.Hour)
+	sizingPassInterval := getenvDuration("SIZING_PASS_INTERVAL", time.Hour)
+	sizingWindowDays := getenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
+	sizingMinDistinctSystems := getenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
+	sizingMinNodes := getenvInt("SIZING_MIN_NODES", 30)
+	sizingMaxNodesPerReport := getenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
 	// The allowlist admin plane. Both are empty by default: writing the
 	// exclusion set is the one operation that can stop the fleet blocking an
 	// address, so it stays off until an operator turns it on explicitly.
@@ -358,11 +370,25 @@ func main() {
 		Retention:  threatRetention,
 	})
 
+	// Fleet sizing: a third pipeline sharing this listener, this
+	// authenticator and the SQLite file, and nothing else. No LLM, no gate,
+	// no fingerprint, no queue.
+	cohortPass := baseline.New(s, baseline.Config{
+		WindowDays:         sizingWindowDays,
+		MinDistinctSystems: sizingMinDistinctSystems,
+		MinNodes:           sizingMinNodes,
+		Retention:          sizingRetention,
+	})
+
 	handler := api.NewServer(q, s, authenticator, api.ThreatConfig{
 		Store:        s,
 		Feed:         snapshot,
 		MaxDecisions: threatMaxDecisions,
 		Now:          func() int64 { return time.Now().UnixMilli() },
+	}, api.SizingConfig{
+		Store:    s,
+		MaxNodes: sizingMaxNodesPerReport,
+		Now:      func() int64 { return time.Now().UnixMilli() },
 	}, excludeModules, excludeServices)
 
 	httpServer := &http.Server{
@@ -417,6 +443,12 @@ func main() {
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
+		{Name: "SIZING_RETENTION", Value: sizingRetention.String()},
+		{Name: "SIZING_PASS_INTERVAL", Value: sizingPassInterval.String()},
+		{Name: "SIZING_WINDOW_DAYS", Value: strconv.Itoa(sizingWindowDays)},
+		{Name: "SIZING_MIN_DISTINCT_SYSTEMS", Value: strconv.Itoa(sizingMinDistinctSystems)},
+		{Name: "SIZING_MIN_NODES", Value: strconv.Itoa(sizingMinNodes)},
+		{Name: "SIZING_MAX_NODES_PER_REPORT", Value: strconv.Itoa(sizingMaxNodesPerReport)},
 		{Name: "ADMIN_LISTEN_ADDR", Value: adminListenAddr},
 		{Name: "ADMIN_API_KEY", Value: secretState(adminAPIKey != "")},
 	}
@@ -504,7 +536,11 @@ func main() {
 	// interval in, so a restart does not leave the feed answering 503 for five
 	// minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
-	consensusDone := runConsensusLoop(consensusCtx, consensus, consensusInterval)
+	consensusDone := runPassLoop(consensusCtx, "blocklist consensus", consensus, consensusInterval)
+
+	// The sizing cohort pass runs on the same loop for the same reasons.
+	sizingCtx, stopSizing := context.WithCancel(context.Background())
+	sizingDone := runPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -538,12 +574,23 @@ func main() {
 	stopConsensus()
 	<-consensusDone
 	slog.Info("consensus loop stopped")
+
+	stopSizing()
+	<-sizingDone
+	slog.Info("sizing cohort loop stopped")
 }
 
-// runConsensusLoop runs a pass immediately and then every interval until ctx
-// is cancelled. A failed pass is logged and the loop continues: the snapshot
-// it did not replace keeps being served, which is the designed degradation.
-func runConsensusLoop(ctx context.Context, r *blocklist.Runner, interval time.Duration) <-chan struct{} {
+// pass is a periodic background job. Both the Threat Shield consensus pass
+// and the fleet-sizing cohort pass satisfy it, which is why there is one loop
+// rather than two copies of one.
+type pass interface {
+	Run(ctx context.Context, now int64) error
+}
+
+// runPassLoop runs a pass immediately and then every interval until ctx is
+// cancelled. A failed pass is logged and the loop continues: whatever it did
+// not replace keeps being served, which is the designed degradation.
+func runPassLoop(ctx context.Context, name string, r pass, interval time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -551,7 +598,7 @@ func runConsensusLoop(ctx context.Context, r *blocklist.Runner, interval time.Du
 		defer ticker.Stop()
 		for {
 			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("blocklist consensus pass failed", "error", err)
+				slog.Error("background pass failed", "pass", name, "error", err)
 			}
 			select {
 			case <-ctx.Done():

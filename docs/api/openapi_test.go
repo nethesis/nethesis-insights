@@ -147,6 +147,8 @@ var expectedPaths = []string{
 	"/v1/threat-events",
 	"/v1/blocklist",
 	"/v1/allowlist-requests", // planned
+	// Edge, fleet sizing (internal/api).
+	"/v1/sizing-reports",
 	// Admin (internal/admin, planned).
 	"/admin/v1/allowlist",
 	"/admin/v1/allowlist/requests",
@@ -166,6 +168,7 @@ var expectedOperations = []operation{
 	{"/v1/threat-events", "post"},
 	{"/v1/blocklist", "get"},
 	{"/v1/allowlist-requests", "post"},
+	{"/v1/sizing-reports", "post"},
 	{"/admin/v1/allowlist", "get"},
 	{"/admin/v1/allowlist", "post"},
 	{"/admin/v1/allowlist", "delete"},

@@ -35,7 +35,7 @@ const (
 )
 
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{}, nil, nil)
+	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, ThreatConfig{}, SizingConfig{}, nil, nil)
 }
 
 func validBundle() string {
@@ -152,7 +152,7 @@ func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
 func TestIngestExcludesConfiguredModules(t *testing.T) {
 	pub := &fakePublisher{}
 	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{}, map[string]bool{"crowdsec1": true}, nil)
+		ThreatConfig{}, SizingConfig{}, map[string]bool{"crowdsec1": true}, nil)
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
@@ -226,7 +226,7 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 func TestIngestExcludesConfiguredServices(t *testing.T) {
 	pub := &fakePublisher{}
 	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{}, nil, map[string]bool{"insights": true})
+		ThreatConfig{}, SizingConfig{}, nil, map[string]bool{"insights": true})
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,

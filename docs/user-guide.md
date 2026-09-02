@@ -402,6 +402,161 @@ looked at afresh — which is what you want, because "two machines asked once"
 and "sixty machines have asked since" deserve different answers, and an old
 `no` should not quietly bury the second case.
 
+## Fleet sizing: how much hardware does a node actually need?
+
+This is a **third pipeline**, alongside the log analysis above and Threat
+Shield. It shares the same server, the same subscription credential and the
+same database file, and nothing else — no AI call, no gate, no findings.
+
+It exists to answer a question Nethesis had no fleet-wide answer to: *how much
+RAM does a node running NethVoice need?* Not a guess, and not one customer's
+anecdote — the answer the fleet's own machines already know.
+
+### What a sizing report is
+
+Once a day, each NS8 cluster's leader posts one report covering the **last
+complete UTC day**. A `system_id` is a *cluster*, so one report carries one
+entry per node in it, and each entry has three parts:
+
+- **what the node is** — installed cores and memory, CPU model, OS;
+- **how hard it worked** — the 95th-percentile memory, CPU, load and disk
+  utilization over that day, plus how *long* it spent waiting on disk, whether
+  it swapped anything back in, whether the kernel killed anything for running
+  out of memory, and how many days until its fullest filesystem is full;
+- **what it was running** — each module family, how many copies, and that
+  family's workload counts (mailboxes, PBX users, trunks, shared folders, …).
+
+Two design choices in that list are worth knowing about because they show up
+everywhere downstream.
+
+**A day is an absolute fact.** The report says which day it covers, and every
+number in it is computed over that day's exact boundaries. That is what makes
+sending it three times harmless: the second and third sends restate the first
+one word for word, so the server *replaces* the row rather than adding to it,
+and a retry after a network failure costs nothing. Reports older than fifteen
+days are refused — the node's own metrics do not go back further, so numbers
+claiming to be older cannot have come from real data.
+
+**Workload counts can only be numbers.** The list of counts is deliberately
+open — any module can invent one, and it is stored without the server needing
+a release — but every value must be a number. That single rule is the whole
+privacy control: a hostname, an FQDN, an IP address or a hardware serial
+*cannot be written as a number*, which is a much stronger guarantee than a list
+of banned field names somebody has to keep up to date. Nothing identifying is
+sent, and nothing identifying could be.
+
+### Pressure: one number for "is this node undersized?"
+
+The server — never the node — turns each node-day into a **pressure** number
+from 0 to 100. 0 means no pressure; 100 means severe. It is built from four
+axes:
+
+| Axis | Reads |
+|---|---|
+| memory | memory utilization, pages swapped *back in*, kernel out-of-memory kills |
+| cpu | CPU utilization and run-queue length per core |
+| io | the *fraction of the day* spent waiting on disk |
+| disk | how full the fullest filesystem is, and how many days until it fills |
+
+Four things about it are deliberate, and each one fixes a way of getting this
+wrong:
+
+- **Within an axis the worst term wins, not the sum.** CPU utilization and
+  run-queue length are two views of one saturation; adding them would punish a
+  node twice for a single cause.
+- **Across axes it is the worst axis at full weight plus the rest at half.** A
+  plain sum over-punishes problems that travel together; a plain maximum would
+  rank a node with three simultaneous problems the same as one with a single
+  problem.
+- **Time is measured as a duration, never a peak.** A 24-hour *maximum* cannot
+  tell a 25-minute nightly backup (1.7 % of the day) from a node starved for
+  seven hours (30 %). A duration has a denominator; a maximum does not. This is
+  the same mistake the log gate once made and was fixed for.
+- **"Not measured" is not zero.** If a node was switched off for eighteen hours,
+  or its metrics were unreachable, or it reported no cores, it gets **no
+  pressure at all** rather than a flattering low one. A score computed from
+  missing data is worse than no score. On the page that shows as `n/a`.
+
+Alongside pressure, the raw utilization percentiles are shown, because they
+answer a different question: pressure says *is this undersized*, the
+percentiles say *how much headroom is left*.
+
+### The verdict: a single bad day is not a verdict
+
+Undersizing is recurrence, so the answer per node is computed over a trailing
+28-day window: fewer than 14 days of data is `insufficient data`; seven or more
+bad days is `undersized`; fourteen or more merely elevated days is `at risk`;
+otherwise `ok`. Once a node is called `undersized` it stays that way until the
+bad days largely go away, so the verdict does not flip back and forth — a
+flapping verdict is one nobody acts on.
+
+Two guards go with it:
+
+- **The cause has to agree with itself.** If no single axis was the worst one on
+  at least half the bad days, the verdict is downgraded and the cause is shown
+  as `mixed`. Seven bad days from seven unrelated causes is not one verdict,
+  and recommending more RAM on that evidence would be wrong.
+- **Sometimes the answer is not "buy hardware".** Because a `system_id` is a
+  cluster, the server can compare its nodes against each other. If one node is
+  at 95 % memory while another sits at 20 %, the advice is **rebalance**, not
+  buy. This output only exists because the unit is a cluster, and it is the most
+  useful thing that falls out of that.
+
+### Cohort baselines: what the fleet says a deployment needs
+
+Once an hour the server groups nodes by what they run and publishes
+percentiles of **absolute** memory and CPU demand — bytes and cores, not
+percentages. Utilization is a property of hardware somebody happened to buy;
+the deliverable is advice on what to buy. The recommendation is the p90 column:
+the peak demand nine out of ten comparable nodes stay under.
+
+There are three groupings, and the difference matters:
+
+| Grouping | Answers | Safe to quote? |
+|---|---|---|
+| solo | "what does a node running only mail (plus lightweight modules) need" | **yes** |
+| co-tenanted | "what does a node that runs mail, alongside whatever else, look like" | no — it is not a per-module cost |
+| profile | "what do the common real-world combinations look like" | as a profile, yes |
+
+Three honesty rules are built into this:
+
+**Per-module cost is never *measured*.** Nothing in NS8 exports per-container
+memory or CPU, so a single module's cost can only ever be *inferred* from
+variation across whole nodes. The page says so; the numbers are percentiles of
+whole nodes grouped by what they run, which is a different and more defensible
+claim.
+
+**Nodes whose demand cannot be observed are excluded — and counted.** An
+undersized node's memory use is *capped by the memory it has*: a node that needs
+12 GiB but only has 8 reports about 7.6 GiB. Averaging that in makes the answer
+come out too small, which then declares more nodes adequately sized — the exact
+opposite of the point. So those nodes are left out of the percentiles and
+reported as **censored** instead. A group that is 40 % censored is not a
+footnote: it means the hardware the fleet is actually buying for that profile is
+systematically too small, which is the single most valuable thing this pass can
+tell you.
+
+**Below the evidence floor, nothing is published at all.** A group needs at
+least 20 distinct clusters and 30 nodes. Distinct *clusters*, not nodes, for the
+same reason the blocklist counts distinct machines: one partner's forty
+identical deployments is one opinion about hardware, not forty. And a group that
+drops below the floor is deleted rather than left on the page going stale.
+
+### And most of the thresholds are still guesses
+
+The score's knees — the point at which memory utilization starts to count as
+pressure, and most of the rest — are **initial guesses**, to be calibrated once
+about a month of real fleet data exists. A few are not: a filesystem at 98 % is
+physically about to stop working, one runnable task per core is by definition a
+saturated queue, and the disk-filling threshold is deliberately the same number
+the node's own alert uses so the two never disagree.
+
+The sizing page labels every threshold with which kind it is, because a
+dashboard that renders an uncalibrated number with no label attached is
+presenting a guess as advice. Because every input is stored as its own column,
+recalibrating later is one pass over data the server already has — no fleet
+reconfiguration, and no waiting another month.
+
 ## The operator UI: looking at what the server knows
 
 The operator UI is a separate, optional, read-only web page built into the
@@ -427,6 +582,8 @@ What each page shows, in plain terms:
 | `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
 | `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, with a per-day total, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
 | `/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here. |
+| `/sizing` | One row per node, showing its most recent day: pressure, the four axis penalties behind it, the utilization percentiles beside it, and the multi-day verdict. Below it, what each node is running with its workload counts; the score's thresholds, each labelled as physically grounded, conventional or still a guess; and per-cluster ingest accounting, so "this cluster sends reports and stores nothing" comes with the rule that dropped them. |
+| `/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the censored share alongside. On a small fleet this page correctly says "insufficient fleet data" — publishing a percentile computed from three nodes would be worse than publishing nothing. Below it, the deterministic t-shirt sizes per workload metric. |
 
 If an admin key is configured, this UI also gains a small number of **buttons**
 — add or remove an allowlist entry, approve or reject a request. Those actions,
@@ -449,3 +606,8 @@ it's meant to work even on an offline management network.
   a product feature for end customers.
 - It does not retain raw log content anywhere — only masked templates and
   their counts.
+- It does not measure any individual module's memory or CPU cost, and cannot:
+  nothing in the NS8 stack reports per-container resource use. Sizing publishes
+  percentiles of whole nodes grouped by what they run, and says so.
+- It does not accept anything but numbers in a sizing report's workload counts,
+  and it never receives a hostname, FQDN, IP address or hardware serial in one.

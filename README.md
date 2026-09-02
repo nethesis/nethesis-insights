@@ -155,6 +155,12 @@ locally with `podman build -t nethesis-insights .`.
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
 | `THREAT_EVENT_RETENTION` | how long raw threat events are kept (default `168h`) |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request decision cap; over-cap batches are truncated, not rejected (default `500`) |
+| `SIZING_RETENTION` | how long fleet-sizing daily rows are kept (default `2400h`, 100 days); monthly rollups are kept indefinitely |
+| `SIZING_PASS_INTERVAL` | how often the cohort pass runs (default `1h`); the inputs are whole days, so faster cannot produce a different answer |
+| `SIZING_WINDOW_DAYS` | trailing window for node verdicts and cohort baselines (default `28`) |
+| `SIZING_MIN_DISTINCT_SYSTEMS` | distinct clusters a cohort needs before any baseline is published (default `20`) |
+| `SIZING_MIN_NODES` | nodes a cohort needs as well (default `30`); below either floor the cohort is deleted, not left stale |
+| `SIZING_MAX_NODES_PER_REPORT` | per-report node cap; over-cap reports are truncated, not rejected (default `16`) |
 | `ADMIN_LISTEN_ADDR` | bind address for the allowlist admin API (default empty — **the admin plane is off**). Needs `ADMIN_API_KEY` too |
 | `ADMIN_API_KEY` | bearer key for the admin API and for the operator UI's write forms — secret; unset means **no admin surface at all**, never a default credential |
 

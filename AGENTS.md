@@ -104,6 +104,93 @@ Threat Shield rules that are as load-bearing as the gate's:
   `internal/model` field-for-field. `docs/api/openapi_test.go` fails the build on a
   missing or stale path. The operator UI is deliberately not documented there.
 
+A **third** separate pipeline also lives here and is **implemented server-side**:
+`docs/plans/2026-09-02-fleet-sizing-server.md` (the *why*, including everything
+the source draft got wrong) and
+`docs/specs/2026-09-02-sizing-ingest-contract.md` (the wire contract `ns8-core`
+builds against — keep it in step with `internal/sizing/sanitize.go`'s drop
+rules). NS8 cluster leaders post one complete-UTC-day workload and performance
+report per cluster; the server scores each node, folds a multi-day verdict, and
+publishes cohort hardware baselines. `POST /v1/sizing-reports` in, two operator
+UI pages out. It shares only the listener, the `Authenticator`, the SQLite file
+and `model.ModuleFamily` — deliberately, because that is already the single
+definition of module identity and a second one would eventually disagree. **No
+LLM call, no gate, no fingerprint, no queue.** Do not use it as context for
+changes to bundles, gating or findings.
+
+Fleet-sizing rules that are as load-bearing as the gate's:
+
+- `internal/sizing` is **pure**, for both of the reasons `threat` and `gate`
+  are: it decides what a report is allowed to store (per-customer commercial
+  data, derived from metrics that carry identifying labels) *and* it holds the
+  whole `pressure` formula. It imports `threat.CleanText` rather than declaring
+  a second free-text sanitizer; that is the only edge between the two pure
+  packages.
+- **`pressure` is computed server-side only.** Scoring at the edge would make
+  every node an uncoordinated second implementation of the formula, and then a
+  threshold recalibration would need the fleet's cooperation instead of one
+  recompute pass.
+- **Workload metrics are an open `string → number` map, and "number" is the
+  entire privacy control.** Open vocabulary for the same reason Threat Shield
+  accepts every scenario — the NS8 module set grows continuously, and a typed
+  column per product silently discards every new product's metric until a
+  server release. Numbers-only because an FQDN, an IP address, a hostname or a
+  DMI serial cannot be encoded in a float, which is stronger than any field
+  blocklist somebody has to maintain. Caps bound *shape*, never vocabulary, and
+  truncate rather than reject. **Never add a metric allowlist or a family
+  allowlist.**
+- **A day is an absolute fact.** `day` is sent explicitly and every value in it
+  is computed over `[day 00:00 UTC, day+1 00:00 UTC)`, never a relative
+  `[24h]`. That is what makes the reporter's three daily sends byte-identical
+  restatements, so measurement rows **recompute** and redelivery is free. A
+  `day` outside `[today-15, today-1]` is rejected. `sizing_ingest_daily` is the
+  one sizing table that **accumulates**; the DDL comments say which is which,
+  because mixing them would be silent.
+- **Absent is not zero.** Every measurement column is nullable and `NULL` means
+  "not measured"; a zero says "measured, and fine". A missing input makes its
+  penalty term absent, and the coverage gate (`metrics_present`,
+  `sample_coverage < 0.80`, `cpu_cores < 1`, `mem_total_bytes <= 0`) yields
+  `pressure = NULL` rather than a clamp — a node off for eighteen hours is not
+  a low-pressure node, and a score from missing data is worse than no score.
+- **Never a 24-hour max; a duration or a high percentile.** A max of a 5-minute
+  average cannot tell a 25-minute nightly backup (1.7 % of the day) from a node
+  starved for seven hours (30 %). This is the same failure the log gate suffered
+  and was fixed for.
+- **Pressure reasons carry no computed values**, exactly like gate reasons, and
+  any rollup over them must be time-bounded for the same reason.
+- **`pressure_version` is recomputed, unlike `fingerprint.Version`**, and the
+  divergence is deliberate: a fingerprint is an identity and must change
+  visibly, while `pressure` is a derived analytic over inputs stored as
+  first-class columns — leaving 100 days of mixed-definition scores would make
+  every trailing verdict wrong and every cohort statistic incomparable. Step 1
+  of the pass recomputes stale rows, and it must run **before** cohorts are
+  built.
+- **Censoring, not health, is the only exclusion from demand estimation.** An
+  undersized node's memory demand is capped by the memory it has, which is
+  systematic bias rather than noise; such nodes are excluded from the
+  percentiles and **published as `censored_nodes`**. Do not exclude disk-bound
+  or otherwise "unhealthy" nodes: "what a healthy node uses", derived by
+  deleting the unhealthy ones, is survivorship bias with extra steps.
+- **Two-stage aggregation, and the floor counts distinct `system_id`.** Reduce
+  each node to the p90 across its daily values first (p90, not the median: a
+  28-day window holds eight weekend days on which a business workload is idle),
+  then take percentiles across nodes. The floor counts distinct clusters, the
+  same rule and reason as Threat Shield's promotion, and a cohort that falls
+  below it is **deleted**, mirroring `ExpireBlocklist`.
+- **The lite/medium/heavy prior appears exactly once**, as `sizing.familyClass`,
+  used only for cohort assignment and presentation order — never as a weight
+  inside a published number, which would be circular. It is **derived**
+  (`ClassOf(family, workload)`) because the prior as given was already wrong for
+  samba: "with file shares = medium" is a workload distinction, not a family one.
+- **Roll up before pruning.** `RollupSizingMonthly` must precede
+  `PruneSizingDaily`, or the dropped day loses its history permanently.
+- **No ridge, no k-means.** Ridge shrinkage destroys the interpretation of a
+  coefficient as "the cost of module X", which is the entire product, and does
+  nothing about censoring; k-means is not deterministic run to run, and a number
+  published to customers must not change without the data changing. If a
+  regression ever ships it must be non-negative least squares on the uncensored
+  subset, labelled as an estimate distinct from the measured percentiles.
+
 `docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
 scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
 setup from memory.
@@ -125,6 +212,7 @@ of the spec are **not** built before assuming a bug:
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
 | Operator UI | `internal/ui`: zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses); an enumerated set of `POST` routes authenticates against `ADMIN_API_KEY` and exists only when that is set. Backed by the cross-system read methods in `internal/store/ui.go` and `internal/store/threat_ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
 | Allowlist management | built: `POST /v1/allowlist-requests`, `internal/admin` on `ADMIN_LISTEN_ADDR`, UI review pages. Both off unless configured | cross-org scoping once auth returns a tenant |
+| Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing.go` + `sizing_ui.go`, `internal/api/sizing.go`, `internal/baseline`, two UI pages. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
 | Threat Shield | built: `internal/threat` (pure), `internal/store/threat.go`, `internal/blocklist`, `internal/api/threat.go`, three UI pages. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
@@ -187,9 +275,11 @@ here.
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
 threat                      PURE — Threat Shield's sanitizer, category map, allowlist
+sizing                      PURE — fleet sizing's sanitizer, pressure score, cohorts
 llm  store                  interfaces, each with a real and a stub impl
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
+baseline                    fleet-sizing cohort pass; same shape as blocklist
 api                         HTTP: ingest + read, auth via the Authenticator iface
 ui                          HTTP: optional operator dashboard, off by default
 cmd/insightsd               env config, wiring, graceful shutdown
@@ -397,6 +487,21 @@ successful no-op, not an error.
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".
+- `sizing`: table-driven, no fixtures. `TestSanitizeAcceptsEveryMetricKey` and
+  `TestSanitizeRejectsEveryNonNumericValue` are the executable form of the
+  open-vocabulary and privacy rules, following the
+  `TestSanitizeAcceptsEveryScenario` precedent. Every penalty term at `x < x0`,
+  `x == x0`, mid-ramp, `x == x1`, `x > x1` and absent; a fully idle node scores
+  `pressure == 0` (the direction test); the coverage gate yields `NULL` rather
+  than a division; the day window at both edges; a malformed node dropped and
+  counted while its siblings store.
+- `baseline`: temp-file SQLite, not a mock — the exclusions *are* the SQL and
+  the folding. 19 distinct systems publishes nothing and 20 does; one system
+  with 40 nodes does not; a cohort below the floor is deleted rather than left
+  stale; a censored-heavy cohort publishes with `censored_nodes` set; a
+  `pressure_version` bump recomputes before cohorts are built. The housekeeping
+  order and its failure handling use a recording fake, because what is under
+  test is the order of the calls.
 - `blocklist`: temp-file SQLite, not a mock — the grouping *is* the SQL. Boundary
   fixtures: 2 distinct systems does not promote and 3 does; one system reporting
   three times does not; one system across two categories is still one system;
@@ -424,7 +529,12 @@ services; bind containers to high ports. If the machine has been torn down,
 
 ## Open questions from the spec
 
-- Exact field names in the NS8 `cluster/subscription` Redis hash (the edge's
-  `system_id` / secret source) — must be read from a live node.
+- ~~Exact field names in the NS8 `cluster/subscription` Redis hash~~ —
+  **closed 2026-09-02**, read off `rl1`: `system_id`, `auth_token`, `provider`,
+  `support_user`, `vpn_cert_cn`. Consequence for the edge:
+  `SUBSCRIPTION_SECRET_FIELDS = ("auth_token", "secret", "password")` at
+  `ns8-loki/imageroot/bin/insights-collector:77` is dead code — `secret` and
+  `password` are never written by ns8-core's `set-subscription`. That deletion
+  is in `ns8-loki`, not this repo.
 - The external validator's contract: endpoint, method, response codes, and whether
   it returns a tenant/org id the server can scope on.

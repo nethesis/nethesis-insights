@@ -83,7 +83,7 @@ func threatServer(st ThreatStore, feed Feed) http.Handler {
 			Feed:         feed,
 			MaxDecisions: 500,
 			Now:          func() int64 { return threatNow },
-		}, nil, nil)
+		}, SizingConfig{}, nil, nil)
 }
 
 func decision(ip, scenario, origin string) model.Decision {
