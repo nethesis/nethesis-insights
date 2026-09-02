@@ -341,7 +341,7 @@ func main() {
 		// leaves memory (spec §10) -- so an unset AUTH_PEPPER gets a random
 		// one for this process's lifetime rather than refusing to start.
 		authPepper = randomPepper()
-		slog.Warn("AUTH_PEPPER not set, generated an ephemeral one for this process")
+		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
 	}
 	authenticator := auth.New(authValidateURL, authPepper, authTimeout, time.Now)
 	authenticator.PositiveTTL = authCacheTTL
