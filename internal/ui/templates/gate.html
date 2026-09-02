@@ -33,9 +33,10 @@ versions of the gate.</small></p>
 {{- if gt $s.ZeroCost 0}} &middot; <strong>{{$s.ZeroCost}}</strong> calls recorded no cost
 (a failed or unpriced attempt still counts as a call){{end}}</p>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>Reasons</th><th class="num">Windows</th><th class="num">Cost</th><th class="num">Per window</th></tr>
+<tr><th scope="col">Reasons</th><th scope="col" class="num">Windows</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Per window</th></tr>
 </thead>
 <tbody>
 {{range .Rows}}
@@ -51,4 +52,5 @@ versions of the gate.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

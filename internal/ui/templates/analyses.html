@@ -20,13 +20,14 @@ Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 </fieldset>
 </form>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
 <tr>
-<th>ID</th><th>System</th><th>Window start</th>
-<th>Gated</th><th>LLM</th><th>Completed</th>
-<th class="num">In tok</th><th class="num">Cached</th><th class="num">Out tok</th><th class="num">Cost</th><th class="num">ms</th>
-<th>Gate reasons</th><th>Suppressed</th><th>Error</th>
+<th scope="col">ID</th><th scope="col">System</th><th scope="col">Window start</th>
+<th scope="col">Gated</th><th scope="col">LLM</th><th scope="col">Completed</th>
+<th scope="col" class="num">In tok</th><th scope="col" class="num">Cached</th><th scope="col" class="num">Out tok</th><th scope="col" class="num">Cost</th><th scope="col" class="num">ms</th>
+<th scope="col">Gate reasons</th><th scope="col">Suppressed</th><th scope="col">Error</th>
 </tr>
 </thead>
 <tbody>
@@ -52,4 +53,5 @@ Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

@@ -19,9 +19,10 @@ systemd, &hellip;) that carry no module of their own.</small></p>
 </fieldset>
 </form>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>System</th><th>Module</th><th class="num">Priority</th><th class="num">EWMA rate</th><th>Updated</th></tr>
+<tr><th scope="col">System</th><th scope="col">Module</th><th scope="col" class="num">Priority</th><th scope="col" class="num">EWMA rate</th><th scope="col">Updated</th></tr>
 </thead>
 <tbody>
 {{range .Baselines}}
@@ -37,4 +38,5 @@ systemd, &hellip;) that carry no module of their own.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

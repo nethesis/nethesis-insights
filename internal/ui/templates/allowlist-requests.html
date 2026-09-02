@@ -9,10 +9,11 @@ This is a review queue, not a decision procedure: however many systems ask,
 nothing here becomes a live allowlist entry without an explicit approval
 below. Ranked by distinct systems, then by how recently one asked.</small></p>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>CIDR</th><th class="num">Systems</th><th>First asked</th><th>Last asked</th>
-<th>Reasons</th>{{if .CanWrite}}<th>Decision</th>{{end}}</tr>
+<tr><th scope="col">CIDR</th><th scope="col" class="num">Systems</th><th scope="col">First asked</th><th scope="col">Last asked</th>
+<th scope="col">Reasons</th>{{if .CanWrite}}<th scope="col">Decision</th>{{end}}</tr>
 </thead>
 <tbody>
 {{range .Requests}}
@@ -48,6 +49,7 @@ below. Ranked by distinct systems, then by how recently one asked.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 
 {{if not .CanWrite}}
 <p><small>ADMIN_API_KEY is not configured on this deployment, so approving or

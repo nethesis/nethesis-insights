@@ -8,12 +8,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 known templates, currently-open findings, all-time findings, analyzed windows, LLM calls
 and spend. Use it to spot which systems are actually costing money or generating
 findings.</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
 <tr>
-<th>System</th><th>Tenant</th><th>Collector</th><th>First seen</th><th>Last seen</th>
-<th class="num">Templates</th><th class="num">Open</th><th class="num">Findings</th>
-<th class="num">Windows</th><th class="num">LLM calls</th><th class="num">Cost</th>
+<th scope="col">System</th><th scope="col">Tenant</th><th scope="col">Collector</th><th scope="col">First seen</th><th scope="col">Last seen</th>
+<th scope="col" class="num">Templates</th><th scope="col" class="num">Open</th><th scope="col" class="num">Findings</th>
+<th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th><th scope="col" class="num">Cost</th>
 </tr>
 </thead>
 <tbody>
@@ -36,4 +37,5 @@ findings.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

@@ -8,13 +8,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 a system whose every report was a duplicate or was dropped by the sanitizer.
 Sourced from the ingest accounting, not from the log pipeline's own systems
 table, so a node running only crowdsec1 still shows up here.</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
 <tr>
-<th>System</th><th>First day</th><th>Last day</th>
-<th class="num">Accepted</th><th class="num">Dup</th><th class="num">Dropped</th><th class="num">Trunc</th>
-<th class="num">Events</th><th class="num">Distinct IPs</th><th class="num">Scenarios</th>
-<th class="num">Hits</th><th>Last event</th>
+<th scope="col">System</th><th scope="col">First day</th><th scope="col">Last day</th>
+<th scope="col" class="num">Accepted</th><th scope="col" class="num">Dup</th><th scope="col" class="num">Dropped</th><th scope="col" class="num">Trunc</th>
+<th scope="col" class="num">Events</th><th scope="col" class="num">Distinct IPs</th><th scope="col" class="num">Scenarios</th>
+<th scope="col" class="num">Hits</th><th scope="col">Last event</th>
 </tr>
 </thead>
 <tbody>
@@ -38,4 +39,5 @@ table, so a node running only crowdsec1 still shows up here.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

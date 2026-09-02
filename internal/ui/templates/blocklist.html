@@ -17,21 +17,24 @@ expires when nobody has reported it for the TTL.</small></p>
 until the first successful consensus pass. An empty body would mean
 &ldquo;no threats&rdquo; to every client that imports it.</p>
 {{else}}
-<table>
+<figure>
+<table class="striped">
 <tbody>
 <tr><th scope="row">Entries served</th><td class="num">{{.Feed.Entries}}</td></tr>
 <tr><th scope="row">Generated</th><td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td></tr>
 <tr><th scope="row">ETag</th><td class="mono">{{.Feed.ETag}}</td></tr>
 </tbody>
 </table>
+</figure>
 {{end}}
 </article>
 
 <h2>Promoted entries</h2>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>Attacker IP</th><th>Scenarios</th><th class="num">Systems</th>
-<th>First listed</th><th>Last seen</th><th>Expires</th><th>Evidence</th></tr>
+<tr><th scope="col">Attacker IP</th><th scope="col">Scenarios</th><th scope="col" class="num">Systems</th>
+<th scope="col">First listed</th><th scope="col">Last seen</th><th scope="col">Expires</th><th scope="col">Evidence</th></tr>
 </thead>
 <tbody>
 {{range .Entries}}
@@ -61,6 +64,7 @@ behind it are pruned long before anyone asks.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 
 <h2>Allowlist</h2>
 <p><small>Applied at promotion, not at read &mdash; adding an entry unlists the
@@ -68,9 +72,10 @@ address on the next pass; deleting one does not re-block anything until it is
 reported again. A prefix shorter than /24 (IPv4) or /48 (IPv6) is refused
 unless force is checked &mdash; 0.0.0.0/0 here would silently disable the
 entire feed.</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>CIDR</th><th>Reason</th><th>Added by</th><th>Created</th><th>Expires</th>{{if .CanWrite}}<th></th>{{end}}</tr>
+<tr><th scope="col">CIDR</th><th scope="col">Reason</th><th scope="col">Added by</th><th scope="col">Created</th><th scope="col">Expires</th>{{if .CanWrite}}<th scope="col"></th>{{end}}</tr>
 </thead>
 <tbody>
 {{range .Allowlist}}
@@ -94,6 +99,7 @@ entire feed.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 
 {{if .CanWrite}}
 <form method="post" action="/blocklist/allowlist">

@@ -8,9 +8,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <h2>Daily rollup</h2>
 <p><small>Rolled up before the raw events are pruned, so the trend survives the
 retention window at a few rows per day.</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>Day (UTC)</th><th>Scenario</th><th class="num">Distinct IPs</th><th class="num">Hits</th></tr>
+<tr><th scope="col">Day (UTC)</th><th scope="col">Scenario</th><th scope="col" class="num">Distinct IPs</th><th scope="col" class="num">Hits</th></tr>
 </thead>
 <tbody>
 {{range .Daily}}
@@ -33,18 +34,20 @@ retention window at a few rows per day.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 
 <h2>Ingest accounting</h2>
 <p><small>What each node contributed, and what was dropped before storage.
 Ingest is fail-open on content: a malformed decision is dropped and counted,
 never a reason to reject the batch. A node with a high drop count is
 misconfigured, not malicious.</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>Day</th><th>System</th><th class="num">Accepted</th><th class="num">Dup</th>
-<th class="num">Type</th><th class="num">Scope</th><th class="num">Origin</th>
-<th class="num">Bad IP</th><th class="num">Private IP</th>
-<th class="num">Time</th><th class="num">Trunc</th></tr>
+<tr><th scope="col">Day</th><th scope="col">System</th><th scope="col" class="num">Accepted</th><th scope="col" class="num">Dup</th>
+<th scope="col" class="num">Type</th><th scope="col" class="num">Scope</th><th scope="col" class="num">Origin</th>
+<th scope="col" class="num">Bad IP</th><th scope="col" class="num">Private IP</th>
+<th scope="col" class="num">Time</th><th scope="col" class="num">Trunc</th></tr>
 </thead>
 <tbody>
 {{range .Ingest}}
@@ -66,4 +69,5 @@ misconfigured, not malicious.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}

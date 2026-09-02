@@ -7,11 +7,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <p><small>Fleet-wide LLM spend and token totals, grouped by UTC day and model. Each day
 sums the analyses across every system for that day (see <code>/analyses</code> for
 per-system detail, <code>/gate</code> for why calls happened at all).</small></p>
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
 <tr>
-<th>Day</th><th>Model</th><th class="num">Windows</th><th class="num">LLM calls</th>
-<th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost</th>
+<th scope="col">Day</th><th scope="col">Model</th><th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th>
+<th scope="col" class="num">In tok</th><th scope="col" class="num">Out tok</th><th scope="col" class="num">Cost</th>
 </tr>
 </thead>
 <tbody>
@@ -47,4 +48,5 @@ per-system detail, <code>/gate</code> for why calls happened at all).</small></p
 </tfoot>
 {{end}}
 </table>
+</figure>
 {{end}}

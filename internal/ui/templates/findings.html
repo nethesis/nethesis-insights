@@ -32,11 +32,12 @@ summary, evidence and suggested action.</small></p>
 </fieldset>
 </form>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
 <tr>
-<th>ID</th><th>System</th><th>Severity</th><th>Status</th>
-<th class="num">Occurrences</th><th>Title</th><th>Last seen</th>
+<th scope="col">ID</th><th scope="col">System</th><th scope="col">Severity</th><th scope="col">Status</th>
+<th scope="col" class="num">Occurrences</th><th scope="col">Title</th><th scope="col">Last seen</th>
 </tr>
 </thead>
 <tbody>
@@ -72,5 +73,6 @@ summary, evidence and suggested action.</small></p>
 {{end}}
 </tbody>
 </table>
+</figure>
 <p><small>Rows are the {{len .Findings}} most-recently-seen findings matching this filter (capped server-side), ordered severity-first within that page &mdash; not a global top-N by severity.</small></p>
 {{end}}

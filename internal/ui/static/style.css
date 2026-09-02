@@ -11,6 +11,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
    severity/status chips, and the active-nav-link mark. Colours below are
    Pico's own custom properties so both themes stay correct automatically. */
 
+/* Pico's overflow-auto utility only sets overflow:auto; a listing table
+   still needs a max-height to actually scroll instead of pushing the page
+   down. Applied to the <figure> wrapper of tables whose row count grows with
+   the fleet, never the small fixed-size key/value summary tables. */
+figure.overflow-auto {
+  max-height: 70vh;
+}
+
 .mono, td.mono, th.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

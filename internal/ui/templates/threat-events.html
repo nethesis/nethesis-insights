@@ -17,10 +17,11 @@ reported this IP&rdquo;. Rows are pruned once past the retention window.</small>
 </fieldset>
 </form>
 
-<table>
+<figure class="overflow-auto">
+<table class="striped">
 <thead>
-<tr><th>Observed</th><th>System</th><th>Attacker IP</th><th>Scenario</th>
-<th class="num">Hits</th><th class="num">Ban</th></tr>
+<tr><th scope="col">Observed</th><th scope="col">System</th><th scope="col">Attacker IP</th><th scope="col">Scenario</th>
+<th scope="col" class="num">Hits</th><th scope="col" class="num">Ban</th></tr>
 </thead>
 <tbody>
 {{range .Events}}
@@ -37,4 +38,5 @@ reported this IP&rdquo;. Rows are pruned once past the retention window.</small>
 {{end}}
 </tbody>
 </table>
+</figure>
 {{end}}
