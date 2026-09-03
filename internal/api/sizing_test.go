@@ -245,6 +245,72 @@ func TestSizingIngestAcceptsAReportItStoredNothingFrom(t *testing.T) {
 	}
 }
 
+// A real reporter derives mem_total_bytes, cpu_cores, node_id, instances and
+// facts_ok from Prometheus, which has no integer type, so a live cluster
+// sends e.g. "mem_total_bytes": 8054087680.0. Rejecting a fractional literal
+// in an integer wire field used to 400 the ENTIRE report -- every node, every
+// day. The two forms must store identically.
+func TestSizingIngestAcceptsFractionalIntegerFields(t *testing.T) {
+	intBody := `{"schema_version":1,"days":[{"day":"2026-09-01","nodes":[
+		{"node_id":1,"metrics_present":true,"sample_coverage":0.99,
+		 "hardware":{"cpu_cores":4,"mem_total_bytes":8054087680},
+		 "modules":[{"family":"mail","instances":2,"facts_ok":2}]}]}]}`
+	floatBody := `{"schema_version":1,"days":[{"day":"2026-09-01","nodes":[
+		{"node_id":1.0,"metrics_present":true,"sample_coverage":0.99,
+		 "hardware":{"cpu_cores":4.0,"mem_total_bytes":8054087680.0},
+		 "modules":[{"family":"mail","instances":2.0,"facts_ok":2.0}]}]}]}`
+
+	intStore := &fakeSizingStore{}
+	if rec := postSizing(t, sizingServer(intStore), intBody, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("integer form: status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	floatStore := &fakeSizingStore{}
+	if rec := postSizing(t, sizingServer(floatStore), floatBody, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("fractional form: status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+
+	if len(intStore.days) != 1 || len(intStore.days[0].Nodes) != 1 ||
+		len(floatStore.days) != 1 || len(floatStore.days[0].Nodes) != 1 {
+		t.Fatalf("stored days = %#v / %#v", intStore.days, floatStore.days)
+	}
+	intNode, floatNode := intStore.days[0].Nodes[0], floatStore.days[0].Nodes[0]
+
+	if floatNode.NodeID != intNode.NodeID {
+		t.Errorf("node_id = %d, want %d", floatNode.NodeID, intNode.NodeID)
+	}
+	if floatNode.Hardware.CPUCores != intNode.Hardware.CPUCores {
+		t.Errorf("cpu_cores = %d, want %d", floatNode.Hardware.CPUCores, intNode.Hardware.CPUCores)
+	}
+	if floatNode.Hardware.MemTotalBytes != intNode.Hardware.MemTotalBytes {
+		t.Errorf("mem_total_bytes = %d, want %d", floatNode.Hardware.MemTotalBytes, intNode.Hardware.MemTotalBytes)
+	}
+	if len(floatNode.Modules) != 1 || len(intNode.Modules) != 1 {
+		t.Fatalf("modules = %#v / %#v", floatNode.Modules, intNode.Modules)
+	}
+	if floatNode.Modules[0].Instances != intNode.Modules[0].Instances ||
+		floatNode.Modules[0].FactsOK != intNode.Modules[0].FactsOK {
+		t.Errorf("instances/facts_ok = %d/%d, want %d/%d",
+			floatNode.Modules[0].Instances, floatNode.Modules[0].FactsOK,
+			intNode.Modules[0].Instances, intNode.Modules[0].FactsOK)
+	}
+}
+
+// The fractional-tolerant decode above must not weaken the numbers-only
+// privacy rule for the open workload map: a string or bool there is still a
+// 400, never silently dropped and accepted.
+func TestSizingIngestRejectsNonNumericWorkloadValue(t *testing.T) {
+	for _, raw := range []string{`"3"`, `true`} {
+		body := `{"schema_version":1,"days":[{"day":"2026-09-01","nodes":[` +
+			`{"node_id":1,"metrics_present":true,"sample_coverage":0.99,` +
+			`"hardware":{"cpu_cores":4,"mem_total_bytes":8589934592},` +
+			`"modules":[{"family":"mail","instances":1,"facts_ok":1,"workload":{"mailboxes":` + raw + `}}]}]}]}`
+		rec := postSizing(t, sizingServer(&fakeSizingStore{}), body, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("workload value %s: status = %d, want 400: %s", raw, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // Ingest is fail-open on content: one malformed node must not cost the report
 // its siblings.
 func TestSizingIngestKeepsSiblingsOfABadNode(t *testing.T) {

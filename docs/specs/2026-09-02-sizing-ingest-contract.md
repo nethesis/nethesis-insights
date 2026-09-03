@@ -114,6 +114,15 @@ before today is the newest complete day, and anything older than Prometheus'
 }
 ```
 
+`node_id`, `cpu_cores`, `mem_total_bytes`, `instances` and `facts_ok` are
+logically integers, but the server accepts a JSON number written with a
+fractional part there too (`"mem_total_bytes": 8054087680.0` as well as
+`8054087680`) and truncates it toward zero. A reporter deriving these from
+Prometheus, which has no integer type, can only ever emit a float literal, and
+rejecting one would 400 the entire report. This tolerance applies to those
+five integer fields only — a JSON string, boolean, array or object in any
+field, `workload` included, is still a `400`.
+
 `system_id` is optional — the credential already identifies the reporter — but a
 mismatch when present is `403`, never something to silently override. Same rule
 as `/v1/bundles` and `/v1/threat-events`.

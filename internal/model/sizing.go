@@ -3,6 +3,8 @@
 
 package model
 
+import "encoding/json"
+
 // Fleet-sizing wire and internal types.
 //
 // This is a third pipeline, beside the bundle/gate/LLM path and Threat Shield.
@@ -54,6 +56,44 @@ type SizingDay struct {
 	Cluster *SizingCluster `json:"cluster,omitempty"`
 }
 
+// WireInt decodes a wire integer field that a reporter may legitimately send
+// with a fractional part. node_id, cpu_cores, mem_total_bytes, instances and
+// facts_ok are all logically integers, but a reporter that derives one from
+// Prometheus -- which has no integer type -- can only ever emit a float
+// literal ("mem_total_bytes": 8054087680.0 is exactly what ns8-core's
+// cluster/get-facts sends, read off a live cluster). encoding/json's default
+// int/int64 unmarshaling refuses any fractional literal outright, which would
+// reject the entire report over one cosmetic float. WireInt accepts both "12"
+// and "12.0" and truncates toward zero; a JSON string, bool, array or object
+// still fails to decode, so the numbers-only privacy rule for workload maps
+// is untouched.
+//
+// WireInt exists only at the wire boundary: the fields below decode into it
+// via a private shadow type and immediately copy out to a plain int/int64, so
+// every Sanitized* type and every store column stays exactly as before this
+// type existed.
+type WireInt int64
+
+func (w *WireInt) UnmarshalJSON(b []byte) error {
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	if i, err := n.Int64(); err == nil {
+		*w = WireInt(i)
+		return nil
+	}
+	// Has a fractional part (or is in exponent form) -- fall back to a float
+	// and truncate. n.Float64() rejects anything that is not a JSON number at
+	// all, so a string/bool/array/object still fails here.
+	f, err := n.Float64()
+	if err != nil {
+		return err
+	}
+	*w = WireInt(int64(f))
+	return nil
+}
+
 // SizingNode is one node's day.
 //
 // MetricsPresent false marks a degraded report -- Prometheus unreachable or
@@ -71,6 +111,34 @@ type SizingNode struct {
 	Modules        []SizingModule  `json:"modules"`
 }
 
+// UnmarshalJSON accepts NodeID as a JSON number with a fractional part (see
+// WireInt) while keeping the struct field a plain int for everything
+// downstream.
+func (n *SizingNode) UnmarshalJSON(b []byte) error {
+	var w struct {
+		NodeID         WireInt         `json:"node_id"`
+		MetricsPresent bool            `json:"metrics_present"`
+		SampleCoverage float64         `json:"sample_coverage"`
+		Hardware       SizingHardware  `json:"hardware"`
+		Resources      SizingResources `json:"resources"`
+		Stress         SizingStress    `json:"stress"`
+		Modules        []SizingModule  `json:"modules"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*n = SizingNode{
+		NodeID:         int(w.NodeID),
+		MetricsPresent: w.MetricsPresent,
+		SampleCoverage: w.SampleCoverage,
+		Hardware:       w.Hardware,
+		Resources:      w.Resources,
+		Stress:         w.Stress,
+		Modules:        w.Modules,
+	}
+	return nil
+}
+
 // SizingHardware is the node's installed capacity plus the handful of
 // free-text descriptors worth keeping.
 //
@@ -85,6 +153,36 @@ type SizingHardware struct {
 	OSVersion      string `json:"os_version,omitempty"`
 	KernelRelease  string `json:"kernel_release,omitempty"`
 	Virtualization string `json:"virtualization,omitempty"`
+}
+
+// UnmarshalJSON accepts CPUCores and MemTotalBytes as a JSON number with a
+// fractional part (see WireInt): mem_total_bytes in particular is read off
+// Prometheus, which has no integer type, so a real reporter sends
+// "mem_total_bytes": 8054087680.0. MemTotalBytes stays int64-width -- a
+// node's RAM in bytes can exceed the range of a 32-bit int.
+func (h *SizingHardware) UnmarshalJSON(b []byte) error {
+	var w struct {
+		CPUCores       WireInt `json:"cpu_cores"`
+		MemTotalBytes  WireInt `json:"mem_total_bytes"`
+		CPUModel       string  `json:"cpu_model,omitempty"`
+		OSID           string  `json:"os_id,omitempty"`
+		OSVersion      string  `json:"os_version,omitempty"`
+		KernelRelease  string  `json:"kernel_release,omitempty"`
+		Virtualization string  `json:"virtualization,omitempty"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*h = SizingHardware{
+		CPUCores:       int(w.CPUCores),
+		MemTotalBytes:  int64(w.MemTotalBytes),
+		CPUModel:       w.CPUModel,
+		OSID:           w.OSID,
+		OSVersion:      w.OSVersion,
+		KernelRelease:  w.KernelRelease,
+		Virtualization: w.Virtualization,
+	}
+	return nil
 }
 
 // SizingResources holds the day's utilization percentiles.
@@ -150,6 +248,31 @@ type SizingModule struct {
 	FactsOK   int                `json:"facts_ok"`
 	Versions  []string           `json:"versions,omitempty"`
 	Workload  map[string]float64 `json:"workload,omitempty"`
+}
+
+// UnmarshalJSON accepts Instances and FactsOK as a JSON number with a
+// fractional part (see WireInt). Workload is untouched: it decodes as a plain
+// map[string]float64, so a non-numeric value there still fails to decode at
+// all, which is the numbers-only privacy rule.
+func (m *SizingModule) UnmarshalJSON(b []byte) error {
+	var w struct {
+		Family    string             `json:"family"`
+		Instances WireInt            `json:"instances"`
+		FactsOK   WireInt            `json:"facts_ok"`
+		Versions  []string           `json:"versions,omitempty"`
+		Workload  map[string]float64 `json:"workload,omitempty"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*m = SizingModule{
+		Family:    w.Family,
+		Instances: int(w.Instances),
+		FactsOK:   int(w.FactsOK),
+		Versions:  w.Versions,
+		Workload:  w.Workload,
+	}
+	return nil
 }
 
 // SizingCluster carries the cluster-wide counters that belong to no single
