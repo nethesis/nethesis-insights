@@ -80,7 +80,6 @@ type Reader interface {
 	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]store.SizingNodeUIRow, error)
 	ListSizingModules(ctx context.Context, systemID string, limit int) ([]store.SizingModuleUIRow, error)
 	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]store.SizingCohortRow, error)
-	ListSizingBuckets(ctx context.Context, limit int) ([]store.SizingBucketRow, error)
 	SizingIngestStats(ctx context.Context, limit int) ([]store.SizingIngestRow, error)
 	SizingCounts(ctx context.Context) (store.SizingCounts, error)
 
@@ -159,7 +158,6 @@ const (
 	sizingNodesLimit   = 500
 	sizingModulesLimit = 2000
 	sizingCohortsLimit = 500
-	sizingBucketsLimit = 500
 	sizingIngestLimit  = 200
 )
 
@@ -196,7 +194,7 @@ var navGroups = []navGroup{
 	}},
 	{"Sizing Pipeline", []navPage{
 		{"sizing", "/sizing", "Nodes"},
-		{"cohorts", "/cohorts", "Cohorts"},
+		{"cohorts", "/cohorts", "Recommendations"},
 	}},
 }
 
@@ -1327,9 +1325,8 @@ type cohortGroup struct {
 
 type cohortsPageData struct {
 	pageData
-	Groups  []cohortGroup
-	Buckets []store.SizingBucketRow
-	Floors  struct {
+	Groups []cohortGroup
+	Floors struct {
 		DistinctSystems int
 		Nodes           int
 	}
@@ -1344,31 +1341,21 @@ type cohortsPageData struct {
 // publishing nothing, and this pipeline's "never serve blank" is the other way
 // round from Threat Shield's for exactly that reason.
 //
-// Every group carries a caption saying what its numbers can and cannot be used
-// for, because the difference matters: `family` is co-tenanted with whatever
-// else happened to be installed and only `family_solo` is safe to quote as a
-// recommendation. And per-module cost is never *measured* by this stack -- it
-// can only be inferred from variation across nodes -- so the page must not read
-// as though it were.
+// Each group's caption says what its numbers can be used for. Only
+// family_solo is safe to quote as a recommendation; family is co-tenanted with
+// whatever else happened to be installed.
 func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 	cohorts, err := s.reader.ListSizingCohorts(r.Context(), "", sizingCohortsLimit)
 	if err != nil {
 		s.storeError(w, "cohorts", err)
 		return
 	}
-	buckets, err := s.reader.ListSizingBuckets(r.Context(), sizingBucketsLimit)
-	if err != nil {
-		s.storeError(w, "cohorts", err)
-		return
-	}
 
 	groups := []cohortGroup{
-		{Kind: sizing.CohortFamilySolo, Label: "Solo baselines",
-			Caption: "Nodes running only this module family plus lite modules. The only group safe to quote as a recommendation."},
-		{Kind: sizing.CohortFamily, Label: "Co-tenanted baselines",
-			Caption: "Every node that runs this family, alongside whatever else happens to be installed. Not a per-module cost."},
-		{Kind: sizing.CohortProfile, Label: "Deployment profiles",
-			Caption: "Keyed on the sorted non-lite family list. The long tail never clears the floor, which is intended."},
+		{Kind: sizing.CohortFamilySolo, Label: "Nodes running only this module",
+			Caption: "Use these numbers when sizing a new node for this module."},
+		{Kind: sizing.CohortFamily, Label: "Nodes running this module plus others",
+			Caption: "Context only. These nodes share their hardware, so the numbers are not this module's cost."},
 	}
 	for i := range groups {
 		for _, c := range cohorts {
@@ -1381,7 +1368,6 @@ func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 	data := cohortsPageData{
 		pageData:      s.newPageData(r, "cohorts"),
 		Groups:        groups,
-		Buckets:       buckets,
 		CensorRAMUtil: sizing.CensorRAMUtil,
 		Empty:         len(cohorts) == 0,
 	}

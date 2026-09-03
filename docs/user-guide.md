@@ -490,17 +490,14 @@ otherwise `ok`. Once a node is called `undersized` it stays that way until the
 bad days largely go away, so the verdict does not flip back and forth — a
 flapping verdict is one nobody acts on.
 
-Two guards go with it:
+The verdict also names a **main cause**: whichever resource — RAM, CPU, disk
+I/O or disk space — was the worst one on the most bad days.
 
-- **The cause has to agree with itself.** If no single axis was the worst one on
-  at least half the bad days, the verdict is downgraded and the cause is shown
-  as `mixed`. Seven bad days from seven unrelated causes is not one verdict,
-  and recommending more RAM on that evidence would be wrong.
-- **Sometimes the answer is not "buy hardware".** Because a `system_id` is a
-  cluster, the server can compare its nodes against each other. If one node is
-  at 95 % memory while another sits at 20 %, the advice is **rebalance**, not
-  buy. This output only exists because the unit is a cluster, and it is the most
-  useful thing that falls out of that.
+**Sometimes the answer is not "buy hardware".** Because a `system_id` is a
+cluster, the server can compare its nodes against each other. If one node is at
+95 % memory while another sits at 20 %, the advice is **rebalance**, not buy.
+This output only exists because the unit is a cluster, and it is the most useful
+thing that falls out of that.
 
 ### Cohort baselines: what the fleet says a deployment needs
 
@@ -510,13 +507,12 @@ percentages. Utilization is a property of hardware somebody happened to buy;
 the deliverable is advice on what to buy. The recommendation is the p90 column:
 the peak demand nine out of ten comparable nodes stay under.
 
-There are three groupings, and the difference matters:
+There are two groupings, and the difference matters:
 
 | Grouping | Answers | Safe to quote? |
 |---|---|---|
 | solo | "what does a node running only mail (plus lightweight modules) need" | **yes** |
 | co-tenanted | "what does a node that runs mail, alongside whatever else, look like" | no — it is not a per-module cost |
-| profile | "what do the common real-world combinations look like" | as a profile, yes |
 
 Three honesty rules are built into this:
 
@@ -582,8 +578,8 @@ What each page shows, in plain terms:
 | `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
 | `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, with a per-day total, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
 | `/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here. |
-| `/sizing` | One row per node, showing its most recent day: pressure, the four axis penalties behind it, the utilization percentiles beside it, and the multi-day verdict. Below it, what each node is running with its workload counts; the score's thresholds, each labelled as physically grounded, conventional or still a guess; and per-cluster ingest accounting, so "this cluster sends reports and stores nothing" comes with the rule that dropped them. |
-| `/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the censored share alongside. On a small fleet this page correctly says "insufficient fleet data" — publishing a percentile computed from three nodes would be worse than publishing nothing. Below it, the deterministic t-shirt sizes per workload metric. |
+| `/sizing` | One row per node, showing its most recent day: pressure, the four resource penalties behind it, the utilization percentiles beside it, and the multi-day verdict. Below it, what each node is running with its workload counts; the score's thresholds, each labelled as physically grounded, conventional or still a guess; and per-cluster ingest accounting, so "this cluster sends reports and stores nothing" comes with the rule that dropped them. |
+| `/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the capped share alongside. On a small fleet this page correctly says "not enough data yet" — publishing a percentile computed from three nodes would be worse than publishing nothing. |
 
 If an admin key is configured, this UI also gains a small number of **buttons**
 — add or remove an allowlist entry, approve or reject a request. Those actions,

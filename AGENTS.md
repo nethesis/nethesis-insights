@@ -178,18 +178,34 @@ Fleet-sizing rules that are as load-bearing as the gate's:
   same rule and reason as Threat Shield's promotion, and a cohort that falls
   below it is **deleted**, mirroring `ExpireBlocklist`.
 - **The lite/medium/heavy prior appears exactly once**, as `sizing.familyClass`,
-  used only for cohort assignment and presentation order — never as a weight
-  inside a published number, which would be circular. It is **derived**
+  used only to decide which families are ignorable when testing "solo" — never as
+  a weight inside a published number, which would be circular. It is **derived**
   (`ClassOf(family, workload)`) because the prior as given was already wrong for
   samba: "with file shares = medium" is a workload distinction, not a family one.
+  It is also the only reader of a stored workload value: nothing else in the pass
+  looks at one.
 - **Roll up before pruning.** `RollupSizingMonthly` must precede
   `PruneSizingDaily`, or the dropped day loses its history permanently.
+- **Two published cohort kinds, and no third.** `family_solo` (the only one
+  quotable as a recommendation) and `family` (co-tenanted, context only). A
+  `profile` keying over the sorted non-lite family list and a workload
+  t-shirt-size table both shipped and were **removed**: the profile long tail
+  never cleared the floor by design, and neither artifact had a consumer, so
+  between them they cost ~350 lines and two more concepts for nothing. Do not
+  reintroduce either without a consumer that needs it.
 - **No ridge, no k-means.** Ridge shrinkage destroys the interpretation of a
   coefficient as "the cost of module X", which is the entire product, and does
   nothing about censoring; k-means is not deterministic run to run, and a number
   published to customers must not change without the data changing. If a
   regression ever ships it must be non-negative least squares on the uncensored
   subset, labelled as an estimate distinct from the measured percentiles.
+- **The operator UI renames, the code does not.** `pressure`, `axis`, `cohort`
+  and `censored` are the stored names and stay; the two sizing pages translate
+  them (`axisLabel`, "Capped", "Nodes running only this module") because a page
+  that prints `io` and `censored` at an operator is not documentation. Page
+  descriptions are one or two plain sentences — the reasoning behind a rule lives
+  in the Go doc comments and in `docs/plans/2026-09-02-fleet-sizing-server.md`,
+  never as an essay on the page.
 
 `docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
 scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
@@ -494,7 +510,8 @@ successful no-op, not an error.
   `x == x0`, mid-ramp, `x == x1`, `x > x1` and absent; a fully idle node scores
   `pressure == 0` (the direction test); the coverage gate yields `NULL` rather
   than a division; the day window at both edges; a malformed node dropped and
-  counted while its siblings store.
+  counted while its siblings store; the verdict's main cause is the most
+  frequent one and is stable across repeated runs, because it folds a map.
 - `baseline`: temp-file SQLite, not a mock — the exclusions *are* the SQL and
   the folding. 19 distinct systems publishes nothing and 20 does; one system
   with 40 nodes does not; a cohort below the floor is deleted rather than left

@@ -107,7 +107,10 @@ func nodeRow(nodeID int, spec nodeSpec) store.SizingNodeDayRow {
 			Family: spec.family, Instances: 1, FactsOK: spec.factsOK, Workload: spec.workload,
 		}},
 	}
-	r.SetScore(fp(10), fp(8), fp(4), fp(0), fp(0), sizing.AxisMem, nil, spec.version, false)
+	r.SetScore(store.SizingScore{
+		Pressure: fp(10), Mem: fp(8), CPU: fp(4), IO: fp(0), Disk: fp(0),
+		TopAxis: sizing.AxisMem, Version: spec.version,
+	})
 	return r
 }
 
@@ -246,41 +249,6 @@ func TestHardwareChangeExcludesTheNode(t *testing.T) {
 	}
 }
 
-// facts_ok is what tells "zero mailboxes" from "the facts call failed". A
-// failed call is genuinely unknown, so it must not become a workload bucket
-// data point -- while a genuinely idle instance must.
-func TestFailedFactsCallDoesNotBucket(t *testing.T) {
-	s := newTestStore(t)
-	failed := defaultSpec()
-	failed.factsOK = 0
-	failed.workload = map[string]float64{"mailboxes": 0}
-	seed(t, s, 20, 2, 3, failed)
-
-	if err := New(s, testConfig()).Run(context.Background(), testNow); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	buckets, err := s.ListSizingBuckets(context.Background(), 100)
-	if err != nil {
-		t.Fatalf("list buckets: %v", err)
-	}
-	if len(buckets) != 0 {
-		t.Errorf("buckets = %#v; a failed facts call is unknown, not idle", buckets)
-	}
-
-	// The same fleet with the call succeeding and a genuine zero does bucket:
-	// an idle instance gives the floor cost of running the module.
-	s2 := newTestStore(t)
-	idle := defaultSpec()
-	idle.workload = map[string]float64{"mailboxes": 0}
-	seed(t, s2, 20, 2, 3, idle)
-	if err := New(s2, testConfig()).Run(context.Background(), testNow); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if buckets, _ := s2.ListSizingBuckets(context.Background(), 100); len(buckets) == 0 {
-		t.Error("an idle instance must still be bucketed")
-	}
-}
-
 // A cohort that falls below the floor is DELETED, not left stale: a published
 // baseline with no evidence behind it is worse than no baseline, because
 // nothing on the page says how old it is.
@@ -359,9 +327,15 @@ func TestVerdictsAndPlacementArePublished(t *testing.T) {
 	var rows []store.SizingDayRows
 	for d := 0; d < sizing.MinDaysPresent+2; d++ {
 		hotRow := nodeRow(1, hot)
-		hotRow.SetScore(fp(80), fp(70), fp(4), fp(0), fp(0), sizing.AxisMem, nil, sizing.PressureVersion, false)
+		hotRow.SetScore(store.SizingScore{
+			Pressure: fp(80), Mem: fp(70), CPU: fp(4), IO: fp(0), Disk: fp(0),
+			TopAxis: sizing.AxisMem, Version: sizing.PressureVersion,
+		})
 		coldRow := nodeRow(2, cold)
-		coldRow.SetScore(fp(2), fp(2), fp(0), fp(0), fp(0), sizing.AxisMem, nil, sizing.PressureVersion, false)
+		coldRow.SetScore(store.SizingScore{
+			Pressure: fp(2), Mem: fp(2), CPU: fp(0), IO: fp(0), Disk: fp(0),
+			TopAxis: sizing.AxisMem, Version: sizing.PressureVersion,
+		})
 		rows = append(rows, store.SizingDayRows{
 			Day:   testDay - int64(d),
 			Nodes: []store.SizingNodeDayRow{hotRow, coldRow},
@@ -461,14 +435,6 @@ func (r *recordingReader) UpsertSizingCohorts(context.Context, []store.SizingCoh
 }
 func (r *recordingReader) DeleteStaleSizingCohorts(context.Context, int64) (int, error) {
 	r.note("expire-cohorts")
-	return 0, nil
-}
-func (r *recordingReader) UpsertSizingBuckets(context.Context, []store.SizingBucketRow) error {
-	r.note("buckets")
-	return nil
-}
-func (r *recordingReader) DeleteStaleSizingBuckets(context.Context, int64) (int, error) {
-	r.note("expire-buckets")
 	return 0, nil
 }
 func (r *recordingReader) RollupSizingMonthly(context.Context, int64, int64) error {

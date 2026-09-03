@@ -4,7 +4,7 @@
 // Package baseline runs the fleet-sizing cohort pass: it recomputes stale
 // pressure scores, folds each node's window into a verdict, answers the
 // placement question a cluster can be asked, and publishes the cohort
-// baselines and workload buckets that clear the floor.
+// baselines that clear the floor.
 //
 // It mirrors internal/blocklist -- a narrow Reader, a Config, a
 // Runner.Run(ctx, now) error, a documented step order and housekeeping that
@@ -19,7 +19,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 )
@@ -37,8 +36,6 @@ type Reader interface {
 	UpsertSizingVerdicts(ctx context.Context, rows []store.SizingVerdictRow) error
 	UpsertSizingCohorts(ctx context.Context, rows []store.SizingCohortRow) error
 	DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error)
-	UpsertSizingBuckets(ctx context.Context, rows []store.SizingBucketRow) error
-	DeleteStaleSizingBuckets(ctx context.Context, before int64) (int, error)
 	RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error
 	PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error)
 }
@@ -94,8 +91,8 @@ func New(r Reader, cfg Config) *Runner {
 //  4. Build cohorts: per-node reduction, then across-node percentiles,
 //     applying and counting the censoring / coverage / hardware-change
 //     exclusions
-//  5. Upsert baselines and workload buckets that clear the floor
-//  6. DELETE cohorts and buckets that no longer clear it
+//  5. Upsert the baselines that clear the floor
+//  6. DELETE the cohorts that no longer clear it
 //  7. RollupSizingMonthly           housekeeping: logged, never fatal
 //  8. PruneSizingDaily              only if 7 succeeded
 //
@@ -143,12 +140,9 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	}
 	attachFamilies(nodes, families, metrics)
 
-	cohorts, buckets := r.build(nodes, passStart)
+	cohorts := r.build(nodes, passStart)
 	if err := r.store.UpsertSizingCohorts(ctx, cohorts); err != nil {
 		return fmt.Errorf("baseline: cohorts: %w", err)
-	}
-	if err := r.store.UpsertSizingBuckets(ctx, buckets); err != nil {
-		return fmt.Errorf("baseline: buckets: %w", err)
 	}
 
 	// Deleting what this pass did not republish is exactly "delete a cohort
@@ -158,10 +152,6 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	droppedCohorts, err := r.store.DeleteStaleSizingCohorts(ctx, passStart)
 	if err != nil {
 		return fmt.Errorf("baseline: expire cohorts: %w", err)
-	}
-	droppedBuckets, err := r.store.DeleteStaleSizingBuckets(ctx, passStart)
-	if err != nil {
-		return fmt.Errorf("baseline: expire buckets: %w", err)
 	}
 
 	// Housekeeping failures are logged, not fatal: they must not undo the
@@ -181,9 +171,8 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 
 	slog.Info("sizing cohort pass",
 		"recomputed", recomputed, "node_days", len(window), "nodes", len(nodes),
-		"verdicts", len(verdicts), "cohorts", len(cohorts), "buckets", len(buckets),
-		"cohorts_dropped", droppedCohorts, "buckets_dropped", droppedBuckets,
-		"pruned", pruned,
+		"verdicts", len(verdicts), "cohorts", len(cohorts),
+		"cohorts_dropped", droppedCohorts, "pruned", pruned,
 		"min_distinct_systems", r.cfg.MinDistinctSystems, "min_nodes", r.cfg.MinNodes,
 		"pressure_version", sizing.PressureVersion)
 	return nil
@@ -207,16 +196,17 @@ func (r *Runner) recompute(ctx context.Context) (int, error) {
 	}
 	for i := range stale {
 		row := &stale[i]
-		score := sizing.Evaluate(model.SanitizedSizingNode{
-			NodeID:         row.NodeID,
-			MetricsPresent: row.MetricsPresent,
-			SampleCoverage: row.SampleCoverage,
-			Hardware:       row.Hardware,
-			Resources:      row.Resources,
-			Stress:         row.Stress,
+		score := sizing.Evaluate(row.ScoreInput())
+		row.SetScore(store.SizingScore{
+			Pressure: score.Pressure,
+			Mem:      score.Mem,
+			CPU:      score.CPU,
+			IO:       score.IO,
+			Disk:     score.Disk,
+			TopAxis:  score.TopAxis,
+			Reasons:  score.Reasons,
+			Version:  score.Version,
 		})
-		row.SetScore(score.Pressure, score.Mem, score.CPU, score.IO, score.Disk,
-			score.TopAxis, score.Reasons, score.Version, score.OOMSuspect)
 	}
 	if err := r.store.UpdateSizingScores(ctx, stale); err != nil {
 		return 0, fmt.Errorf("baseline: update scores: %w", err)
@@ -246,9 +236,11 @@ type node struct {
 	installedCores  float64
 	hardwareChanged bool
 
-	// workloads is family -> metric -> value, filled by attachFamilies.
+	// workloads is family -> metric -> value, filled by attachFamilies. The
+	// metrics are here for sizing.ClassOf, which decides whether a family is
+	// ignorable when testing "solo" -- samba's class turns on its share
+	// count. Nothing else reads a workload value.
 	workloads map[string]map[string]float64
-	factsOK   map[string]int
 }
 
 // foldNodes groups the window's node-days per node and applies the per-day
@@ -273,16 +265,14 @@ func foldNodes(window []store.SizingWindowRow, fromDay int64, now int64) map[str
 				systemID:  row.SystemID,
 				nodeID:    row.NodeID,
 				workloads: map[string]map[string]float64{},
-				factsOK:   map[string]int{},
 			}
 			out[key] = n
 		}
 
 		n.days = append(n.days, sizing.DayScore{
-			Day:        row.Day,
-			Pressure:   row.Pressure,
-			TopAxis:    row.TopAxis,
-			OOMSuspect: row.OOMSuspect,
+			Day:      row.Day,
+			Pressure: row.Pressure,
+			TopAxis:  row.TopAxis,
 		})
 		if row.HWChangedAt >= fromMillis && row.HWChangedAt <= now {
 			n.hardwareChanged = true
@@ -331,7 +321,6 @@ func attachFamilies(nodes map[string]*node, families []store.SizingNodeFamilyRow
 		if _, seen := n.workloads[f.Family]; !seen {
 			n.workloads[f.Family] = map[string]float64{}
 		}
-		n.factsOK[f.Family] = f.FactsOK
 	}
 	for _, m := range metrics {
 		n, ok := nodes[store.SizingNodeKey(m.SystemID, m.NodeID)]
@@ -392,16 +381,14 @@ func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDay
 	return out
 }
 
-// bucketKey identifies one workload distribution: a module family and one of
-// its metrics.
-type bucketKey struct{ family, metric string }
+// cohortKey identifies one published baseline: a keying and its key.
+type cohortKey struct{ kind, key string }
 
-// cohort accumulates one (kind, key) across nodes.
+// cohort accumulates one cohortKey across nodes.
 type cohort struct {
-	kind, key string
-	nodes     int
-	systems   map[string]bool
-	censored  int
+	nodes    int
+	systems  map[string]bool
+	censored int
 
 	ramUsed        []float64
 	cpuCoresUsed   []float64
@@ -409,12 +396,10 @@ type cohort struct {
 	installedCores []float64
 }
 
-// build is steps 4 and 5: the two-stage aggregation, the censoring
-// exclusion, the three keyings and the floor.
-func (r *Runner) build(nodes map[string]*node, now int64) ([]store.SizingCohortRow, []store.SizingBucketRow) {
-	cohorts := map[string]*cohort{}
-	points := map[bucketKey][]sizing.WorkloadPoint{}
-	bucketSystems := map[bucketKey]map[string]bool{}
+// build is steps 4 and 5: the two-stage aggregation, the censoring exclusion,
+// the two keyings and the floor.
+func (r *Runner) build(nodes map[string]*node, now int64) []store.SizingCohortRow {
+	cohorts := map[cohortKey]*cohort{}
 
 	// Deterministic iteration: a published number must not depend on map
 	// order, even where the arithmetic is order-independent.
@@ -448,14 +433,11 @@ func (r *Runner) build(nodes map[string]*node, now int64) ([]store.SizingCohortR
 		swapIn, oom := n.maxSwapIn, n.maxOOM
 		censored := sizing.Censored(&ramUtil, &swapIn, &oom)
 
-		nonLite := sizing.NonLiteFamilies(n.workloads)
-
 		add := func(kind, ckey string) {
-			id := kind + "\x00" + ckey
-			c, seen := cohorts[id]
+			c, seen := cohorts[cohortKey{kind, ckey}]
 			if !seen {
-				c = &cohort{kind: kind, key: ckey, systems: map[string]bool{}}
-				cohorts[id] = c
+				c = &cohort{systems: map[string]bool{}}
+				cohorts[cohortKey{kind, ckey}] = c
 			}
 			c.nodes++
 			c.systems[n.systemID] = true
@@ -469,6 +451,7 @@ func (r *Runner) build(nodes map[string]*node, now int64) ([]store.SizingCohortR
 			c.installedCores = append(c.installedCores, n.installedCores)
 		}
 
+		nonLite := sizing.NonLiteFamilies(n.workloads)
 		families := make([]string, 0, len(n.workloads))
 		for family := range n.workloads {
 			families = append(families, family)
@@ -480,38 +463,10 @@ func (r *Runner) build(nodes map[string]*node, now int64) ([]store.SizingCohortR
 			if sizing.IsSolo(family, nonLite) {
 				add(sizing.CohortFamilySolo, family)
 			}
-			if censored {
-				continue
-			}
-			// Idle instances are bucketed, not dropped: a mail server with
-			// zero mailboxes gives the floor cost of running the module,
-			// which people want -- it just is not a "mail node". facts_ok is
-			// what tells "zero mailboxes" from "the facts call failed", and a
-			// failed call is genuinely unknown.
-			if n.factsOK[family] == 0 {
-				continue
-			}
-			metricNames := make([]string, 0, len(n.workloads[family]))
-			for metric := range n.workloads[family] {
-				metricNames = append(metricNames, metric)
-			}
-			sort.Strings(metricNames)
-			for _, metric := range metricNames {
-				bk := bucketKey{family, metric}
-				points[bk] = append(points[bk], sizing.WorkloadPoint{
-					Value:    n.workloads[family][metric],
-					RAMBytes: ramUsed,
-				})
-				if bucketSystems[bk] == nil {
-					bucketSystems[bk] = map[string]bool{}
-				}
-				bucketSystems[bk][n.systemID] = true
-			}
 		}
-		add(sizing.CohortProfile, sizing.ProfileKey(nonLite))
 	}
 
-	return r.publishCohorts(cohorts, now), r.publishBuckets(points, bucketSystems, now)
+	return r.publishCohorts(cohorts, now)
 }
 
 // publishCohorts applies the floor and turns each surviving cohort into a
@@ -520,15 +475,15 @@ func (r *Runner) build(nodes map[string]*node, now int64) ([]store.SizingCohortR
 // The floor counts **distinct system_id**, the same rule and the same reason
 // as Threat Shield's promotion: one MSP's forty identical clusters is one
 // opinion about hardware, not forty.
-func (r *Runner) publishCohorts(cohorts map[string]*cohort, now int64) []store.SizingCohortRow {
+func (r *Runner) publishCohorts(cohorts map[cohortKey]*cohort, now int64) []store.SizingCohortRow {
 	out := make([]store.SizingCohortRow, 0, len(cohorts))
-	for _, c := range cohorts {
+	for id, c := range cohorts {
 		if len(c.systems) < r.cfg.MinDistinctSystems || c.nodes < r.cfg.MinNodes {
 			continue
 		}
 		row := store.SizingCohortRow{
-			CohortKind:         c.kind,
-			CohortKey:          c.key,
+			CohortKind:         id.kind,
+			CohortKey:          id.key,
 			Nodes:              c.nodes,
 			DistinctSystems:    len(c.systems),
 			CensoredNodes:      c.censored,
@@ -563,44 +518,3 @@ func (r *Runner) publishCohorts(cohorts map[string]*cohort, now int64) []store.S
 	})
 	return out
 }
-
-func (r *Runner) publishBuckets(points map[bucketKey][]sizing.WorkloadPoint,
-	systems map[bucketKey]map[string]bool, now int64) []store.SizingBucketRow {
-	var out []store.SizingBucketRow
-	for key, ps := range points {
-		if len(systems[key]) < r.cfg.MinDistinctSystems || len(ps) < r.cfg.MinNodes {
-			continue
-		}
-		for _, b := range sizing.BucketWorkload(ps) {
-			row := store.SizingBucketRow{
-				Family:    key.family,
-				Metric:    key.metric,
-				Bucket:    b.Name,
-				Lo:        b.Lo,
-				Nodes:     b.Nodes,
-				RAMMedian: b.RAMBytes,
-				UpdatedAt: now,
-			}
-			// The top bucket's ceiling is stored as NULL, not as a finite
-			// number: a finite top would silently drop the largest
-			// deployment.
-			if !isInf(b.Hi) {
-				hi := b.Hi
-				row.Hi = &hi
-			}
-			out = append(out, row)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Family != out[j].Family {
-			return out[i].Family < out[j].Family
-		}
-		if out[i].Metric != out[j].Metric {
-			return out[i].Metric < out[j].Metric
-		}
-		return out[i].Lo < out[j].Lo
-	})
-	return out
-}
-
-func isInf(v float64) bool { return v > 1e300 }

@@ -44,7 +44,6 @@ type fakeReader struct {
 	sizingNodes   []store.SizingNodeUIRow
 	sizingModules []store.SizingModuleUIRow
 	sizingCohorts []store.SizingCohortRow
-	sizingBuckets []store.SizingBucketRow
 	sizingIngest  []store.SizingIngestRow
 
 	err error // when set, every method returns this error instead

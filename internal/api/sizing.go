@@ -174,8 +174,16 @@ func scoreSizingDays(days []model.SanitizedSizingDay) []store.SizingDayRows {
 				Modules:        n.Modules,
 			})
 			score := sizing.Evaluate(n)
-			row.Nodes[len(row.Nodes)-1].SetScore(score.Pressure, score.Mem, score.CPU, score.IO, score.Disk,
-				score.TopAxis, score.Reasons, score.Version, score.OOMSuspect)
+			row.Nodes[len(row.Nodes)-1].SetScore(store.SizingScore{
+				Pressure: score.Pressure,
+				Mem:      score.Mem,
+				CPU:      score.CPU,
+				IO:       score.IO,
+				Disk:     score.Disk,
+				TopAxis:  score.TopAxis,
+				Reasons:  score.Reasons,
+				Version:  score.Version,
+			})
 		}
 		out = append(out, row)
 	}

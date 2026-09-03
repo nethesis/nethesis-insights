@@ -227,23 +227,6 @@ func TestOOMTermIsAStepShortOf100(t *testing.T) {
 	}
 }
 
-// A day that rebooted has an untrustworthy kill count -- increase()
-// extrapolates across counter resets -- so the day is flagged for the verdict
-// to discount rather than the score trying to correct it.
-func TestOOMOnARebootDayIsFlagged(t *testing.T) {
-	n := idle()
-	n.Stress.OOMKills = f(2)
-	n.Stress.Reboots = f(1)
-	if !Evaluate(n).OOMSuspect {
-		t.Error("an OOM kill on a reboot day must be flagged as suspect")
-	}
-
-	n.Stress.Reboots = f(0)
-	if Evaluate(n).OOMSuspect {
-		t.Error("an OOM kill with no reboot must not be flagged")
-	}
-}
-
 // A filesystem at 98% is not "under pressure": it is about to stop working.
 func TestFilesystemFullIsTerminal(t *testing.T) {
 	n := idle()
@@ -475,52 +458,29 @@ func TestVerdictHysteresis(t *testing.T) {
 	}
 }
 
-// Seven bad days from seven unrelated causes is not one verdict, and
-// recommending RAM on that evidence would be wrong.
-func TestVerdictRequiresAxisAgreement(t *testing.T) {
-	axes := []string{AxisMem, AxisCPU, AxisIO, AxisDisk, AxisMem, AxisCPU, AxisIO}
+// The verdict names the resource that was worst on the most bad days, and the
+// answer must not depend on map iteration order.
+func TestVerdictNamesTheMostFrequentCause(t *testing.T) {
+	agreed := append(days(UndersizedDays, 90), days(MinDaysPresent, 1)...)
+	got := EvaluateVerdict(agreed, "")
+	if got.State != VerdictUndersized {
+		t.Fatalf("verdict = %q, want undersized", got.State)
+	}
+	if got.TopAxis != AxisMem {
+		t.Errorf("top axis = %q, want %q", got.TopAxis, AxisMem)
+	}
+
+	// Four bad days on mem, three on cpu: mem wins, deterministically.
 	var mixed []DayScore
-	for i, axis := range axes {
+	for i, axis := range []string{AxisMem, AxisCPU, AxisMem, AxisCPU, AxisMem, AxisCPU, AxisMem} {
 		p := 90.0
 		mixed = append(mixed, DayScore{Day: int64(20000 + i), Pressure: &p, TopAxis: axis})
 	}
 	mixed = append(mixed, days(MinDaysPresent, 1)...)
-
-	got := EvaluateVerdict(mixed, "")
-	if got.State != VerdictAtRisk {
-		t.Errorf("verdict = %q, want at_risk when no axis dominates", got.State)
-	}
-	if got.TopAxis != AxisMixed {
-		t.Errorf("top axis = %q, want %q", got.TopAxis, AxisMixed)
-	}
-
-	agreed := append(days(UndersizedDays, 90), days(MinDaysPresent, 1)...)
-	if got := EvaluateVerdict(agreed, ""); got.TopAxis != AxisMem {
-		t.Errorf("top axis = %q, want %q when one axis dominates", got.TopAxis, AxisMem)
-	}
-}
-
-// A day whose OOM count came from a reboot still counts as present -- the
-// measurement happened -- but not as a bad day.
-func TestVerdictDiscountsRebootDays(t *testing.T) {
-	var suspect []DayScore
-	for i := 0; i < UndersizedDays; i++ {
-		p := 90.0
-		suspect = append(suspect, DayScore{Day: int64(20000 + i), Pressure: &p,
-			TopAxis: AxisMem, OOMSuspect: true})
-	}
-	suspect = append(suspect, days(MinDaysPresent, 1)...)
-
-	got := EvaluateVerdict(suspect, "")
-	if got.BadDays != 0 {
-		t.Errorf("bad days = %d, want 0 -- reboot days are discounted", got.BadDays)
-	}
-	if got.DaysPresent != UndersizedDays+MinDaysPresent {
-		t.Errorf("days present = %d, want %d -- the measurement still happened",
-			got.DaysPresent, UndersizedDays+MinDaysPresent)
-	}
-	if got.State != VerdictOK {
-		t.Errorf("verdict = %q, want ok", got.State)
+	for i := 0; i < 20; i++ {
+		if got := EvaluateVerdict(mixed, ""); got.TopAxis != AxisMem {
+			t.Fatalf("top axis = %q, want %q on every run", got.TopAxis, AxisMem)
+		}
 	}
 }
 

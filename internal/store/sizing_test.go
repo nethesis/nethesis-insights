@@ -41,7 +41,10 @@ func sizingNodeRow(nodeID int, ramUtil float64) SizingNodeDayRow {
 			Workload: map[string]float64{"mailboxes": 210, "domains": 3},
 		}},
 	}
-	r.SetScore(fp(12), fp(10), fp(4), fp(0), fp(0), "mem", []string{"ram_headroom"}, 1, false)
+	r.SetScore(SizingScore{
+		Pressure: fp(12), Mem: fp(10), CPU: fp(4), IO: fp(0), Disk: fp(0),
+		TopAxis: "mem", Reasons: []string{"ram_headroom"}, Version: 1,
+	})
 	return r
 }
 
@@ -231,7 +234,7 @@ func TestSizingDegradedReportIsNotAHardwareChange(t *testing.T) {
 	}
 
 	degraded := SizingNodeDayRow{NodeID: 1}
-	degraded.SetScore(nil, nil, nil, nil, nil, "", []string{"insufficient_coverage"}, 1, false)
+	degraded.SetScore(SizingScore{Reasons: []string{"insufficient_coverage"}, Version: 1})
 	later := testSizingNow + dayMillis
 	if _, err := s.UpsertSizingDays(ctx, testSizingSystem, "1.0.0",
 		[]SizingDayRows{{Day: testSizingDay + 1, Nodes: []SizingNodeDayRow{degraded}}}, later); err != nil {
@@ -284,7 +287,10 @@ func TestStaleSizingScoresAndUpdate(t *testing.T) {
 		t.Errorf("coverage inputs did not survive: %+v", got)
 	}
 
-	got.SetScore(fp(77), fp(70), nil, nil, nil, "mem", []string{"oom_kill"}, 2, true)
+	got.SetScore(SizingScore{
+		Pressure: fp(77), Mem: fp(70), TopAxis: "mem",
+		Reasons: []string{"oom_kill"}, Version: 2,
+	})
 	if err := s.UpdateSizingScores(ctx, []SizingNodeDayRow{got}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -292,9 +298,6 @@ func TestStaleSizingScoresAndUpdate(t *testing.T) {
 	window, _ := s.SizingWindow(ctx, testSizingDay, testSizingDay)
 	if window[0].Pressure == nil || *window[0].Pressure != 77 {
 		t.Errorf("pressure = %v, want 77", window[0].Pressure)
-	}
-	if !window[0].OOMSuspect {
-		t.Error("oom_suspect was not written back")
 	}
 	if left, _ := s.StaleSizingScores(ctx, 2, 100); len(left) != 0 {
 		t.Errorf("stale rows after recompute = %d, want 0", len(left))
@@ -333,34 +336,6 @@ func TestSizingCohortsPublishAndExpire(t *testing.T) {
 	}
 	if got, _ := s.ListSizingCohorts(ctx, "", 10); len(got) != 0 {
 		t.Errorf("cohorts survived the expiry: %#v", got)
-	}
-}
-
-func TestSizingBucketsKeepAnOpenTopBucket(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-
-	rows := []SizingBucketRow{
-		{Family: "mail", Metric: "mailboxes", Bucket: "small", Lo: 0, Hi: fp(50), Nodes: 12, UpdatedAt: 1000},
-		{Family: "mail", Metric: "mailboxes", Bucket: "large", Lo: 200, Hi: nil, Nodes: 9, UpdatedAt: 1000},
-	}
-	if err := s.UpsertSizingBuckets(ctx, rows); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	got, err := s.ListSizingBuckets(ctx, 10)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("buckets = %d, want 2", len(got))
-	}
-	for _, b := range got {
-		if b.Bucket == "large" && b.Hi != nil {
-			t.Error("the top bucket must have no ceiling, or the largest deployment is dropped")
-		}
-		if b.Bucket == "small" && (b.Hi == nil || *b.Hi != 50) {
-			t.Errorf("small bucket ceiling = %v, want 50", b.Hi)
-		}
 	}
 }
 

@@ -89,7 +89,7 @@ and `ui` does not import `api` or `analyzer`.
 | `internal/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
-| `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the cohort keying and the `FamilyClass` prior. Owns `PressureVersion`. |
+| `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and the family class prior. Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/api` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `POST /v1/threat-events`, `GET /v1/blocklist`, `POST /v1/allowlist-requests`, `POST /v1/sizing-reports`, `/healthz`. |
 | `internal/admin` | The allowlist admin plane: bearer-key auth, the seven `/admin/v1/allowlist*` handlers, on its own listener. A separate package from `internal/api` so the public ingest surface and the admin surface can never accidentally share a route table. |
@@ -335,8 +335,8 @@ both runners satisfy.
 3. recompute cluster imbalance for multi-node clusters
 4. build cohorts: per-node reduction, then across-node percentiles, applying
    and counting the censoring / coverage / hardware-change exclusions
-5. upsert the baselines and workload buckets that clear the floor
-6. DELETE the cohorts and buckets that no longer clear it
+5. upsert the baselines that clear the floor
+6. DELETE the cohorts that no longer clear it
 7. RollupSizingMonthly          housekeeping: logged, never fatal
 8. PruneSizingDaily             only if 7 succeeded
 ```
@@ -407,15 +407,14 @@ without a goroutine to leak.
 | `threat_daily_stats` | Per day and scenario rollup, written before the prune so the trend outlives the raw events. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
 | `sizing_node_daily` | One node-day of measurements plus the derived `pressure`, its four axis penalties, `pressure_reasons` and `pressure_version`. Keyed `(system_id, node_id, day)` — a `system_id` is a *cluster*, so one report writes N rows. Every measurement column is nullable and `NULL` means **not measured**, never zero. |
-| `sizing_module_daily` | One module family per node-day: `instances`, `facts_ok`, and a display-only `versions` JSON array. |
-| `sizing_module_metric` | The open workload map, **normalised to rows** so the cohort pass groups it in SQL. A JSON blob would force ~1.4M rows through the single-writer connection and a JSON parse each, hourly. |
+| `sizing_module_daily` | One module family per node-day: `instances`, plus a display-only `facts_ok` and `versions` JSON array. Nothing derived reads either. |
+| `sizing_module_metric` | The open workload map, **normalised to rows** so the cohort pass groups it in SQL. The pass reads a value only through `sizing.ClassOf`, which decides whether a family counts as lite. A JSON blob would force ~1.4M rows through the single-writer connection and a JSON parse each, hourly. |
 | `sizing_cluster_daily` | Cluster-wide counters belonging to no single node — the summed `user_domains` totals from `cluster/get-facts`. |
 | `sizing_node` | The `(system_id, node_id)` dimension, and the fix for unstable node identity: `hw_changed_at` records when installed capacity last changed under a stable id, which is how the cohort pass excludes a node whose percentiles would straddle two physical machines. |
 | `sizing_ingest_daily` | Per day and cluster ingest accounting. The one sizing table that **accumulates**. |
 | `sizing_node_monthly` | Monthly rollup, `month TEXT 'YYYY-MM'`, kept indefinitely so history survives `SIZING_RETENTION`. |
 | `sizing_node_verdict` | The multi-day verdict per node, plus its cluster's placement answer denormalised onto every node of that cluster so one query renders the page. |
-| `sizing_cohort_baseline` | Published baselines per `(cohort_kind, cohort_key)` — absolute bytes and cores, with `censored_nodes` alongside. |
-| `sizing_workload_bucket` | Deterministic t-shirt sizes per `(module_family, metric, bucket)`. `hi` is `NULL` on the top bucket. |
+| `sizing_cohort_baseline` | Published baselines per `(cohort_kind, cohort_key)` — absolute bytes and cores, with `censored_nodes` alongside. Two kinds only: `family_solo` (the quotable one) and `family` (co-tenanted, context). |
 
 `attacker_ip` is stored as a normalized `netip.Addr.String()`, so text equality
 is address identity — that is what lets a portable `TEXT` column stand in for

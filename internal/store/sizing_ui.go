@@ -323,35 +323,6 @@ func (s *SQLiteStore) ListSizingCohorts(ctx context.Context, kind string, limit 
 	return result, rows.Err()
 }
 
-// ListSizingBuckets returns the published workload t-shirt sizes.
-func (s *SQLiteStore) ListSizingBuckets(ctx context.Context, limit int) ([]SizingBucketRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT module_family, metric, bucket, lo, hi, nodes, ram_bytes_median, updated_at
-		FROM sizing_workload_bucket
-		ORDER BY module_family, metric, lo
-		LIMIT ?
-	`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: list sizing buckets: %w", err)
-	}
-	defer rows.Close()
-
-	result := []SizingBucketRow{}
-	for rows.Next() {
-		var (
-			r  SizingBucketRow
-			hi sql.NullFloat64
-		)
-		if err := rows.Scan(&r.Family, &r.Metric, &r.Bucket, &r.Lo, &hi,
-			&r.Nodes, &r.RAMMedian, &r.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("store: scan sizing bucket: %w", err)
-		}
-		r.Hi = floatPtr(hi)
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
 // SizingIngestStats returns the per-day, per-system drop accounting, newest
 // first. This is how "why does this cluster send but store nothing" is
 // answered without reading logs.

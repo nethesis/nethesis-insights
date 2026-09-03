@@ -1595,9 +1595,9 @@ components:
           type: number
           minimum: 0
           description: >-
-            changes(node_boot_time_seconds[1d]). Sent so the verdict can
-            discount a day whose counters were reset, rather than the server
-            trying to correct oom_kills for it.
+            changes(node_boot_time_seconds[1d]). Stored as a measurement and
+            shown in the operator UI; nothing in the pressure score or the
+            verdict reads it.
 
     SizingModule:
       type: object
@@ -1615,10 +1615,10 @@ components:
           type: integer
           minimum: 0
           description: >-
-            How many of those instances answered get-facts. Load-bearing and
-            must be honest: a zero mailbox count from a failed call is
-            indistinguishable from a genuinely empty mail server, and the
-            cohort pass's idle handling turns on exactly that difference.
+            How many of those instances answered get-facts. Must be honest: a
+            zero mailbox count from a failed call is indistinguishable from a
+            genuinely empty mail server, so the operator UI shows it beside the
+            workload rather than presenting an unknown as an idle instance.
         versions:
           type: array
           items: { type: string }

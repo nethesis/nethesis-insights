@@ -3,30 +3,19 @@ Copyright (C) 2026 Nethesis S.r.l.
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
-<h1>Sizing &mdash; cohorts</h1>
-<p><small>What the fleet's own hardware says a given deployment needs. Every number here is
-<strong>observed peak demand in absolute bytes and cores</strong>, not utilization:
-utilization is a property of hardware someone happened to buy, and the deliverable is
-advice on what to buy. The recommendation is the <strong>p90</strong> column.</small></p>
-
-<p><small><strong>No per-module cost is measured here, and none is available from this
-stack.</strong> Nothing in NS8 exports per-container memory or CPU &mdash; there is no
-cAdvisor and no cgroup exporter &mdash; so a module's cost can only ever be
-<em>inferred</em> from variation across nodes. These are measured percentiles of whole
-nodes grouped by what they run, which is a different and more honest
-claim.</small></p>
+<h1>Sizing &mdash; recommendations</h1>
+<p><small>How much RAM and CPU the fleet's own nodes actually use, grouped by what
+they run. Read the <strong>p90</strong> column: nine nodes in ten fit inside it.
+A group only appears once enough independent clusters report it.</small></p>
 
 {{if .Empty}}
 <article>
-<h2>Insufficient fleet data</h2>
-<p>No cohort has cleared the publication floor
-{{if .Floors.DistinctSystems}}(at least {{.Floors.DistinctSystems}} distinct clusters and
-{{.Floors.Nodes}} nodes){{end}}, so nothing is published.</p>
-<p><small><strong>This is the correct output, not a bug.</strong> Publishing a percentile
-computed from three nodes would be worse than publishing nothing, and the floor counts
-<em>distinct clusters</em> rather than nodes for the same reason Threat Shield's promotion
-does: one MSP's forty identical clusters is one opinion about hardware, not
-forty.</small></p>
+<h2>Not enough data yet</h2>
+<p>No group has reached
+{{if .Floors.DistinctSystems}}{{.Floors.DistinctSystems}} independent clusters and
+{{.Floors.Nodes}} nodes{{else}}the minimum number of reporting clusters{{end}}, so
+nothing is published.</p>
+<p><small>This is the expected output on a small fleet, not an error.</small></p>
 </article>
 {{else}}
 
@@ -36,9 +25,9 @@ forty.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
-<tr><th scope="col">Cohort</th>
+<tr><th scope="col">Module</th>
 <th scope="col" class="num">Nodes</th><th scope="col" class="num">Clusters</th>
-<th scope="col" class="num">Censored</th>
+<th scope="col" class="num">Capped</th>
 <th scope="col" class="num">RAM p50</th><th scope="col" class="num">RAM p75</th>
 <th scope="col" class="num">RAM p90</th>
 <th scope="col" class="num">Cores p50</th><th scope="col" class="num">Cores p90</th>
@@ -63,66 +52,18 @@ forty.</small></p>
 <td class="mono" title="{{fmtTime .UpdatedAt}}">{{fmtAgo .UpdatedAt}}</td>
 </tr>
 {{else}}
-<tr><td colspan="13">nothing in this group clears the floor</td></tr>
+<tr><td colspan="13">not enough clusters in this group yet</td></tr>
 {{end}}
 </tbody>
 </table>
 </figure>
 {{end}}
-
-<h2>Workload buckets</h2>
-<p><small>Deterministic t-shirt sizes, split at the p33 and p66 of each metric across
-nodes. Quantile bucketing rather than clustering, because it gives the same sizes and is
-stable run to run &mdash; a number published to customers must not change unless the data
-changed. An empty <strong>to</strong> means no upper bound: a finite ceiling on the top
-bucket would silently drop the largest deployment.</small></p>
-<figure class="overflow-auto">
-<table class="striped">
-<thead>
-<tr><th scope="col">Family</th><th scope="col">Metric</th><th scope="col">Bucket</th>
-<th scope="col" class="num">From</th><th scope="col" class="num">To</th>
-<th scope="col" class="num">Nodes</th><th scope="col" class="num">Median RAM used</th>
-<th scope="col">Updated</th></tr>
-</thead>
-<tbody>
-{{range .Buckets}}
-<tr>
-<td class="mono">{{.Family}}</td>
-<td class="mono">{{.Metric}}</td>
-<td class="mono">{{.Bucket}}</td>
-<td class="num">{{printf "%g" .Lo}}</td>
-<td class="num">{{if .Hi}}{{printf "%g" .Hi}}{{else}}&mdash;{{end}}</td>
-<td class="num">{{.Nodes}}</td>
-<td class="num">{{fmtBytes .RAMMedian}}</td>
-<td class="mono" title="{{fmtTime .UpdatedAt}}">{{fmtAgo .UpdatedAt}}</td>
-</tr>
-{{else}}
-<tr><td colspan="8">no workload bucket clears the floor yet</td></tr>
-{{end}}
-</tbody>
-</table>
-</figure>
 {{end}}
 
-<h2>What &ldquo;censored&rdquo; means, and why it is published</h2>
-<p><small>An undersized node's memory demand is <strong>capped by the memory it has</strong>:
-a node needing 12&nbsp;GiB but holding 8 reports about 7.6&nbsp;GiB. Feeding that into an
-estimator of &ldquo;how much RAM does a mail node need&rdquo; makes the answer come out too
-small, which then declares more nodes adequately sized &mdash; the exact inverse of what
-this feature is for. That is systematic bias, not noise: no volume of data and no choice of
-model removes it. So a node whose memory utilization reached
-{{fmtFracVal .CensorRAMUtil}}, or that swapped in, or that suffered an OOM
-kill, is excluded from the percentiles &mdash; its true demand is unobservable &mdash; and
-<strong>counted in the censored column instead</strong>. A cohort that is 40&nbsp;% censored
-means the fleet's own hardware for that profile is systematically too small, which is the
-most valuable finding this pass can produce.</small></p>
-<p><small>Note what is deliberately <em>not</em> excluded. Disk-bound nodes stay in: they
-are precisely the nodes whose existence is the answer, and iowait is not a covariate of a
-memory baseline anyway. Nodes are not excluded for being &ldquo;unhealthy&rdquo; in general
-either &mdash; &ldquo;what a healthy node uses&rdquo;, derived by deleting the unhealthy
-ones, is survivorship bias with extra steps. Censoring is the only health-shaped exclusion
-here and it is justified by measurability, not by health. And an <em>idle</em> instance is
-bucketed rather than dropped: a mail server with zero mailboxes gives the floor cost of
-running the module, which people want &mdash; it just is not a &ldquo;mail
-node&rdquo;.</small></p>
+<h2>Capped nodes</h2>
+<p><small>A node already short of RAM cannot show how much it really wants &mdash; it
+uses what it has. Nodes over {{fmtFracVal .CensorRAMUtil}} RAM, or that swapped or
+hit an out-of-memory kill, are left out of the numbers above and counted here
+instead. A high <strong>Capped</strong> share means the hardware bought for that
+group is too small.</small></p>
 {{end}}

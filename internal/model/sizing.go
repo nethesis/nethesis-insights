@@ -357,6 +357,21 @@ type SizingCounters struct {
 	TruncatedMetrics  int `json:"truncated_metrics"`
 }
 
+// DroppedTotal and TruncatedTotal collapse the counters for display. The
+// individual fields stay the record -- these exist so the operator UI can show
+// one column and put the breakdown in a tooltip, rather than fifteen columns
+// nobody reads across.
+func (c SizingCounters) DroppedTotal() int {
+	return c.DroppedDay + c.DroppedDuplicate + c.DroppedNode + c.DroppedFamily +
+		c.DroppedMetricKey + c.DroppedMetricValue + c.DroppedResourceValue
+}
+
+// TruncatedTotal counts every cap that shortened rather than rejected. Caps
+// bound shape, never vocabulary, so a truncation is not a drop.
+func (c SizingCounters) TruncatedTotal() int {
+	return c.TruncatedDays + c.TruncatedNodes + c.TruncatedFamilies + c.TruncatedMetrics
+}
+
 // Add accumulates another request's counters, for the per-day rollup.
 func (c *SizingCounters) Add(o SizingCounters) {
 	c.AcceptedNodes += o.AcceptedNodes

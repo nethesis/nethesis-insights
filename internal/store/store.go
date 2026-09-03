@@ -139,8 +139,6 @@ type Store interface {
 	UpsertSizingVerdicts(ctx context.Context, rows []SizingVerdictRow) error
 	UpsertSizingCohorts(ctx context.Context, rows []SizingCohortRow) error
 	DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error)
-	UpsertSizingBuckets(ctx context.Context, rows []SizingBucketRow) error
-	DeleteStaleSizingBuckets(ctx context.Context, before int64) (int, error)
 	RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error
 	PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error)
 
@@ -148,7 +146,6 @@ type Store interface {
 	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]SizingNodeUIRow, error)
 	ListSizingModules(ctx context.Context, systemID string, limit int) ([]SizingModuleUIRow, error)
 	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]SizingCohortRow, error)
-	ListSizingBuckets(ctx context.Context, limit int) ([]SizingBucketRow, error)
 	SizingIngestStats(ctx context.Context, limit int) ([]SizingIngestRow, error)
 	SizingCounts(ctx context.Context) (SizingCounts, error)
 }
@@ -448,7 +445,6 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			pressure_top_axis TEXT,
 			pressure_reasons TEXT,
 			pressure_version INTEGER,
-			oom_suspect INTEGER,
 			PRIMARY KEY (system_id, node_id, day)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_sizing_node_daily_day ON sizing_node_daily(day)`,
@@ -626,22 +622,6 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 			pressure_version INTEGER,
 			updated_at INTEGER,
 			PRIMARY KEY (cohort_kind, cohort_key)
-		)`,
-		// Deterministic t-shirt sizes per (family, metric). Quantile
-		// bucketing, never k-means: it gives the same sizes and it is stable
-		// run to run, which a number published to customers has to be. hi is
-		// NULL on the top bucket -- a finite ceiling there would silently
-		// drop the largest deployment.
-		`CREATE TABLE IF NOT EXISTS sizing_workload_bucket (
-			module_family TEXT,
-			metric TEXT,
-			bucket TEXT,
-			lo REAL,
-			hi REAL,
-			nodes INTEGER,
-			ram_bytes_median REAL,
-			updated_at INTEGER,
-			PRIMARY KEY (module_family, metric, bucket)
 		)`,
 	}
 

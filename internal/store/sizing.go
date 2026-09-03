@@ -59,24 +59,53 @@ type SizingNodeDayRow struct {
 	TopAxis         string
 	Reasons         []string
 	PressureVersion int
-	OOMSuspect      bool
 }
 
-// SetScore copies a derived pressure onto the row.
+// SizingScore is a derived pressure as the store accepts it.
 //
-// It takes loose parameters rather than a sizing.Score because store must not
-// import sizing -- sizing is pure and store is not, and the dependency has to
-// point that way. It exists so the ingest path (internal/api) and the
-// recompute path (internal/baseline) share one mapping: two copies of it
-// would eventually store different columns for the same score.
-func (r *SizingNodeDayRow) SetScore(pressure, pMem, pCPU, pIO, pDisk *float64,
-	topAxis string, reasons []string, version int, oomSuspect bool) {
-	r.Pressure = pressure
-	r.PMem, r.PCPU, r.PIO, r.PDisk = pMem, pCPU, pIO, pDisk
-	r.TopAxis = topAxis
-	r.Reasons = reasons
-	r.PressureVersion = version
-	r.OOMSuspect = oomSuspect
+// It restates sizing.Score rather than being it, because this file
+// deliberately imports nothing but model: the formula and the row layout must
+// not be able to drift into each other. Its field names are sizing.Score's
+// exactly, so the two call sites that copy one into the other read as a
+// field-for-field mirror and a mismatch is visible on the page.
+//
+// A struct rather than nine positional parameters, five of them *float64: at
+// that arity an argument swap compiles.
+type SizingScore struct {
+	Pressure *float64
+	Mem      *float64
+	CPU      *float64
+	IO       *float64
+	Disk     *float64
+	TopAxis  string
+	Reasons  []string
+	Version  int
+}
+
+// ScoreInput returns the row's measurements in the shape the pressure formula
+// takes, so the recompute path does not hand-copy six fields and cannot
+// silently omit one a future column adds.
+func (r *SizingNodeDayRow) ScoreInput() model.SanitizedSizingNode {
+	return model.SanitizedSizingNode{
+		NodeID:         r.NodeID,
+		MetricsPresent: r.MetricsPresent,
+		SampleCoverage: r.SampleCoverage,
+		Hardware:       r.Hardware,
+		Resources:      r.Resources,
+		Stress:         r.Stress,
+	}
+}
+
+// SetScore copies a derived pressure onto the row. It exists so the ingest
+// path (internal/api) and the recompute path (internal/baseline) share one
+// mapping: two copies of it would eventually store different columns for the
+// same score.
+func (r *SizingNodeDayRow) SetScore(s SizingScore) {
+	r.Pressure = s.Pressure
+	r.PMem, r.PCPU, r.PIO, r.PDisk = s.Mem, s.CPU, s.IO, s.Disk
+	r.TopAxis = s.TopAxis
+	r.Reasons = s.Reasons
+	r.PressureVersion = s.Version
 }
 
 // SizingDayRows is one cluster-day as the store accepts it.
@@ -100,7 +129,6 @@ type SizingWindowRow struct {
 	HWChangedAt     int64
 	Pressure        *float64
 	TopAxis         string
-	OOMSuspect      bool
 	RAMUtilP95      *float64
 	RAMUsedBytesP95 *float64
 	CPUCoresUsedP95 *float64
@@ -169,19 +197,6 @@ type SizingCohortRow struct {
 	MinNodes           int
 	PressureVersion    int
 	UpdatedAt          int64
-}
-
-// SizingBucketRow is one t-shirt size. Hi is nil on the top bucket: a finite
-// ceiling there would silently drop the largest deployment.
-type SizingBucketRow struct {
-	Family    string
-	Metric    string
-	Bucket    string
-	Lo        float64
-	Hi        *float64
-	Nodes     int
-	RAMMedian float64
-	UpdatedAt int64
 }
 
 // SizingIngestRow is one (day, system) accounting row.
@@ -256,9 +271,9 @@ func upsertSizingNodeDay(ctx context.Context, tx bun.Tx, systemID, reporterVersi
 			load15_per_core_p95, fs_used_frac_max, fs_days_to_full, disk_io_util_p95,
 			iowait_busy_frac, swapin_pps_p95, oom_kills, reboots,
 			pressure, p_mem, p_cpu, p_io, p_disk,
-			pressure_top_axis, pressure_reasons, pressure_version, oom_suspect)
+			pressure_top_axis, pressure_reasons, pressure_version)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(system_id, node_id, day) DO UPDATE SET
 			received_at = excluded.received_at,
 			reporter_version = excluded.reporter_version,
@@ -290,8 +305,7 @@ func upsertSizingNodeDay(ctx context.Context, tx bun.Tx, systemID, reporterVersi
 			p_disk = excluded.p_disk,
 			pressure_top_axis = excluded.pressure_top_axis,
 			pressure_reasons = excluded.pressure_reasons,
-			pressure_version = excluded.pressure_version,
-			oom_suspect = excluded.oom_suspect
+			pressure_version = excluded.pressure_version
 	`,
 		systemID, n.NodeID, day, now, reporterVersion,
 		boolInt(n.MetricsPresent), n.SampleCoverage, n.Hardware.CPUCores, n.Hardware.MemTotalBytes,
@@ -303,7 +317,7 @@ func upsertSizingNodeDay(ctx context.Context, tx bun.Tx, systemID, reporterVersi
 		nullFloat(n.Stress.IOWaitBusyFrac), nullFloat(n.Stress.SwapInPPSP95),
 		nullFloat(n.Stress.OOMKills), nullFloat(n.Stress.Reboots),
 		nullFloat(n.Pressure), nullFloat(n.PMem), nullFloat(n.PCPU), nullFloat(n.PIO), nullFloat(n.PDisk),
-		n.TopAxis, string(reasons), n.PressureVersion, boolInt(n.OOMSuspect),
+		n.TopAxis, string(reasons), n.PressureVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert sizing node day: %w", err)
@@ -553,10 +567,10 @@ func (s *SQLiteStore) UpdateSizingScores(ctx context.Context, rows []SizingNodeD
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sizing_node_daily SET
 				pressure = ?, p_mem = ?, p_cpu = ?, p_io = ?, p_disk = ?,
-				pressure_top_axis = ?, pressure_reasons = ?, pressure_version = ?, oom_suspect = ?
+				pressure_top_axis = ?, pressure_reasons = ?, pressure_version = ?
 			WHERE system_id = ? AND node_id = ? AND day = ?
 		`, nullFloat(r.Pressure), nullFloat(r.PMem), nullFloat(r.PCPU), nullFloat(r.PIO), nullFloat(r.PDisk),
-			r.TopAxis, string(reasons), r.PressureVersion, boolInt(r.OOMSuspect),
+			r.TopAxis, string(reasons), r.PressureVersion,
 			r.SystemID, r.NodeID, r.Day); err != nil {
 			return fmt.Errorf("store: update sizing score: %w", err)
 		}
@@ -577,7 +591,7 @@ func (s *SQLiteStore) UpdateSizingScores(ctx context.Context, rows []SizingNodeD
 func (s *SQLiteStore) SizingWindow(ctx context.Context, fromDay, toDay int64) ([]SizingWindowRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.system_id, d.node_id, d.day, d.sample_coverage, d.cpu_cores, d.mem_total_bytes,
-			n.hw_changed_at, d.pressure, d.pressure_top_axis, d.oom_suspect,
+			n.hw_changed_at, d.pressure, d.pressure_top_axis,
 			d.ram_util_p95, d.ram_used_bytes_p95, d.cpu_cores_used_p95,
 			d.swapin_pps_p95, d.oom_kills
 		FROM sizing_node_daily d
@@ -593,17 +607,16 @@ func (s *SQLiteStore) SizingWindow(ctx context.Context, fromDay, toDay int64) ([
 	result := []SizingWindowRow{}
 	for rows.Next() {
 		var (
-			r          SizingWindowRow
-			coverage   sql.NullFloat64
-			cores      sql.NullInt64
-			mem        sql.NullInt64
-			hwChanged  sql.NullInt64
-			topAxis    sql.NullString
-			oomSuspect sql.NullInt64
-			f          [6]sql.NullFloat64
+			r         SizingWindowRow
+			coverage  sql.NullFloat64
+			cores     sql.NullInt64
+			mem       sql.NullInt64
+			hwChanged sql.NullInt64
+			topAxis   sql.NullString
+			f         [6]sql.NullFloat64
 		)
 		if err := rows.Scan(&r.SystemID, &r.NodeID, &r.Day, &coverage, &cores, &mem,
-			&hwChanged, &f[0], &topAxis, &oomSuspect,
+			&hwChanged, &f[0], &topAxis,
 			&f[1], &f[2], &f[3], &f[4], &f[5]); err != nil {
 			return nil, fmt.Errorf("store: scan sizing window: %w", err)
 		}
@@ -613,7 +626,6 @@ func (s *SQLiteStore) SizingWindow(ctx context.Context, fromDay, toDay int64) ([
 		r.HWChangedAt = hwChanged.Int64
 		r.Pressure = floatPtr(f[0])
 		r.TopAxis = topAxis.String
-		r.OOMSuspect = oomSuspect.Int64 != 0
 		r.RAMUtilP95 = floatPtr(f[1])
 		r.RAMUsedBytesP95 = floatPtr(f[2])
 		r.CPUCoresUsedP95 = floatPtr(f[3])
@@ -838,59 +850,6 @@ func (s *SQLiteStore) DeleteStaleSizingCohorts(ctx context.Context, before int64
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("store: delete stale sizing cohorts rows: %w", err)
-	}
-	return int(n), nil
-}
-
-// UpsertSizingBuckets publishes the workload t-shirt sizes.
-func (s *SQLiteStore) UpsertSizingBuckets(ctx context.Context, rows []SizingBucketRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: upsert sizing buckets: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, r := range rows {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO sizing_workload_bucket (module_family, metric, bucket, lo, hi, nodes, ram_bytes_median, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(module_family, metric, bucket) DO UPDATE SET
-				lo = excluded.lo,
-				hi = excluded.hi,
-				nodes = excluded.nodes,
-				ram_bytes_median = excluded.ram_bytes_median,
-				updated_at = excluded.updated_at
-		`, r.Family, r.Metric, r.Bucket, r.Lo, nullFloat(r.Hi), r.Nodes, r.RAMMedian, r.UpdatedAt); err != nil {
-			return fmt.Errorf("store: upsert sizing bucket: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit sizing buckets: %w", err)
-	}
-	return nil
-}
-
-// DeleteStaleSizingBuckets is DeleteStaleSizingCohorts for the buckets.
-func (s *SQLiteStore) DeleteStaleSizingBuckets(ctx context.Context, before int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM sizing_workload_bucket WHERE updated_at IS NULL OR updated_at < ?`, before)
-	if err != nil {
-		return 0, fmt.Errorf("store: delete stale sizing buckets: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("store: delete stale sizing buckets rows: %w", err)
 	}
 	return int(n), nil
 }

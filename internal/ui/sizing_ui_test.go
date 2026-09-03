@@ -26,10 +26,6 @@ func (f *fakeReader) ListSizingCohorts(_ context.Context, kind string, limit int
 	return f.sizingCohorts, f.err
 }
 
-func (f *fakeReader) ListSizingBuckets(_ context.Context, limit int) ([]store.SizingBucketRow, error) {
-	return f.sizingBuckets, f.err
-}
-
 func (f *fakeReader) SizingIngestStats(_ context.Context, limit int) ([]store.SizingIngestRow, error) {
 	return f.sizingIngest, f.err
 }
@@ -100,7 +96,7 @@ func TestSizingPageRendersUnscoredAsNotApplicable(t *testing.T) {
 // and it has to say so rather than looking like a broken page.
 func TestCohortsPageSaysInsufficientDataWhenEmpty(t *testing.T) {
 	body := getPage(t, newTestServer(t, &fakeReader{}, nil), "/cohorts").Body.String()
-	if !strings.Contains(body, "Insufficient fleet data") {
+	if !strings.Contains(body, "Not enough data yet") {
 		t.Error("an empty cohorts page must say the fleet is below the floor")
 	}
 }
@@ -117,7 +113,7 @@ func TestCohortsPageRendersCensoredCount(t *testing.T) {
 	if !strings.Contains(body, "40%") {
 		t.Error("the censored share must be rendered")
 	}
-	if !strings.Contains(body, "Solo baselines") {
+	if !strings.Contains(body, "Nodes running only this module") {
 		t.Error("the solo group must be labelled as the quotable one")
 	}
 }

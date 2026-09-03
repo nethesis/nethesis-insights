@@ -27,11 +27,10 @@ const PressureVersion = 1
 // Axis names. Stored on a verdict as top_axis and used nowhere else as a
 // string literal.
 const (
-	AxisMem   = "mem"
-	AxisCPU   = "cpu"
-	AxisIO    = "io"
-	AxisDisk  = "disk"
-	AxisMixed = "mixed"
+	AxisMem  = "mem"
+	AxisCPU  = "cpu"
+	AxisIO   = "io"
+	AxisDisk = "disk"
 )
 
 // Pressure reasons: sorted, value-free codes.
@@ -162,12 +161,6 @@ type Score struct {
 	Disk     *float64
 	TopAxis  string
 	Reasons  []string
-
-	// OOMSuspect marks a day whose OOM term fired on a day that also
-	// rebooted. increase() extrapolates across counter resets, so the kill
-	// count on such a day is not trustworthy; the verdict discounts the day
-	// rather than the score trying to correct it.
-	OOMSuspect bool
 }
 
 // clamp is the one clamp in this package.
@@ -233,9 +226,6 @@ func Evaluate(n model.SanitizedSizingNode) Score {
 		}
 		if mem.consider(p); p > 0 {
 			add(ReasonOOMKill)
-			if r := n.Stress.Reboots; r != nil && *r > 0 {
-				s.OOMSuspect = true
-			}
 		}
 	}
 
@@ -385,10 +375,9 @@ const (
 
 // DayScore is one day of a node's history, as the verdict sees it.
 type DayScore struct {
-	Day        int64
-	Pressure   *float64
-	TopAxis    string
-	OOMSuspect bool
+	Day      int64
+	Pressure *float64
+	TopAxis  string
 }
 
 // Verdict is a node's multi-day answer.
@@ -415,12 +404,6 @@ func EvaluateVerdict(days []DayScore, previous string) Verdict {
 			continue
 		}
 		v.DaysPresent++
-		// A day that rebooted and reported OOM kills is discounted from the
-		// bad-day counts but still counts as present: the measurement
-		// happened, its kill count just cannot be trusted.
-		if d.OOMSuspect {
-			continue
-		}
 		if *d.Pressure >= AtRiskPressure {
 			v.RiskDays++
 		}
@@ -434,43 +417,28 @@ func EvaluateVerdict(days []DayScore, previous string) Verdict {
 		return v
 	}
 
-	// Axis agreement. Seven bad days from seven unrelated causes is not one
-	// verdict, and recommending RAM on that evidence would be wrong.
-	top, agrees := dominantAxis(axisBad, v.BadDays)
-
 	switch {
 	case v.BadDays >= UndersizedDays,
 		previous == VerdictUndersized && v.BadDays > HysteresisBadDays:
-		if !agrees {
-			v.State, v.TopAxis = VerdictAtRisk, AxisMixed
-			return v
-		}
-		v.State, v.TopAxis = VerdictUndersized, top
+		v.State, v.TopAxis = VerdictUndersized, dominantAxis(axisBad)
 	case v.RiskDays >= AtRiskDays:
-		v.State = VerdictAtRisk
-		if agrees {
-			v.TopAxis = top
-		} else if v.BadDays > 0 {
-			v.TopAxis = AxisMixed
-		}
+		v.State, v.TopAxis = VerdictAtRisk, dominantAxis(axisBad)
 	default:
 		v.State = VerdictOK
 	}
 	return v
 }
 
-// dominantAxis reports the axis that was the top penalty on at least half the
-// bad days, and whether one exists at all.
-func dominantAxis(counts map[string]int, badDays int) (string, bool) {
-	if badDays == 0 {
-		return "", false
-	}
+// dominantAxis reports the axis that was the top penalty on the most bad days,
+// or "" if there were none.
+//
+// Deterministic on a tie: two axes at the same count is a real possibility,
+// and the answer must not depend on map iteration order.
+func dominantAxis(counts map[string]int) string {
 	names := make([]string, 0, len(counts))
 	for name := range counts {
 		names = append(names, name)
 	}
-	// Deterministic on a tie: two axes at exactly half the bad days is a real
-	// possibility, and the answer must not depend on map iteration order.
 	sort.Strings(names)
 	best, bestN := "", 0
 	for _, name := range names {
@@ -478,7 +446,7 @@ func dominantAxis(counts map[string]int, badDays int) (string, bool) {
 			best, bestN = name, counts[name]
 		}
 	}
-	return best, 2*bestN >= badDays
+	return best
 }
 
 // ClusterPlacement answers the question only a cluster can be asked: is this

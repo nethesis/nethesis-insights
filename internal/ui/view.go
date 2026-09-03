@@ -37,6 +37,7 @@ var funcMap = template.FuncMap{
 	"fmtNum":        FmtNum,
 	"fmtPressure":   FmtPressure,
 	"pressureClass": PressureClass,
+	"axisLabel":     AxisLabel,
 }
 
 // FmtTime renders a unix-millis timestamp as an ISO-8601-ish UTC string. A
@@ -290,4 +291,23 @@ func PressureClass(v *float64) string {
 	default:
 		return "calm"
 	}
+}
+
+// AxisLabel renders a pressure axis in the words an operator uses. The stored
+// values stay sizing.Axis* -- this is presentation only, so a rename here can
+// never reach a column or a verdict.
+func AxisLabel(axis string) string {
+	switch axis {
+	case "mem":
+		return "RAM"
+	case "cpu":
+		return "CPU"
+	case "io":
+		return "disk I/O"
+	case "disk":
+		return "disk space"
+	case "":
+		return "—"
+	}
+	return axis
 }

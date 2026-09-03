@@ -4,16 +4,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Sizing &mdash; nodes</h1>
-<p><small>The fleet-sizing pipeline: NS8 cluster leaders post one report per
-<strong>complete UTC day</strong>, one entry per node, carrying utilization percentiles,
-stress durations and each module family's workload counts. A <code>system_id</code> is a
-<em>cluster</em>, so one report normally carries several nodes.
-<strong>Pressure</strong> is a 0&ndash;100 number computed on the server &mdash; 0 means no
-pressure, 100 means severe &mdash; and <code>n/a</code> means it was deliberately not
-computed: a node that was switched off for eighteen hours is not a low-pressure node.
-Utilization percentiles are shown next to it because pressure answers
-&ldquo;is this undersized&rdquo; and the percentiles answer &ldquo;how much headroom is
-left&rdquo;, which are different questions.</small></p>
+<p><small>Is each node's hardware big enough? Clusters send one report per day,
+one entry per node. <strong>Pressure</strong> is 0&ndash;100: 0 is fine, 100 is
+severe. <code>n/a</code> means there was not enough data to score.</small></p>
 
 <table>
 <tbody>
@@ -22,10 +15,10 @@ left&rdquo;, which are different questions.</small></p>
 <tr><th scope="row">Node-days stored</th><td class="num">{{.Counts.NodeDays}}</td></tr>
 <tr><th scope="row">Newest day</th><td class="mono">{{fmtDay .Counts.LatestDay}}</td></tr>
 <tr><th scope="row">Last report received</th><td class="mono" title="{{fmtTime .Counts.LastReport}}">{{fmtAgo .Counts.LastReport}}</td></tr>
-<tr><th scope="row">Verdicts</th><td><span class="pill" data-verdict="undersized">{{.Counts.Undersized}} undersized</span>
+<tr><th scope="row">Verdicts</th><td><span class="pill" data-verdict="undersized">{{.Counts.Undersized}} too small</span>
 <span class="pill" data-verdict="at_risk">{{.Counts.AtRisk}} at risk</span>
-<span class="pill" data-verdict="insufficient_data">{{.Counts.Unscored}} insufficient data</span></td></tr>
-<tr><th scope="row">Published cohorts</th><td class="num">{{.Counts.Cohorts}}</td></tr>
+<span class="pill" data-verdict="insufficient_data">{{.Counts.Unscored}} not enough data</span></td></tr>
+<tr><th scope="row">Published recommendations</th><td class="num">{{.Counts.Cohorts}}</td></tr>
 <tr><th scope="row">Pressure formula version</th><td class="num">{{.Version}}</td></tr>
 </tbody>
 </table>
@@ -38,27 +31,23 @@ left&rdquo;, which are different questions.</small></p>
 </form>
 
 <h2>Latest day per node</h2>
-<p><small><strong>Verdict</strong> is a multi-day answer, not this day's: k-of-n over a
-trailing window with hysteresis, because undersizing is recurrence and a single bad day is
-not a verdict. <strong>Top axis</strong> is <code>mixed</code> when no single axis
-dominated the bad days &mdash; seven bad days from seven unrelated causes is not one
-verdict, and recommending RAM on that evidence would be wrong.
-<strong>Placement</strong> is the question only a cluster can be asked: with two or more
-nodes and a wide spread of memory utilization the answer is &ldquo;rebalance&rdquo;, not
-&ldquo;buy hardware&rdquo;.</small></p>
+<p><small><strong>Verdict</strong> covers the last 28 days, not this one day.
+<strong>Main cause</strong> is whichever resource was worst on most of the bad days.
+<strong>Balance</strong> compares the nodes in a cluster: a wide spread means move
+work between them rather than buy hardware.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr>
 <th scope="col">System</th><th scope="col" class="num">Node</th><th scope="col">Day</th>
 <th scope="col" class="num">Pressure</th><th scope="col">Reasons</th>
-<th scope="col" class="num">mem</th><th scope="col" class="num">cpu</th>
-<th scope="col" class="num">io</th><th scope="col" class="num">disk</th>
-<th scope="col" class="num">RAM used</th><th scope="col" class="num">RAM util</th>
-<th scope="col" class="num">CPU util</th><th scope="col" class="num">Disk full</th>
+<th scope="col" class="num">RAM</th><th scope="col" class="num">CPU</th>
+<th scope="col" class="num">Disk I/O</th><th scope="col" class="num">Disk space</th>
+<th scope="col" class="num">RAM used</th><th scope="col" class="num">RAM used %</th>
+<th scope="col" class="num">CPU used %</th><th scope="col" class="num">Disk full %</th>
 <th scope="col" class="num">Installed</th>
-<th scope="col">Verdict</th><th scope="col">Placement</th>
-<th scope="col" class="num">Coverage</th>
+<th scope="col">Verdict</th><th scope="col">Balance</th>
+<th scope="col" class="num">Data collected</th>
 </tr>
 </thead>
 <tbody>
@@ -79,7 +68,7 @@ nodes and a wide spread of memory utilization the answer is &ldquo;rebalance&rdq
 <td class="num">{{fmtFrac .FSUsedFracMax}}</td>
 <td class="num" title="{{.CPUModel}}">{{fmtBytesInt .MemTotalBytes}} / {{.CPUCores}}c</td>
 <td>{{if .Verdict}}<span class="pill" data-verdict="{{.Verdict}}">{{.Verdict}}</span>
-{{if .VerdictTopAxis}}<small class="mono">{{.VerdictTopAxis}}</small>{{end}}{{else}}&mdash;{{end}}</td>
+{{if .VerdictTopAxis}}<small>{{axisLabel .VerdictTopAxis}}</small>{{end}}{{else}}&mdash;{{end}}</td>
 <td class="mono">{{if .Placement}}{{.Placement}} <small>({{fmtFrac .ClusterRAMUtilSpread}} spread, {{.ClusterNodes}} nodes)</small>{{else}}&mdash;{{end}}</td>
 <td class="num">{{if .MetricsPresent}}{{fmtFracVal .SampleCoverage}}{{else}}no metrics{{end}}</td>
 </tr>
@@ -90,20 +79,16 @@ nodes and a wide spread of memory utilization the answer is &ldquo;rebalance&rdq
 </table>
 </figure>
 
-<h2>Module inventory and workload</h2>
-<p><small>What is installed on each node, on that node's most recent day.
-<strong><code>facts_ok</code> is load-bearing</strong>: <code>get-facts</code> fails per
-instance, and a zero mailbox count from a failed call is indistinguishable from a genuinely
-empty mail server &mdash; so a family whose facts call failed is treated as unknown rather
-than as idle. Every workload value is a number, and that is the whole privacy control: an
-FQDN, an IP address, a hostname or a DMI serial cannot be encoded in a
-float.</small></p>
+<h2>What each node runs</h2>
+<p><small>Installed modules and their workload counts, on that node's most recent
+day. <strong>Facts</strong> counts the instances that answered; a module whose
+count failed is treated as unknown, not as empty.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr><th scope="col">System</th><th scope="col" class="num">Node</th><th scope="col">Day</th>
-<th scope="col">Family</th><th scope="col" class="num">Instances</th>
-<th scope="col" class="num">facts_ok</th><th scope="col">Versions</th><th scope="col">Workload</th></tr>
+<th scope="col">Module</th><th scope="col" class="num">Instances</th>
+<th scope="col" class="num">Facts</th><th scope="col">Versions</th><th scope="col">Workload</th></tr>
 </thead>
 <tbody>
 {{range .Modules}}
@@ -124,13 +109,10 @@ float.</small></p>
 </table>
 </figure>
 
-<h2>Score thresholds</h2>
-<p><small>Every knee and ceiling the pressure score depends on, labelled with how it was
-arrived at. <strong>Most of them are guesses</strong>, to be calibrated once about thirty
-days of fleet data exist &mdash; set each noisy knee at the fleet p90 and each ceiling at
-the fleet p99, leave the physical knees fixed, bump the formula version and recompute.
-Storing every input as its own column is what makes that a one-pass operation needing no
-fleet cooperation. They are labelled here rather than presented as advice.</small></p>
+<h2>Thresholds</h2>
+<p><small>The limits the pressure score uses. <strong>Basis</strong> says where each
+number comes from &mdash; most are still guesses awaiting fleet data, so do not read
+them as advice.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
@@ -149,23 +131,17 @@ fleet cooperation. They are labelled here rather than presented as advice.</smal
 </table>
 </figure>
 
-<h2>Ingest accounting</h2>
-<p><small>What each cluster contributed and what was dropped before storage, per day.
-The measurement rows <strong>recompute</strong> &mdash; a day is an absolute fact, so the
-second and third of a reporter's three daily sends are byte-identical restatements
-&mdash; while these counters <strong>accumulate</strong>. So three sends of one day show
-three reports and exactly one set of measurements, which is how &ldquo;this cluster posts
-and stores nothing, and here is the rule dropping it&rdquo; stays answerable.</small></p>
+<h2>What arrived, what was dropped</h2>
+<p><small>Per cluster and day: what was stored, and what the server refused. Use it
+when a cluster sends reports but nothing shows up above. Hover a dropped count for
+the breakdown.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr><th scope="col">Day</th><th scope="col">System</th><th scope="col" class="num">Reports</th>
-<th scope="col">Reporter</th><th scope="col" class="num">Nodes</th><th scope="col" class="num">Families</th>
-<th scope="col" class="num">Metrics</th><th scope="col" class="num">bad day</th>
-<th scope="col" class="num">dup</th><th scope="col" class="num">bad node</th>
-<th scope="col" class="num">bad family</th><th scope="col" class="num">bad key</th>
-<th scope="col" class="num">bad value</th><th scope="col" class="num">bad measure</th>
-<th scope="col" class="num">truncated</th></tr>
+<th scope="col">Reporter</th><th scope="col" class="num">Nodes</th><th scope="col" class="num">Modules</th>
+<th scope="col" class="num">Metrics</th><th scope="col" class="num">Dropped</th>
+<th scope="col" class="num">Shortened</th></tr>
 </thead>
 <tbody>
 {{range .Ingest}}
@@ -177,17 +153,11 @@ and stores nothing, and here is the rule dropping it&rdquo; stays answerable.</s
 <td class="num">{{.AcceptedNodes}}</td>
 <td class="num">{{.AcceptedModules}}</td>
 <td class="num">{{.AcceptedMetrics}}</td>
-<td class="num">{{.DroppedDay}}</td>
-<td class="num">{{.DroppedDuplicate}}</td>
-<td class="num">{{.DroppedNode}}</td>
-<td class="num">{{.DroppedFamily}}</td>
-<td class="num">{{.DroppedMetricKey}}</td>
-<td class="num">{{.DroppedMetricValue}}</td>
-<td class="num">{{.DroppedResourceValue}}</td>
-<td class="num">{{.TruncatedNodes}}/{{.TruncatedFamilies}}/{{.TruncatedMetrics}}</td>
+<td class="num" title="day out of range {{.DroppedDay}}, duplicate {{.DroppedDuplicate}}, bad node {{.DroppedNode}}, bad module {{.DroppedFamily}}, bad metric name {{.DroppedMetricKey}}, non-numeric metric {{.DroppedMetricValue}}, bad measurement {{.DroppedResourceValue}}">{{.DroppedTotal}}</td>
+<td class="num" title="nodes {{.TruncatedNodes}}, modules {{.TruncatedFamilies}}, metrics {{.TruncatedMetrics}}">{{.TruncatedTotal}}</td>
 </tr>
 {{else}}
-<tr><td colspan="15">no reports received yet</td></tr>
+<tr><td colspan="9">no reports received yet</td></tr>
 {{end}}
 </tbody>
 </table>

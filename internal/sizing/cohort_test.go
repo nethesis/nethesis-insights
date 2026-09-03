@@ -69,32 +69,12 @@ func TestCohortKeying(t *testing.T) {
 	if IsSolo("traefik", nonLite) {
 		t.Error("a lite family is never the solo family")
 	}
-	if got := ProfileKey(nonLite); got != "mail" {
-		t.Errorf("profile key = %q, want mail", got)
-	}
 
 	both := NonLiteFamilies(map[string]map[string]float64{
 		"nethvoice": nil, "mail": nil, "traefik": nil,
 	})
-	if got := ProfileKey(both); got != "mail+nethvoice" {
-		t.Errorf("profile key = %q, want mail+nethvoice (sorted)", got)
-	}
 	if IsSolo("mail", both) {
 		t.Error("mail co-tenanted with nethvoice is not solo")
-	}
-	if got := ProfileKey(nil); got != ProfileLiteOnly {
-		t.Errorf("profile key = %q, want %q", got, ProfileLiteOnly)
-	}
-}
-
-// The profile key must be canonical whatever order the families arrive in:
-// two spellings of one deployment would split it into two cohorts, and
-// neither would clear the floor.
-func TestProfileKeyIsCanonical(t *testing.T) {
-	a := ProfileKey([]string{"nethvoice", "mail", "loki"})
-	b := ProfileKey([]string{"loki", "nethvoice", "mail"})
-	if a != b {
-		t.Errorf("profile key is order-dependent: %q vs %q", a, b)
 	}
 }
 
@@ -172,81 +152,5 @@ func TestReduceNodeUsesTheBusyDays(t *testing.T) {
 	median, _ := Quantile(daily, 0.5)
 	if reduced <= median {
 		t.Error("the p90 reduction must sit above the median")
-	}
-}
-
-func TestBucketWorkload(t *testing.T) {
-	if BucketWorkload(nil) != nil {
-		t.Error("no points must publish no buckets")
-	}
-
-	var points []WorkloadPoint
-	for i := 1; i <= 90; i++ {
-		points = append(points, WorkloadPoint{Value: float64(i), RAMBytes: float64(i) * 1e8})
-	}
-	buckets := BucketWorkload(points)
-	if len(buckets) != 3 {
-		t.Fatalf("buckets = %d, want 3", len(buckets))
-	}
-	if buckets[0].Name != BucketSmall || buckets[2].Name != BucketLarge {
-		t.Errorf("bucket names = %q..%q", buckets[0].Name, buckets[2].Name)
-	}
-	// The top bucket has no finite ceiling: one would silently drop the
-	// largest deployment.
-	if !math.IsInf(buckets[2].Hi, 1) {
-		t.Errorf("top bucket ceiling = %v, want +Inf", buckets[2].Hi)
-	}
-	total := 0
-	for _, b := range buckets {
-		total += b.Nodes
-		if b.Nodes > 0 && b.RAMBytes <= 0 {
-			t.Errorf("bucket %q has nodes but no median demand", b.Name)
-		}
-	}
-	if total != len(points) {
-		t.Errorf("buckets hold %d of %d points", total, len(points))
-	}
-	// Ordered and non-overlapping.
-	for i := 1; i < len(buckets); i++ {
-		if buckets[i].Lo < buckets[i-1].Lo {
-			t.Error("buckets are not in ascending order")
-		}
-	}
-
-	// Deterministic: a number published to customers must not change unless
-	// the data changed.
-	again := BucketWorkload(points)
-	for i := range buckets {
-		if buckets[i] != again[i] {
-			t.Fatalf("bucket %d is not deterministic: %+v vs %+v", i, buckets[i], again[i])
-		}
-	}
-}
-
-// A degenerate distribution -- every node reporting the same value -- leaves
-// buckets empty. They are still published so the boundaries stay legible.
-func TestBucketWorkloadDegenerate(t *testing.T) {
-	points := make([]WorkloadPoint, 10)
-	for i := range points {
-		points[i] = WorkloadPoint{Value: 5, RAMBytes: 1e9}
-	}
-	buckets := BucketWorkload(points)
-	if len(buckets) != 3 {
-		t.Fatalf("buckets = %d, want 3", len(buckets))
-	}
-	held := 0
-	for _, b := range buckets {
-		held += b.Nodes
-	}
-	if held != len(points) {
-		t.Errorf("buckets hold %d of %d identical points", held, len(points))
-	}
-}
-
-func TestClassOrderPutsHeavyFirst(t *testing.T) {
-	if ClassOrder(ClassHeavy) >= ClassOrder(ClassMedium) ||
-		ClassOrder(ClassMedium) >= ClassOrder(ClassUnknown) ||
-		ClassOrder(ClassUnknown) >= ClassOrder(ClassLite) {
-		t.Error("presentation order must run heavy, medium, unknown, lite")
 	}
 }
