@@ -85,7 +85,10 @@ func ClassOf(family string, workload map[string]float64) Class {
 	if !known {
 		base = ClassUnknown
 	}
-	if family == "samba" && workload["shared_folders"] > 0 {
+	// ns8-samba's get-facts (imageroot/actions/get-facts/50facts) emits
+	// shared_folders_count; "shared_folders" is accepted too so an older or
+	// third-party reporter still resolves correctly.
+	if family == "samba" && (workload["shared_folders_count"] > 0 || workload["shared_folders"] > 0) {
 		return ClassMedium
 	}
 	return base

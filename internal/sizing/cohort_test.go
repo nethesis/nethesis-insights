@@ -23,6 +23,22 @@ func TestClassOfDerivesSambaFromWorkload(t *testing.T) {
 	}
 }
 
+// ns8-samba's real get-facts (imageroot/actions/get-facts/50facts) emits
+// shared_folders_count, not shared_folders -- as written, ClassOf tested a
+// key that never arrives on the wire and samba could never reach ClassMedium.
+// The legacy key is kept working too, for an older or third-party reporter.
+func TestClassOfAcceptsSambaSharedFoldersCount(t *testing.T) {
+	if got := ClassOf("samba", map[string]float64{"shared_folders_count": 3}); got != ClassMedium {
+		t.Errorf("samba with shared_folders_count = %q, want %q", got, ClassMedium)
+	}
+	if got := ClassOf("samba", map[string]float64{"shared_folders_count": 0}); got != ClassLite {
+		t.Errorf("samba with zero shared_folders_count = %q, want %q", got, ClassLite)
+	}
+	if got := ClassOf("samba", map[string]float64{"shared_folders": 3}); got != ClassMedium {
+		t.Errorf("samba with legacy shared_folders key = %q, want %q", got, ClassMedium)
+	}
+}
+
 // A module nobody has classified must NOT be silently classed lite: that
 // would quietly exclude it from every solo cohort's "plus lite modules"
 // allowance and make the recommendation wrong for the product nobody had got

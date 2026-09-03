@@ -387,7 +387,8 @@ primary family, decide which families are ignorable when testing "solo", and ord
 **And the prior as given is already wrong in one instructive case:** "samba without file
 shares = lite, with shares = medium" is not a family distinction but a *workload* one —
 exactly what the metric map is for. So the class is **derived**, `class(family, workload)`,
-with `samba` + `shared_folders > 0` resolving to medium. One rule instead of two, and it
+with `samba` + `shared_folders_count > 0` resolving to medium (the real
+`ns8-samba` `get-facts` key; the legacy `shared_folders` is accepted too). One rule instead of two, and it
 stops being wrong for a whole product the moment anyone configures it.
 
 **Pass step order**, commented on `Run` in the style of `consensus.go`:
