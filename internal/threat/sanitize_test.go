@@ -186,7 +186,7 @@ func TestSanitizeDropsUnparseableAddresses(t *testing.T) {
 // Re-reporting CrowdSec's community list would manufacture agreement between
 // systems that never independently observed anything (spec §7.2).
 func TestSanitizeAcceptsOnlyLocalOrigins(t *testing.T) {
-	kept := []string{"crowdsec", "cscli", "CrowdSec"}
+	kept := []string{"crowdsec", "cscli", "CrowdSec", "banip", "banIP"}
 	dropped := []string{"CAPI", "capi", "lists", "console", "cscli-import", ""}
 
 	for _, o := range kept {

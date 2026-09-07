@@ -284,8 +284,8 @@ paths:
         counter in the response's `dropped` object: over-cap
         (`THREAT_MAX_DECISIONS_PER_REQUEST`, truncated not rejected) →
         `type` must be `ban` → `scope` must be `Ip` → `origin` must be
-        `crowdsec` or `cscli` (CAPI/`lists`/console decisions are refused,
-        since re-reporting CrowdSec's own community blocklist would
+        `crowdsec`, `cscli` or `banip` (CAPI/`lists`/console decisions are
+        refused, since re-reporting CrowdSec's own community blocklist would
         manufacture agreement between systems that never independently
         observed anything) → `value` must be a public unicast IP → `created_at`
         must parse as RFC3339 (a value more than 24h in the future is
@@ -1417,7 +1417,7 @@ components:
         scope: { type: string, description: "Must be `Ip`, case-insensitive." }
         type: { type: string, description: "Must be `ban`, case-insensitive." }
         scenario: { type: string, description: Free text, trimmed and capped at 128 runes. Every scenario is accepted -- there is no fixed category set. }
-        origin: { type: string, description: "Must be `crowdsec` or `cscli`." }
+        origin: { type: string, description: "Must be `crowdsec`, `cscli` (CrowdSec reporters) or `banip` (NethSecurity reporters)." }
         duration: { type: string, description: "Go duration string, e.g. `3h59m59s`." }
         created_at: { type: string, format: date-time, description: RFC3339. More than 24h in the future is clamped to server time. }
 

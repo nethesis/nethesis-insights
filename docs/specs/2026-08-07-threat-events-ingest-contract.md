@@ -121,10 +121,11 @@ Applied in this order; each drop increments exactly one counter.
    rejected** (`truncated`).
 2. **`type`** must be `ban`, case-insensitive (`dropped_type`).
 3. **`scope`** must be `Ip`, case-insensitive (`dropped_scope`).
-4. **`origin`** must be `crowdsec` or `cscli` (`dropped_origin`). CAPI, `lists`
-   and console decisions are refused: re-reporting CrowdSec's community
-   blocklist would manufacture agreement between systems that never
-   independently observed anything.
+4. **`origin`** must be `crowdsec` or `cscli` (CrowdSec reporters) or `banip`
+   (NethSecurity firewalls reporting what their banIP log service blocked)
+   (`dropped_origin`). CAPI, `lists` and console decisions are refused:
+   re-reporting CrowdSec's community blocklist would manufacture agreement
+   between systems that never independently observed anything.
 5. **`value`** must parse as a single IP address (`dropped_bad_ip`; a CIDR
    lands here) and must be public unicast (`dropped_private_ip`). Rejected:
    RFC1918, loopback, unspecified, CGNAT `100.64.0.0/10`, link-local including

@@ -47,14 +47,16 @@ var (
 	benchmark = netip.MustParsePrefix("198.18.0.0/15")
 )
 
-// localOrigins are the CrowdSec decision origins this server accepts.
+// localOrigins are the decision origins this server accepts: what the
+// reporter observed itself, either through CrowdSec ("crowdsec", "cscli") or
+// through NethSecurity's banIP log service ("banip").
 //
 // Everything else -- CAPI, "lists", the console -- is dropped, and this is
 // the single most important filter in the package after the IP one:
 // re-reporting CrowdSec's community blocklist would manufacture agreement
 // between systems that never independently observed anything, and consensus
 // computed over manufactured agreement is worthless (spec §7.2).
-var localOrigins = map[string]bool{"crowdsec": true, "cscli": true}
+var localOrigins = map[string]bool{"crowdsec": true, "cscli": true, "banip": true}
 
 // Options carries the per-request inputs the sanitizer cannot derive itself.
 type Options struct {

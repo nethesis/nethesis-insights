@@ -532,7 +532,7 @@ successful no-op, not an error.
   in the merge/squash commit body only.
 - Work on a branch, never commit directly to `main`. Stage explicit paths, not
   `git add .`.
-- GPL-3.0-or-later, matching `ns8-loki`.
+- GPL-3.0-or-later
 
 ## Dev machine
 
@@ -544,14 +544,3 @@ and this project pulls a Go module cache plus a Postgres image.
 services; bind containers to high ports. If the machine has been torn down,
 `docs/runbooks/dev-machine-rl1.md` rebuilds it end to end.
 
-## Open questions from the spec
-
-- ~~Exact field names in the NS8 `cluster/subscription` Redis hash~~ —
-  **closed 2026-09-02**, read off `rl1`: `system_id`, `auth_token`, `provider`,
-  `support_user`, `vpn_cert_cn`. Consequence for the edge:
-  `SUBSCRIPTION_SECRET_FIELDS = ("auth_token", "secret", "password")` at
-  `ns8-loki/imageroot/bin/insights-collector:77` is dead code — `secret` and
-  `password` are never written by ns8-core's `set-subscription`. That deletion
-  is in `ns8-loki`, not this repo.
-- The external validator's contract: endpoint, method, response codes, and whether
-  it returns a tenant/org id the server can scope on.
