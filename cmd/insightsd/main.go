@@ -286,6 +286,7 @@ func main() {
 	sizingWindowDays := getenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
 	sizingMinDistinctSystems := getenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
 	sizingMinNodes := getenvInt("SIZING_MIN_NODES", 30)
+	sizingMinDaysPresent := getenvInt("SIZING_MIN_DAYS_PRESENT", sizing.MinDaysPresent)
 	sizingMaxNodesPerReport := getenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
 	// The allowlist admin plane. Both are empty by default: writing the
 	// exclusion set is the one operation that can stop the fleet blocking an
@@ -377,6 +378,7 @@ func main() {
 		WindowDays:         sizingWindowDays,
 		MinDistinctSystems: sizingMinDistinctSystems,
 		MinNodes:           sizingMinNodes,
+		MinDaysPresent:     sizingMinDaysPresent,
 		Retention:          sizingRetention,
 	})
 
@@ -448,6 +450,7 @@ func main() {
 		{Name: "SIZING_WINDOW_DAYS", Value: strconv.Itoa(sizingWindowDays)},
 		{Name: "SIZING_MIN_DISTINCT_SYSTEMS", Value: strconv.Itoa(sizingMinDistinctSystems)},
 		{Name: "SIZING_MIN_NODES", Value: strconv.Itoa(sizingMinNodes)},
+		{Name: "SIZING_MIN_DAYS_PRESENT", Value: strconv.Itoa(sizingMinDaysPresent)},
 		{Name: "SIZING_MAX_NODES_PER_REPORT", Value: strconv.Itoa(sizingMaxNodesPerReport)},
 		{Name: "ADMIN_LISTEN_ADDR", Value: adminListenAddr},
 		{Name: "ADMIN_API_KEY", Value: secretState(adminAPIKey != "")},

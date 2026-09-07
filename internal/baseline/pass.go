@@ -50,6 +50,12 @@ type Config struct {
 	// percentile computed from three nodes.
 	MinDistinctSystems int
 	MinNodes           int
+	// MinDaysPresent overrides the node verdict's presence floor
+	// (sizing.MinDaysPresent) when set; zero keeps the package default. Unlike
+	// the two floors above, this is a statistical significance guard, not a
+	// publication floor -- lowering it is a dev-fleet convenience, not
+	// something a real deployment should tune.
+	MinDaysPresent int
 	// Retention is how long daily rows are kept.
 	Retention time.Duration
 	// RecomputeBatch bounds one pass's version-bump catch-up. Unbounded, a
@@ -79,6 +85,9 @@ func New(r Reader, cfg Config) *Runner {
 	}
 	if cfg.WindowDays <= 0 {
 		cfg.WindowDays = sizing.VerdictWindowDays
+	}
+	if cfg.MinDaysPresent <= 0 {
+		cfg.MinDaysPresent = sizing.MinDaysPresent
 	}
 	return &Runner{store: r, cfg: cfg}
 }
@@ -125,7 +134,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	}
 
 	nodes := foldNodes(window, fromDay, passStart)
-	verdicts := buildVerdicts(nodes, previous, r.cfg.WindowDays, passStart)
+	verdicts := buildVerdicts(nodes, previous, r.cfg.WindowDays, r.cfg.MinDaysPresent, passStart)
 	if err := r.store.UpsertSizingVerdicts(ctx, verdicts); err != nil {
 		return fmt.Errorf("baseline: verdicts: %w", err)
 	}
@@ -339,7 +348,7 @@ func attachFamilies(nodes map[string]*node, families []store.SizingNodeFamilyRow
 // buildVerdicts is steps 2 and 3: the per-node k-of-n verdict, plus the
 // per-cluster placement answer denormalised onto every node of that cluster
 // so one query renders the page.
-func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDays int, now int64) []store.SizingVerdictRow {
+func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDays, minDaysPresent int, now int64) []store.SizingVerdictRow {
 	// Cluster placement first, because the verdict row carries it.
 	clusterRAMUtil := map[string][]float64{}
 	for _, n := range nodes {
@@ -350,7 +359,7 @@ func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDay
 
 	out := make([]store.SizingVerdictRow, 0, len(nodes))
 	for key, n := range nodes {
-		v := sizing.EvaluateVerdict(n.days, previous[key])
+		v := sizing.EvaluateVerdict(n.days, previous[key], minDaysPresent)
 
 		row := store.SizingVerdictRow{
 			SystemID:    n.systemID,

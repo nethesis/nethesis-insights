@@ -425,7 +425,7 @@ func TestVerdictKOfN(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := EvaluateVerdict(tc.days, tc.previous); got.State != tc.want {
+			if got := EvaluateVerdict(tc.days, tc.previous, MinDaysPresent); got.State != tc.want {
 				t.Errorf("verdict = %q, want %q (%+v)", got.State, tc.want, got)
 			}
 		})
@@ -435,11 +435,11 @@ func TestVerdictKOfN(t *testing.T) {
 func TestVerdictUndersizedNeedsSevenBadDays(t *testing.T) {
 	// Six bad days plus enough quiet days to clear the presence floor.
 	mixed := append(days(UndersizedDays-1, 90), days(MinDaysPresent, 1)...)
-	if got := EvaluateVerdict(mixed, ""); got.State == VerdictUndersized {
+	if got := EvaluateVerdict(mixed, "", MinDaysPresent); got.State == VerdictUndersized {
 		t.Errorf("six bad days produced %q; undersizing is recurrence", got.State)
 	}
 	seven := append(days(UndersizedDays, 90), days(MinDaysPresent, 1)...)
-	if got := EvaluateVerdict(seven, ""); got.State != VerdictUndersized {
+	if got := EvaluateVerdict(seven, "", MinDaysPresent); got.State != VerdictUndersized {
 		t.Errorf("seven bad days produced %q, want undersized (%+v)", got.State, got)
 	}
 }
@@ -449,11 +449,11 @@ func TestVerdictUndersizedNeedsSevenBadDays(t *testing.T) {
 // flapping verdict is one nobody acts on.
 func TestVerdictHysteresis(t *testing.T) {
 	recovering := append(days(HysteresisBadDays+1, 90), days(MinDaysPresent, 1)...)
-	if got := EvaluateVerdict(recovering, VerdictUndersized); got.State != VerdictUndersized {
+	if got := EvaluateVerdict(recovering, VerdictUndersized, MinDaysPresent); got.State != VerdictUndersized {
 		t.Errorf("verdict = %q, want the previous undersized to hold", got.State)
 	}
 	recovered := append(days(HysteresisBadDays, 90), days(MinDaysPresent, 1)...)
-	if got := EvaluateVerdict(recovered, VerdictUndersized); got.State == VerdictUndersized {
+	if got := EvaluateVerdict(recovered, VerdictUndersized, MinDaysPresent); got.State == VerdictUndersized {
 		t.Error("at or below the hysteresis floor the verdict must release")
 	}
 }
@@ -462,7 +462,7 @@ func TestVerdictHysteresis(t *testing.T) {
 // answer must not depend on map iteration order.
 func TestVerdictNamesTheMostFrequentCause(t *testing.T) {
 	agreed := append(days(UndersizedDays, 90), days(MinDaysPresent, 1)...)
-	got := EvaluateVerdict(agreed, "")
+	got := EvaluateVerdict(agreed, "", MinDaysPresent)
 	if got.State != VerdictUndersized {
 		t.Fatalf("verdict = %q, want undersized", got.State)
 	}
@@ -478,7 +478,7 @@ func TestVerdictNamesTheMostFrequentCause(t *testing.T) {
 	}
 	mixed = append(mixed, days(MinDaysPresent, 1)...)
 	for i := 0; i < 20; i++ {
-		if got := EvaluateVerdict(mixed, ""); got.TopAxis != AxisMem {
+		if got := EvaluateVerdict(mixed, "", MinDaysPresent); got.TopAxis != AxisMem {
 			t.Fatalf("top axis = %q, want %q on every run", got.TopAxis, AxisMem)
 		}
 	}
@@ -490,7 +490,7 @@ func TestVerdictIgnoresUnscoredDays(t *testing.T) {
 	for i := range unscored {
 		unscored[i] = DayScore{Day: int64(20000 + i)}
 	}
-	if got := EvaluateVerdict(unscored, ""); got.State != VerdictInsufficientData {
+	if got := EvaluateVerdict(unscored, "", MinDaysPresent); got.State != VerdictInsufficientData {
 		t.Errorf("verdict = %q, want insufficient_data", got.State)
 	}
 }

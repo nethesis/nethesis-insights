@@ -394,8 +394,10 @@ type Verdict struct {
 //
 // previous is the node's last stored state, which is what makes the
 // hysteresis work: once undersized, the verdict holds until bad days fall to
-// HysteresisBadDays or below.
-func EvaluateVerdict(days []DayScore, previous string) Verdict {
+// HysteresisBadDays or below. minDaysPresent is the presence floor below
+// which the verdict stays insufficient_data; callers pass MinDaysPresent
+// unless a deployment has overridden it (SIZING_MIN_DAYS_PRESENT).
+func EvaluateVerdict(days []DayScore, previous string, minDaysPresent int) Verdict {
 	v := Verdict{State: VerdictInsufficientData, WindowDays: VerdictWindowDays}
 
 	axisBad := map[string]int{}
@@ -413,7 +415,7 @@ func EvaluateVerdict(days []DayScore, previous string) Verdict {
 		}
 	}
 
-	if v.DaysPresent < MinDaysPresent {
+	if v.DaysPresent < minDaysPresent {
 		return v
 	}
 

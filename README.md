@@ -160,6 +160,7 @@ locally with `podman build -t nethesis-insights .`.
 | `SIZING_WINDOW_DAYS` | trailing window for node verdicts and cohort baselines (default `28`) |
 | `SIZING_MIN_DISTINCT_SYSTEMS` | distinct clusters a cohort needs before any baseline is published (default `20`) |
 | `SIZING_MIN_NODES` | nodes a cohort needs as well (default `30`); below either floor the cohort is deleted, not left stale |
+| `SIZING_MIN_DAYS_PRESENT` | days of history a node needs before its verdict leaves `insufficient_data` (default `14`); a statistical significance floor, not a publication floor — lowering it on a real fleet weakens the k-of-n guard, not just how soon it answers |
 | `SIZING_MAX_NODES_PER_REPORT` | per-report node cap; over-cap reports are truncated, not rejected (default `16`) |
 | `ADMIN_LISTEN_ADDR` | bind address for the allowlist admin API (default empty — **the admin plane is off**). Needs `ADMIN_API_KEY` too |
 | `ADMIN_API_KEY` | bearer key for the admin API and for the operator UI's write forms — secret; unset means **no admin surface at all**, never a default credential |
