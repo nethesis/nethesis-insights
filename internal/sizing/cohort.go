@@ -14,79 +14,87 @@ const (
 	// co-tenanted with whatever else happens to be installed, and it must be
 	// labelled as such wherever it is shown.
 	CohortFamily = "family"
-	// CohortFamilySolo answers "what does a node running only mail (plus
-	// lite modules) need". It is the only one of the two safe to quote as a
-	// recommendation.
+	// CohortFamilySolo answers "what does a node running only mail (plus the
+	// platform modules every cluster has) need". It is the only one of the two
+	// safe to quote as a recommendation.
 	CohortFamilySolo = "family_solo"
 )
 
-// Class is a module family's expected resource weight.
-type Class string
+// --- ignorability ---
 
-const (
-	ClassLite   Class = "lite"
-	ClassMedium Class = "medium"
-	ClassHeavy  Class = "heavy"
-	// ClassUnknown is the explicit default. A new module must NOT be silently
-	// classed lite: that would quietly exclude it from every solo cohort's
-	// "plus lite modules" allowance and make the recommendation wrong for the
-	// product nobody had classified yet.
-	ClassUnknown Class = "unknown"
-)
-
-// familyClass is the lite/medium/heavy prior, and it appears in this codebase
-// exactly once -- here.
+// platformFamilies are the families a node runs because it is an NS8 cluster,
+// not because somebody chose a workload. They are the families ignored when
+// testing "solo".
 //
-// It is used for one thing only: deciding which families are ignorable when
-// testing "solo". It is **never** a weight inside a published number. The pass exists to measure
-// module cost; baking a cost prior into the estimator and then publishing the
-// result as evidence for that prior would be circular.
-var familyClass = map[string]Class{
-	"openldap": ClassLite,
-	"samba":    ClassLite,
-	"traefik":  ClassLite,
+// The axis here is **ubiquity, not weight**. An earlier version of this file
+// carried a lite/medium/heavy prior and treated "lite" as ignorable, which got
+// the question backwards and made `family_solo` unreachable: every NS8 cluster
+// runs loki, ldapproxy, metrics and crowdsec, loki was classed heavy, so every
+// node's non-ignorable count was at least two and no node was ever solo for
+// anything. Zero family_solo rows had ever published. Whether loki is heavy is
+// beside the point -- it is on every node either way, so it can never
+// distinguish one node from another, which is the only thing this test is for.
+//
+// It is **never** a weight inside a published number. The pass exists to
+// measure module cost; baking a cost prior into the estimator and then
+// publishing the result as evidence for that prior would be circular. The
+// consequence to state wherever a solo number is shown: the number includes
+// the platform modules' own cost, because every node measured was running
+// them. That is the honest reading, and it is also the useful one -- nobody
+// deploys NS8 without them.
+//
+// A family nobody has listed here is NOT ignorable. An unlisted module might
+// be anything, and treating it as platform would silently contaminate every
+// solo cohort it appears in with a workload nobody had got round to listing.
+var platformFamilies = map[string]bool{
+	// Present on every cluster, or on every cluster this server sees at all:
+	// log shipping, the identity proxy, metrics, intrusion prevention, and
+	// the ingress every module publishes through.
+	"loki":      true,
+	"ldapproxy": true,
+	"metrics":   true,
+	"crowdsec":  true,
+	"traefik":   true,
 
-	"mail":      ClassMedium,
-	"imapsync":  ClassMedium,
-	"nextcloud": ClassMedium,
+	// The account provider. Exactly one per cluster, and having one is not a
+	// workload decision -- see IsPlatform for samba's second role.
+	"openldap": true,
+	"samba":    true,
 
-	"nethvoice":               ClassHeavy,
-	"loki":                    ClassHeavy,
-	"nethsecurity-controller": ClassHeavy,
-	"webtop":                  ClassHeavy,
+	// Implied by another module rather than chosen: a nethvoice-proxy exists
+	// because a nethvoice does. Its cost is real voice cost, and it stays
+	// inside the numbers; what it must not do is stop a nethvoice node from
+	// counting as a nethvoice node.
+	"nethvoice-proxy": true,
 }
 
-// ClassOf resolves a family's class from its name **and its workload**.
+// IsPlatform reports whether family is ignorable when testing "solo", from its
+// name **and its workload**.
 //
-// The prior as originally given was already wrong in one instructive case:
-// "samba without file shares = lite, with shares = medium" is not a family
-// distinction at all but a *workload* one -- which is exactly what the metric
-// map is for. So the class is derived rather than looked up, one rule instead
-// of two, and it stops being wrong for a whole product the moment anyone
-// configures it.
-func ClassOf(family string, workload map[string]float64) Class {
-	base, known := familyClass[family]
-	if !known {
-		base = ClassUnknown
+// The workload is what makes samba correct. samba is the account provider on
+// most clusters, which is platform, but with file shares configured it is also
+// a file server, which is a workload somebody chose. That is a *workload*
+// distinction, not a family one -- exactly what the metric map is for -- so it
+// is derived rather than listed, one rule instead of two.
+func IsPlatform(family string, workload map[string]float64) bool {
+	if !platformFamilies[family] {
+		return false
 	}
 	// ns8-samba's get-facts (imageroot/actions/get-facts/50facts) emits
 	// shared_folders_count; "shared_folders" is accepted too so an older or
 	// third-party reporter still resolves correctly.
 	if family == "samba" && (workload["shared_folders_count"] > 0 || workload["shared_folders"] > 0) {
-		return ClassMedium
+		return false
 	}
-	return base
+	return true
 }
 
-// NonLiteFamilies returns the sorted families on a node that are not lite.
-//
-// ClassUnknown counts as non-lite: an unclassified module might be anything,
-// and treating it as ignorable would silently contaminate every solo cohort
-// it appears in.
-func NonLiteFamilies(workloads map[string]map[string]float64) []string {
+// BusinessFamilies returns the sorted families on a node that are not
+// platform -- the workloads somebody actually chose to run there.
+func BusinessFamilies(workloads map[string]map[string]float64) []string {
 	out := make([]string, 0, len(workloads))
 	for family, w := range workloads {
-		if ClassOf(family, w) != ClassLite {
+		if !IsPlatform(family, w) {
 			out = append(out, family)
 		}
 	}
@@ -94,9 +102,9 @@ func NonLiteFamilies(workloads map[string]map[string]float64) []string {
 	return out
 }
 
-// IsSolo reports whether family is the only non-lite family on the node.
-func IsSolo(family string, nonLite []string) bool {
-	return len(nonLite) == 1 && nonLite[0] == family
+// IsSolo reports whether family is the only business family on the node.
+func IsSolo(family string, business []string) bool {
+	return len(business) == 1 && business[0] == family
 }
 
 // --- censoring ---

@@ -246,8 +246,8 @@ type node struct {
 	hardwareChanged bool
 
 	// workloads is family -> metric -> value, filled by attachFamilies. The
-	// metrics are here for sizing.ClassOf, which decides whether a family is
-	// ignorable when testing "solo" -- samba's class turns on its share
+	// metrics are here for sizing.IsPlatform, which decides whether a family
+	// is ignorable when testing "solo" -- samba's answer turns on its share
 	// count. Nothing else reads a workload value.
 	workloads map[string]map[string]float64
 }
@@ -460,7 +460,7 @@ func (r *Runner) build(nodes map[string]*node, now int64) []store.SizingCohortRo
 			c.installedCores = append(c.installedCores, n.installedCores)
 		}
 
-		nonLite := sizing.NonLiteFamilies(n.workloads)
+		business := sizing.BusinessFamilies(n.workloads)
 		families := make([]string, 0, len(n.workloads))
 		for family := range n.workloads {
 			families = append(families, family)
@@ -469,7 +469,7 @@ func (r *Runner) build(nodes map[string]*node, now int64) []store.SizingCohortRo
 
 		for _, family := range families {
 			add(sizing.CohortFamily, family)
-			if sizing.IsSolo(family, nonLite) {
+			if sizing.IsSolo(family, business) {
 				add(sizing.CohortFamilySolo, family)
 			}
 		}

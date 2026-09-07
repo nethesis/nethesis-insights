@@ -177,22 +177,36 @@ Fleet-sizing rules that are as load-bearing as the gate's:
   then take percentiles across nodes. The floor counts distinct clusters, the
   same rule and reason as Threat Shield's promotion, and a cohort that falls
   below it is **deleted**, mirroring `ExpireBlocklist`.
-- **The lite/medium/heavy prior appears exactly once**, as `sizing.familyClass`,
-  used only to decide which families are ignorable when testing "solo" — never as
-  a weight inside a published number, which would be circular. It is **derived**
-  (`ClassOf(family, workload)`) because the prior as given was already wrong for
-  samba: "with file shares = medium" is a workload distinction, not a family one.
-  It is also the only reader of a stored workload value: nothing else in the pass
-  looks at one.
+- **Ignorability is keyed on ubiquity, not weight.** `sizing.platformFamilies`
+  appears exactly once and lists the families a node runs because it is an NS8
+  cluster (`loki`, `ldapproxy`, `metrics`, `crowdsec`, `traefik`, the account
+  provider, and `nethvoice-proxy` as a module implied by another) — never as a
+  weight inside a published number, which would be circular. It is **derived**
+  (`IsPlatform(family, workload)`) because samba has two roles: the account
+  provider, and a file server once shares exist — a workload distinction, not a
+  family one. It is also the only reader of a stored workload value: nothing
+  else in the pass looks at one. This replaced a lite/medium/heavy prior that
+  treated "lite" as ignorable, which asked the wrong question and made
+  `family_solo` unreachable: `loki` is on every cluster and was classed heavy,
+  so every node had at least two non-ignorable families and no node was ever
+  solo for anything — zero `family_solo` rows had ever published. Never key
+  this on weight again, and never let an unlisted family default to ignorable.
+- **A solo number includes the platform modules' cost**, because every node it
+  was measured from was running them. Say so wherever one is shown (the
+  `/cohorts` caption does); an unqualified "module X costs Y" overstates the
+  measurement. It is still the useful reading — nobody deploys NS8 without them.
 - **Roll up before pruning.** `RollupSizingMonthly` must precede
   `PruneSizingDaily`, or the dropped day loses its history permanently.
 - **Two published cohort kinds, and no third.** `family_solo` (the only one
   quotable as a recommendation) and `family` (co-tenanted, context only). A
-  `profile` keying over the sorted non-lite family list and a workload
+  `profile` keying over the sorted non-platform family list and a workload
   t-shirt-size table both shipped and were **removed**: the profile long tail
   never cleared the floor by design, and neither artifact had a consumer, so
   between them they cost ~350 lines and two more concepts for nothing. Do not
-  reintroduce either without a consumer that needs it.
+  reintroduce either without a consumer that needs it. Deleting `family_solo`
+  was considered when it turned out to be publishing nothing and rejected: it
+  is the only output of this pipeline that answers the question the pipeline
+  exists for, and the cause was a fixable classification bug, not the idea.
 - **No ridge, no k-means.** Ridge shrinkage destroys the interpretation of a
   coefficient as "the cost of module X", which is the entire product, and does
   nothing about censoring; k-means is not deterministic run to run, and a number

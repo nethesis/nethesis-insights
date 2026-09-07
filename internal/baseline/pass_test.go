@@ -52,6 +52,10 @@ type nodeSpec struct {
 	factsOK  int
 	workload map[string]float64
 	version  int
+	// coFamilies are further families installed on the same node, with no
+	// workload metrics -- enough to exercise the solo test's ignorability
+	// rule against a realistic module set.
+	coFamilies []string
 }
 
 func defaultSpec() nodeSpec {
@@ -106,6 +110,11 @@ func nodeRow(nodeID int, spec nodeSpec) store.SizingNodeDayRow {
 		Modules: []model.SanitizedSizingModule{{
 			Family: spec.family, Instances: 1, FactsOK: spec.factsOK, Workload: spec.workload,
 		}},
+	}
+	for _, family := range spec.coFamilies {
+		r.Modules = append(r.Modules, model.SanitizedSizingModule{
+			Family: family, Instances: 1, FactsOK: 1,
+		})
 	}
 	r.SetScore(store.SizingScore{
 		Pressure: fp(10), Mem: fp(8), CPU: fp(4), IO: fp(0), Disk: fp(0),
@@ -167,6 +176,58 @@ func TestOneSystemWithManyNodesDoesNotPublish(t *testing.T) {
 	}
 	if got := cohortFor(t, s, sizing.CohortFamilySolo, "mail"); got != nil {
 		t.Fatalf("one system with 40 nodes published a baseline: %+v", got)
+	}
+}
+
+// The solo cohort ignores platform modules, and this is the case that has to
+// keep working: every NS8 cluster runs loki, ldapproxy, metrics, crowdsec and
+// traefik, so if any one of them counted as a chosen workload, family_solo
+// would publish nothing at all -- which is exactly what it did for as long as
+// ignorability was keyed on the lite/medium/heavy prior rather than on
+// ubiquity.
+func TestPlatformCoTenantsDoNotBlockSolo(t *testing.T) {
+	s := newTestStore(t)
+	spec := defaultSpec()
+	spec.coFamilies = []string{"loki", "ldapproxy", "metrics", "crowdsec", "traefik"}
+	seed(t, s, 20, 2, 3, spec)
+
+	if err := New(s, testConfig()).Run(context.Background(), testNow); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := cohortFor(t, s, sizing.CohortFamilySolo, "mail")
+	if got == nil {
+		t.Fatal("a mail node carrying the standard platform set published no solo cohort")
+	}
+	if got.Nodes != 40 {
+		t.Errorf("nodes = %d, want 40", got.Nodes)
+	}
+	// The platform modules are ignored for the solo *test*; they are still
+	// families in their own right for the co-tenanted keying.
+	if cohortFor(t, s, sizing.CohortFamily, "loki") == nil {
+		t.Error("a platform family must still get its own co-tenanted cohort")
+	}
+	if cohortFor(t, s, sizing.CohortFamilySolo, "loki") != nil {
+		t.Error("a platform family is never the solo family")
+	}
+}
+
+// The other half of the same rule: a second *chosen* workload does make the
+// node co-tenanted, so its numbers are not a per-module cost and must not
+// reach the solo cohort.
+func TestBusinessCoTenantBlocksSolo(t *testing.T) {
+	s := newTestStore(t)
+	spec := defaultSpec()
+	spec.coFamilies = []string{"nextcloud"}
+	seed(t, s, 20, 2, 3, spec)
+
+	if err := New(s, testConfig()).Run(context.Background(), testNow); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := cohortFor(t, s, sizing.CohortFamilySolo, "mail"); got != nil {
+		t.Fatalf("mail co-tenanted with nextcloud published a solo baseline: %+v", got)
+	}
+	if cohortFor(t, s, sizing.CohortFamily, "mail") == nil {
+		t.Error("the co-tenanted cohort must still publish")
 	}
 }
 

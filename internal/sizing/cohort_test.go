@@ -8,48 +8,72 @@ import (
 	"testing"
 )
 
-// The class is DERIVED, not looked up, because the prior as originally given
-// was already wrong in one instructive case: "samba without file shares =
-// lite, with shares = medium" is a workload distinction, not a family one.
-func TestClassOfDerivesSambaFromWorkload(t *testing.T) {
-	if got := ClassOf("samba", nil); got != ClassLite {
-		t.Errorf("samba with no shares = %q, want %q", got, ClassLite)
+// The platform test is DERIVED, not a plain lookup, because samba has two
+// roles: the account provider (platform) and, once shares are configured, a
+// file server (a workload somebody chose). That is a workload distinction, not
+// a family one.
+func TestIsPlatformDerivesSambaFromWorkload(t *testing.T) {
+	if !IsPlatform("samba", nil) {
+		t.Error("samba with no shares is the account provider, which is platform")
 	}
-	if got := ClassOf("samba", map[string]float64{"shared_folders": 0}); got != ClassLite {
-		t.Errorf("samba with zero shares = %q, want %q", got, ClassLite)
+	if !IsPlatform("samba", map[string]float64{"shared_folders": 0}) {
+		t.Error("samba with zero shares is still just the account provider")
 	}
-	if got := ClassOf("samba", map[string]float64{"shared_folders": 3}); got != ClassMedium {
-		t.Errorf("samba with shares = %q, want %q", got, ClassMedium)
+	if IsPlatform("samba", map[string]float64{"shared_folders": 3}) {
+		t.Error("samba with shares is a file server, which is a chosen workload")
 	}
 }
 
 // ns8-samba's real get-facts (imageroot/actions/get-facts/50facts) emits
-// shared_folders_count, not shared_folders -- as written, ClassOf tested a
-// key that never arrives on the wire and samba could never reach ClassMedium.
-// The legacy key is kept working too, for an older or third-party reporter.
-func TestClassOfAcceptsSambaSharedFoldersCount(t *testing.T) {
-	if got := ClassOf("samba", map[string]float64{"shared_folders_count": 3}); got != ClassMedium {
-		t.Errorf("samba with shared_folders_count = %q, want %q", got, ClassMedium)
+// shared_folders_count, not shared_folders -- keyed on the wrong name, samba
+// with shares would silently stay platform and contaminate solo cohorts. The
+// legacy key is kept working too, for an older or third-party reporter.
+func TestIsPlatformAcceptsSambaSharedFoldersCount(t *testing.T) {
+	if IsPlatform("samba", map[string]float64{"shared_folders_count": 3}) {
+		t.Error("shared_folders_count must take samba out of platform")
 	}
-	if got := ClassOf("samba", map[string]float64{"shared_folders_count": 0}); got != ClassLite {
-		t.Errorf("samba with zero shared_folders_count = %q, want %q", got, ClassLite)
+	if !IsPlatform("samba", map[string]float64{"shared_folders_count": 0}) {
+		t.Error("zero shared_folders_count leaves samba as platform")
 	}
-	if got := ClassOf("samba", map[string]float64{"shared_folders": 3}); got != ClassMedium {
-		t.Errorf("samba with legacy shared_folders key = %q, want %q", got, ClassMedium)
+	if IsPlatform("samba", map[string]float64{"shared_folders": 3}) {
+		t.Error("the legacy shared_folders key must still be honoured")
 	}
 }
 
-// A module nobody has classified must NOT be silently classed lite: that
-// would quietly exclude it from every solo cohort's "plus lite modules"
-// allowance and make the recommendation wrong for the product nobody had got
-// round to classifying.
-func TestClassOfDefaultsToUnknownNotLite(t *testing.T) {
-	if got := ClassOf("somefutureproduct", nil); got != ClassUnknown {
-		t.Errorf("an unclassified family = %q, want %q", got, ClassUnknown)
+// This is the executable form of the bug that made family_solo unreachable:
+// every NS8 cluster runs these, so if any one of them counts as a chosen
+// workload then no node is ever solo for anything and the cohort kind never
+// publishes a row. It went unnoticed because the old prior asked which
+// families were *light*, and loki is not light -- but it is on every node,
+// which is the only property that matters here.
+func TestMandatoryPlatformModulesAreIgnorable(t *testing.T) {
+	for _, family := range []string{"loki", "ldapproxy", "metrics", "crowdsec", "traefik"} {
+		if !IsPlatform(family, nil) {
+			t.Errorf("%s runs on every cluster and must not block solo", family)
+		}
 	}
-	nonLite := NonLiteFamilies(map[string]map[string]float64{"somefutureproduct": nil})
-	if len(nonLite) != 1 {
-		t.Error("an unclassified family must count as non-lite")
+	business := BusinessFamilies(map[string]map[string]float64{
+		"mail": {"mailboxes": 210}, "loki": nil, "ldapproxy": nil,
+		"metrics": nil, "crowdsec": nil, "traefik": nil,
+	})
+	if len(business) != 1 || business[0] != "mail" {
+		t.Fatalf("business families = %v, want [mail]", business)
+	}
+	if !IsSolo("mail", business) {
+		t.Error("a mail node carrying the standard platform set must count as solo")
+	}
+}
+
+// A module nobody has listed must NOT be silently treated as platform: it
+// might be anything, and ignoring it would contaminate every solo cohort it
+// appears in with a workload nobody had got round to listing.
+func TestUnknownFamilyIsNeverPlatform(t *testing.T) {
+	if IsPlatform("somefutureproduct", nil) {
+		t.Error("an unlisted family must not be ignorable")
+	}
+	business := BusinessFamilies(map[string]map[string]float64{"somefutureproduct": nil})
+	if len(business) != 1 {
+		t.Error("an unlisted family must count as a business workload")
 	}
 }
 
@@ -59,22 +83,31 @@ func TestCohortKeying(t *testing.T) {
 		"traefik":  {"routes": 12},
 		"openldap": nil,
 	}
-	nonLite := NonLiteFamilies(workloads)
-	if len(nonLite) != 1 || nonLite[0] != "mail" {
-		t.Fatalf("non-lite = %v, want [mail]", nonLite)
+	business := BusinessFamilies(workloads)
+	if len(business) != 1 || business[0] != "mail" {
+		t.Fatalf("business = %v, want [mail]", business)
 	}
-	if !IsSolo("mail", nonLite) {
-		t.Error("mail alongside only lite modules must count as solo")
+	if !IsSolo("mail", business) {
+		t.Error("mail alongside only platform modules must count as solo")
 	}
-	if IsSolo("traefik", nonLite) {
-		t.Error("a lite family is never the solo family")
+	if IsSolo("traefik", business) {
+		t.Error("a platform family is never the solo family")
 	}
 
-	both := NonLiteFamilies(map[string]map[string]float64{
+	both := BusinessFamilies(map[string]map[string]float64{
 		"nethvoice": nil, "mail": nil, "traefik": nil,
 	})
 	if IsSolo("mail", both) {
 		t.Error("mail co-tenanted with nethvoice is not solo")
+	}
+
+	// A companion module is implied by another rather than chosen, so it does
+	// not make its parent co-tenanted.
+	voice := BusinessFamilies(map[string]map[string]float64{
+		"nethvoice": nil, "nethvoice-proxy": nil, "loki": nil,
+	})
+	if !IsSolo("nethvoice", voice) {
+		t.Error("nethvoice plus its own proxy is still a nethvoice node")
 	}
 }
 

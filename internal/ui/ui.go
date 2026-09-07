@@ -1344,6 +1344,12 @@ type cohortsPageData struct {
 // Each group's caption says what its numbers can be used for. Only
 // family_solo is safe to quote as a recommendation; family is co-tenanted with
 // whatever else happened to be installed.
+//
+// "Only this module" is stated on the page as "plus the platform modules every
+// cluster runs", because that is what sizing.IsPlatform ignores and therefore
+// what the number includes: every node measured was also running log
+// shipping, the identity proxy, metrics and intrusion prevention. Printing it
+// as an unqualified per-module cost would overstate what was measured.
 func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 	cohorts, err := s.reader.ListSizingCohorts(r.Context(), "", sizingCohortsLimit)
 	if err != nil {
@@ -1353,7 +1359,7 @@ func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 
 	groups := []cohortGroup{
 		{Kind: sizing.CohortFamilySolo, Label: "Nodes running only this module",
-			Caption: "Use these numbers when sizing a new node for this module."},
+			Caption: "Use these numbers when sizing a new node for this module. These nodes run nothing else a customer chose, but they do run the platform modules every cluster has, so their cost is included."},
 		{Kind: sizing.CohortFamily, Label: "Nodes running this module plus others",
 			Caption: "Context only. These nodes share their hardware, so the numbers are not this module's cost."},
 	}

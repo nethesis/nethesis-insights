@@ -511,8 +511,16 @@ There are two groupings, and the difference matters:
 
 | Grouping | Answers | Safe to quote? |
 |---|---|---|
-| solo | "what does a node running only mail (plus lightweight modules) need" | **yes** |
+| solo | "what does a node running only mail need" | **yes** |
 | co-tenanted | "what does a node that runs mail, alongside whatever else, look like" | no — it is not a per-module cost |
+
+"Only mail" means only mail out of what a customer *chose*. Every NethServer 8
+cluster also runs a set of platform modules — log shipping, the identity
+proxy, metrics, intrusion prevention, the ingress — and those are on every
+node in the group, so their cost is inside the number. That is the honest
+reading and also the useful one: nobody deploys NS8 without them. What it
+means in practice is that the solo figure is what to buy for a mail node, not
+what mail alone consumes.
 
 Three honesty rules are built into this:
 
