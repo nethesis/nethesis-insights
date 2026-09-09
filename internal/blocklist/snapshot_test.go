@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
-func rows(ips ...string) []store.BlocklistRow {
-	out := make([]store.BlocklistRow, 0, len(ips))
+func rows(ips ...string) []threatstore.BlocklistRow {
+	out := make([]threatstore.BlocklistRow, 0, len(ips))
 	for _, ip := range ips {
-		out = append(out, store.BlocklistRow{AttackerIP: ip})
+		out = append(out, threatstore.BlocklistRow{AttackerIP: ip})
 	}
 	return out
 }

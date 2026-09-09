@@ -14,13 +14,13 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 )
 
-func newTestStore(t *testing.T) *store.SQLiteStore {
+func newTestStore(t *testing.T) *logsstore.Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := store.Open(filepath.Join(dir, "test.db"))
+	s, err := logsstore.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

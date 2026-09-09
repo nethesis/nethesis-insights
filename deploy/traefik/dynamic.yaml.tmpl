@@ -1,0 +1,143 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Rendered to /etc/traefik/dynamic.yaml at deploy time:
+#   set -a; . /etc/insights/deploy.env; set +a
+#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < dynamic.yaml.tmpl > /etc/traefik/dynamic.yaml
+# Naming the variables in envsubst's argument matters: unquoted, it would
+# also expand Traefik's own ${...} syntax. INSIGHTS_HOST drives the six
+# Host() matchers below and the ACME certificate domain, and nothing else --
+# if a second consumer appears, it reads the same variable rather than
+# repeating the literal.
+#
+# A wrong or unset INSIGHTS_HOST fails recognisably: Traefik matches no
+# router and every request 404s, which looks nothing like a misconfigured
+# backend.
+http:
+  middlewares:
+    # Sized for ~2700 nodes on this host with no firewall of any kind, once
+    # authd becomes the single pre-auth entry point for all three pipelines.
+    # Traefik's rateLimit buckets per source IP by default, and legitimate
+    # per-node traffic is far under this: bundles post every 15 minutes
+    # (~0.001 req/s), sizing reports post three times a day, and threat
+    # events are batched into one POST per report rather than one per event.
+    # average: 5req/s gives ~1000x headroom over that steady rate while still
+    # capping a single misbehaving or compromised node (a retry loop, a
+    # scripted flood) well short of being able to threaten authd's cache or a
+    # backend's single SQLite writer. It is deliberately per-source rather
+    # than a global cap: a global limit would let one loud client starve the
+    # other 2699 nodes, which is worse than the DoS this exists to bound.
+    #
+    # burst is a different knob and must not be sized off the steady rate:
+    # bundle windows are wall-clock aligned (the design spec's example window
+    # is 08:00:00-08:15:00Z), so every node in a cluster behind one NAT egress
+    # posts within moments of the same quarter hour, and the blocklist feed
+    # poll is on the same 15-minute cadence. Traefik's token-bucket queues a
+    # request only up to maxDelay = period/(2*average), 100ms here, so with
+    # average: 5 the practical behaviour of a low burst is "burst requests
+    # succeed, the rest are rejected outright" rather than smoothly queued --
+    # one ordinary multi-node cluster sharing a public IP already exceeds a
+    # burst of 10. 200 absorbs that synchronised arrival spike; it bounds
+    # instantaneous depth only, so average: 5 still caps a retry loop or a
+    # scripted flood exactly as intended.
+    rate-limit:
+      rateLimit:
+        average: 5
+        period: 1s
+        burst: 200
+    system-auth:
+      forwardAuth:
+        address: "http://127.0.0.1:9590/auth"
+    operator-auth:
+      basicAuth:
+        usersFile: /etc/traefik/operators.htpasswd
+        # false, deliberately: the app validates ADMIN_API_KEY itself and
+        # needs the header. Setting this true breaks every UI write with a
+        # 401 while the proxy still lets the request through.
+        removeHeader: false
+    strip-logs:
+      stripPrefix:
+        prefixes: ["/logs"]
+    strip-blocklist:
+      stripPrefix:
+        prefixes: ["/blocklist"]
+    strip-sizing:
+      stripPrefix:
+        prefixes: ["/sizing"]
+
+  routers:
+    # Priority is explicit on all six: /blocklist/v1/ and /blocklist/ share a
+    # prefix, and getting the order backwards would put operator BasicAuth on
+    # the ingest path, or the fleet's system credentials on the operator UI.
+    #
+    # entryPoints is pinned to websecure on all six for the same reason:
+    # without it a router also attaches to web (plain :80), and its safety
+    # over cleartext then rests on the web entrypoint's redirect router
+    # happening to carry a higher default priority than this file's explicit
+    # 200/100 -- an undefined ordering. Pinning removes the dependence.
+    logs-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs/v1/`)"
+      entryPoints: [websecure]
+      priority: 200
+      middlewares: [rate-limit, system-auth, strip-logs]
+      service: logs-api
+    logs-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
+      entryPoints: [websecure]
+      priority: 100
+      middlewares: [rate-limit, operator-auth, strip-logs]
+      service: logs-ui
+    blocklist-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
+      entryPoints: [websecure]
+      priority: 200
+      middlewares: [rate-limit, system-auth, strip-blocklist]
+      service: blocklist-api
+    blocklist-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
+      entryPoints: [websecure]
+      priority: 100
+      middlewares: [rate-limit, operator-auth, strip-blocklist]
+      service: blocklist-ui
+    sizing-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
+      entryPoints: [websecure]
+      priority: 200
+      middlewares: [rate-limit, system-auth, strip-sizing]
+      service: sizing-api
+    sizing-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"
+      entryPoints: [websecure]
+      priority: 100
+      middlewares: [rate-limit, operator-auth, strip-sizing]
+      service: sizing-ui
+
+  services:
+    logs-api:
+      loadBalancer:
+        # passHostHeader defaults to true and must stay true: the UI's
+        # cross-site write check compares Origin to r.Host, and a rewritten
+        # Host makes every write a 403.
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9595"}]
+    logs-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9596"}]
+    blocklist-api:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9605"}]
+    blocklist-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9606"}]
+    sizing-api:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9615"}]
+    sizing-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9616"}]

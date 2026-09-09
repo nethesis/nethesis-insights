@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
 const (
@@ -35,9 +35,9 @@ func testConfig() Config {
 // Consensus is the logic that decides whether a third party's address is
 // published, so it is tested against a real database rather than a mock: the
 // grouping *is* the SQL.
-func newTestStore(t *testing.T) *store.SQLiteStore {
+func newTestStore(t *testing.T) *threatstore.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := threatstore.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -49,7 +49,7 @@ func newTestStore(t *testing.T) *store.SQLiteStore {
 }
 
 // report stores one sighting of ip by systemID, observedAt millis before now.
-func report(t *testing.T, s *store.SQLiteStore, systemID, ip, scenario string, ago int64) {
+func report(t *testing.T, s *threatstore.Store, systemID, ip, scenario string, ago int64) {
 	t.Helper()
 	_, _, err := s.InsertThreatEvents(context.Background(), systemID, []model.ThreatEvent{{
 		AttackerIP: ip,
@@ -62,7 +62,7 @@ func report(t *testing.T, s *store.SQLiteStore, systemID, ip, scenario string, a
 	}
 }
 
-func runPass(t *testing.T, s *store.SQLiteStore, cfg Config) (*Runner, *Snapshot) {
+func runPass(t *testing.T, s *threatstore.Store, cfg Config) (*Runner, *Snapshot) {
 	t.Helper()
 	snap := NewSnapshot()
 	r := New(s, snap, cfg)
@@ -72,7 +72,7 @@ func runPass(t *testing.T, s *store.SQLiteStore, cfg Config) (*Runner, *Snapshot
 	return r, snap
 }
 
-func listed(t *testing.T, s *store.SQLiteStore) []string {
+func listed(t *testing.T, s *threatstore.Store) []string {
 	t.Helper()
 	rows, err := s.ListBlocklist(context.Background(), now, 0)
 	if err != nil {
@@ -256,7 +256,7 @@ func TestExpiryRemovesTheEntry(t *testing.T) {
 func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertThreatAllowlistEntry(ctx, store.AllowlistRow{
+	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -279,7 +279,7 @@ func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertThreatAllowlistEntry(ctx, store.AllowlistRow{
+	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "not-a-cidr", Reason: "typo", CreatedBy: "ops", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -329,7 +329,7 @@ func TestRunRollsUpStatsAndPrunes(t *testing.T) {
 // a stale list, never a blank one.
 func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 	fake := &failingReader{
-		rows: []store.BlocklistRow{{AttackerIP: "203.0.113.7", ExpiresAt: now + hour}},
+		rows: []threatstore.BlocklistRow{{AttackerIP: "203.0.113.7", ExpiresAt: now + hour}},
 	}
 	snap := NewSnapshot()
 	r := New(fake, snap, testConfig())
@@ -358,26 +358,26 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 
 // failingReader serves one fixed blocklist row and can be switched to fail.
 type failingReader struct {
-	rows []store.BlocklistRow
+	rows []threatstore.BlocklistRow
 	fail bool
 }
 
 var errBoom = errors.New("store unavailable")
 
-func (f *failingReader) ConsensusCandidates(context.Context, int64) ([]store.ThreatCandidateRow, error) {
+func (f *failingReader) ConsensusCandidates(context.Context, int64) ([]threatstore.ThreatCandidateRow, error) {
 	if f.fail {
 		return nil, errBoom
 	}
 	return nil, nil
 }
-func (f *failingReader) ThreatAllowlist(context.Context, int64) ([]store.AllowlistRow, error) {
+func (f *failingReader) ThreatAllowlist(context.Context, int64) ([]threatstore.AllowlistRow, error) {
 	return nil, nil
 }
-func (f *failingReader) UpsertBlocklistEntries(context.Context, []store.BlocklistRow) error {
+func (f *failingReader) UpsertBlocklistEntries(context.Context, []threatstore.BlocklistRow) error {
 	return nil
 }
 func (f *failingReader) ExpireBlocklist(context.Context, int64) (int, error) { return 0, nil }
-func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]store.BlocklistRow, error) {
+func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstore.BlocklistRow, error) {
 	return f.rows, nil
 }
 func (f *failingReader) RollupThreatDailyStats(context.Context) error          { return nil }

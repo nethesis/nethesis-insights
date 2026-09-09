@@ -1,0 +1,33 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Audit</h1>
+<p><small>The append-only trail every allowlist write leaves behind: adding or
+removing an entry, and approving or rejecting a client request. It exists
+because deleting an allowlist entry destroys the very row that would
+otherwise say who removed it and why -- this table is the only place that
+survives the delete.</small></p>
+
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">When</th><th scope="col">CIDR</th><th scope="col">Action</th><th scope="col">Actor</th><th scope="col">Detail</th></tr>
+</thead>
+<tbody>
+{{range .Entries}}
+<tr>
+<td class="mono" title="{{fmtTime .At}}">{{fmtAgo .At}}</td>
+<td class="mono">{{.CIDR}}</td>
+<td class="mono">{{.Action}}</td>
+<td class="mono">{{.Actor}}</td>
+<td>{{if .Detail}}{{.Detail}}{{else}}&mdash;{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="5">no audit entries yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+{{end}}

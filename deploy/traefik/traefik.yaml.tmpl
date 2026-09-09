@@ -1,0 +1,46 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Rendered to /etc/traefik/traefik.yaml at deploy time:
+#   set -a; . /etc/insights/deploy.env; set +a
+#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < traefik.yaml.tmpl > /etc/traefik/traefik.yaml
+# INSIGHTS_HOST and ACME_EMAIL are both deploy-time inputs -- see
+# dynamic.yaml.tmpl for the six Host() matchers INSIGHTS_HOST also drives.
+# Both Traefik files are templates deliberately: templating one and leaving
+# the other static is a trap, since the static one looks editable in place
+# and either the edit is silently overwritten on the next render or it is
+# not and the two quietly disagree.
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint: {to: websecure, scheme: https, permanent: true}
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: le
+    # Empty, deliberately: nothing sits in front of Traefik on this host, so
+    # Traefik overwrites X-Forwarded-For with the connecting address. That
+    # overwrite is what makes the pipelines' rightmost-value rule correct.
+    forwardedHeaders:
+      trustedIPs: []
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yaml
+    watch: true
+
+certificatesResolvers:
+  le:
+    acme:
+      email: ${ACME_EMAIL}
+      storage: /acme/acme.json
+      httpChallenge:
+        entryPoint: web
+
+log:
+  level: INFO
+accessLog: {}

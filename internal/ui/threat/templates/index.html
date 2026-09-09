@@ -1,0 +1,119 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Blocklist</h1>
+<p><small>What the fleet currently agrees on. An address is promoted once enough
+distinct systems independently report it inside the consensus window, and it
+expires when nobody has reported it for the TTL.</small></p>
+
+<article>
+<header><strong>Served snapshot</strong></header>
+{{if not .Feed.Present}}
+<p>n/a &mdash; the threat pipeline is not wired into this process.</p>
+{{else if not .Feed.Ready}}
+<p>Not generated yet &mdash; <code>GET /v1/feed</code> answers <code>503</code>
+until the first successful consensus pass. An empty body would mean
+&ldquo;no threats&rdquo; to every client that imports it.</p>
+{{else}}
+<figure>
+<table class="striped">
+<tbody>
+<tr><th scope="row">Entries served</th><td class="num">{{.Feed.Entries}}</td></tr>
+<tr><th scope="row">Generated</th><td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td></tr>
+<tr><th scope="row">ETag</th><td class="mono">{{.Feed.ETag}}</td></tr>
+</tbody>
+</table>
+</figure>
+{{end}}
+</article>
+
+<h2>Promoted entries</h2>
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">Attacker IP</th><th scope="col">Scenarios</th><th scope="col" class="num">Systems</th>
+<th scope="col">First listed</th><th scope="col">Last seen</th><th scope="col">Expires</th><th scope="col">Evidence</th></tr>
+</thead>
+<tbody>
+{{range .Entries}}
+<tr>
+<td class="mono">{{.AttackerIP}}</td>
+<td>{{join .Scenarios ", "}}</td>
+<td class="num">{{.DistinctSystems}}</td>
+<td class="mono" title="{{fmtTime .FirstListedAt}}">{{fmtAgo .FirstListedAt}}</td>
+<td class="mono" title="{{fmtTime .LastSeenAt}}">{{fmtAgo .LastSeenAt}}</td>
+<td class="mono" title="{{fmtTime .ExpiresAt}}">{{if le .ExpiresAt $.Now}}expired{{else}}{{fmtTime .ExpiresAt}}{{end}}</td>
+<td>
+<details>
+<summary>why</summary>
+<p><small>Snapshotted when the address was promoted, because the raw events
+behind it are pruned long before anyone asks.</small></p>
+<ul>
+<li>rule <code>{{.Reason.Rule}}</code>: {{.Reason.MinSystems}} systems / {{.Reason.WindowMinutes}}m window</li>
+<li>{{.Reason.Systems}} distinct systems, {{.Reason.Hits}} hits</li>
+<li>scenarios: {{join .Reason.Scenarios ", "}}</li>
+<li>decided {{fmtTime .Reason.DecidedAt}}</li>
+</ul>
+</details>
+</td>
+</tr>
+{{else}}
+<tr><td colspan="7">nothing promoted yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+
+<h2>Allowlist</h2>
+<p><small>Applied at promotion, not at read &mdash; adding an entry unlists the
+address on the next pass; deleting one does not re-block anything until it is
+reported again. A prefix shorter than /24 (IPv4) or /48 (IPv6) is refused
+unless force is checked &mdash; 0.0.0.0/0 here would silently disable the
+entire feed.</small></p>
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">CIDR</th><th scope="col">Reason</th><th scope="col">Added by</th><th scope="col">Created</th><th scope="col">Expires</th>{{if .CanWrite}}<th scope="col"></th>{{end}}</tr>
+</thead>
+<tbody>
+{{range .Allowlist}}
+<tr>
+<td class="mono">{{.CIDR}}</td>
+<td>{{.Reason}}</td>
+<td class="mono">{{.CreatedBy}}</td>
+<td class="mono" title="{{fmtTime .CreatedAt}}">{{fmtAgo .CreatedAt}}</td>
+<td class="mono">{{if .ExpiresAt}}{{fmtOptTime .ExpiresAt}}{{else}}permanent{{end}}</td>
+{{if $.CanWrite}}
+<td>
+<form method="post" action="{{$.Base}}/blocklist/allowlist/delete">
+<input type="hidden" name="cidr" value="{{.CIDR}}">
+<button type="submit" class="secondary">Delete</button>
+</form>
+</td>
+{{end}}
+</tr>
+{{else}}
+<tr><td colspan="{{if .CanWrite}}6{{else}}5{{end}}">no allowlist entries</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+
+{{if .CanWrite}}
+<form method="post" action="{{$.Base}}/blocklist/allowlist">
+<fieldset role="group">
+<input type="text" name="cidr" placeholder="CIDR or bare address" required>
+<input type="text" name="reason" placeholder="reason">
+<label><input type="checkbox" name="force"> force</label>
+<button type="submit">Add to allowlist</button>
+</fieldset>
+</form>
+{{else}}
+<p><small>ADMIN_API_KEY is not configured on this deployment, so adding or
+removing an entry is not available here &mdash; use the admin API directly,
+or set ADMIN_API_KEY to enable this form.</small></p>
+{{end}}
+
+{{end}}

@@ -6,61 +6,63 @@ info:
   title: nethesis-insights
   version: "0.1.0"
   description: |
-    Central log-anomaly analysis and Threat Shield server for a NethServer 8
-    fleet (~2700 nodes). Three independent HTTP surfaces are documented here,
-    each on its own listener:
+    Central log-anomaly analysis, Threat Shield and fleet-sizing server for a
+    NethServer 8 fleet (~2700 nodes). Three independent pipelines are
+    documented here, each its own binary behind one public host, with
+    Traefik routing by path prefix and stripping the prefix before proxying:
 
-    - **Edge, log pipeline** (`/v1/bundles`, `/v1/findings`): edge nodes ship
-      deduplicated, masked log bundles every 15 minutes; the server gates each
-      one against novelty and deviation, calls an LLM only when the gate
-      fires, and stores findings keyed by a server-computed fingerprint so the
-      same problem is never re-raised.
-    - **Edge, Threat Shield** (`/v1/threat-events`, `/v1/blocklist`,
-      `/v1/allowlist-requests`): a separate pipeline with no LLM and no
-      fingerprint. Edges report CrowdSec ban decisions; the server publishes a
-      fleet-consensus blocklist once an address is independently reported by
-      enough distinct systems.
-    - **Admin** (`/admin/v1/allowlist*`): a bearer-key-protected plane for
-      reviewing and managing the hand-maintained allowlist that keeps an
-      address off the blocklist regardless of consensus.
+    - **Log pipeline** (`insightsd`, prefix `/logs`: `/logs/v1/bundles`,
+      `/logs/v1/findings`): edge nodes ship deduplicated, masked log bundles
+      every 15 minutes; the server gates each one against novelty and
+      deviation, calls an LLM only when the gate fires, and stores findings
+      keyed by a server-computed fingerprint so the same problem is never
+      re-raised.
+    - **Threat Shield** (`threatd`, prefix `/blocklist`:
+      `/blocklist/v1/events`, `/blocklist/v1/feed`,
+      `/blocklist/v1/allowlist-requests`): a separate pipeline with no LLM
+      and no fingerprint. Edges report CrowdSec ban decisions; the server
+      publishes a fleet-consensus blocklist once an address is independently
+      reported by enough distinct systems.
+    - **Fleet sizing** (`sizingd`, prefix `/sizing`: `/sizing/v1/reports`): a
+      third pipeline, also with no LLM, no gate, no fingerprint and no queue.
+      NS8 cluster leaders post one complete-UTC-day workload and performance
+      report per cluster; the server scores each node and publishes cohort
+      hardware baselines.
 
     This document is the contract other teams build clients against
-    (`ns8-crowdsec`, `ns8-loki`); it is kept in lockstep with the Go handlers
-    in `internal/api` and `internal/admin`, not just with the design intent.
-    It does not cover the operator UI (`internal/ui`): that surface serves
-    HTML to a human, has no stable contract, and documenting it would invite
-    someone to script against it.
+    (`ns8-crowdsec`, `ns8-loki`, `ns8-core`); it is kept in lockstep with the
+    Go handlers in `internal/api/logs`, `internal/api/threat` and
+    `internal/api/sizing`, not just with the design intent. It does not
+    cover the three operator dashboards (`internal/ui/logs`,
+    `internal/ui/threat`, `internal/ui/sizing`): that surface serves HTML to a
+    human -- including the allowlist review and management writes that used
+    to live on a separate bearer-key-protected admin plane -- has no stable
+    contract, and documenting it would invite someone to script against it.
 
-    Some paths under the admin surface are **planned, not yet implemented**
-    (see `docs/plans/2026-08-28-allowlist-management.md`); each such
-    operation says so in its description.
+    See `docs/plans/2026-08-28-allowlist-management.md` for the allowlist
+    review workflow that `/blocklist/v1/allowlist-requests` feeds.
 servers:
   - url: https://insights.nethesis.it
-    description: Production. Edge log-pipeline and Threat Shield ingest/read surface.
-  - url: http://localhost:9595
-    description: Local `insightsd` listener (default `LISTEN_ADDR`) for edge log-pipeline and Threat Shield endpoints.
-  - url: http://localhost:9597
     description: >-
-      Local admin listener (`ADMIN_LISTEN_ADDR`). A separate socket from the
-      edge listener above, normally bound to loopback only; registered only
-      when `ADMIN_API_KEY` is set.
+      Production. One public host; Traefik routes by path prefix (`/logs`,
+      `/blocklist`, `/sizing`) to insightsd, threatd and sizingd
+      respectively, stripping the prefix before proxying.
+  - url: http://localhost:9595
+    description: >-
+      Local, unproxied. insightsd, threatd and sizingd each bind their own
+      `LISTEN_ADDR` and serve their routes without the public prefix (e.g.
+      `/v1/bundles` rather than `/logs/v1/bundles`) -- this is what lets a
+      pipeline run standalone during development. Point at whichever
+      binary's listener you are running directly.
 tags:
   - name: log-pipeline
     description: Bundle ingest and finding retrieval, authenticated via forward-auth Basic credentials.
   - name: threat-shield
     description: CrowdSec ban-decision ingest and the fleet-consensus blocklist feed, same credentials as the log pipeline.
-  - name: admin
-    description: >-
-      Allowlist review and management. Bearer `ADMIN_API_KEY`; every write
-      also requires `X-Admin-Actor` for attribution. Planned surface, not
-      yet implemented.
-  - name: health
-    description: Unauthenticated liveness probe.
+  - name: sizing
+    description: NS8 cluster workload/performance report ingest, same credentials as the log pipeline.
 paths:
-  /v1/bundles:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /logs/v1/bundles:
     post:
       operationId: postBundle
       tags: [log-pipeline]
@@ -71,7 +73,7 @@ paths:
         answers only whether the bundle was **taken**, never how the
         analysis went: an LLM call can outlive the client's HTTP timeout,
         and that must never decide the fate of a window. Poll
-        `GET /v1/findings` for results.
+        `GET /logs/v1/findings` for results.
 
         Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
         after decompression.
@@ -173,10 +175,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
-  /v1/findings:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /logs/v1/findings:
     get:
       operationId: listFindings
       tags: [log-pipeline]
@@ -254,10 +253,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
-  /v1/threat-events:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /blocklist/v1/events:
     post:
       operationId: postThreatEvents
       tags: [threat-shield]
@@ -294,6 +290,12 @@ paths:
         Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
         after decompression, and at most `THREAT_MAX_DECISIONS_PER_REQUEST`
         decisions (default 500) per request.
+
+        Sanitizing (and therefore the `dropped` counters) happens
+        synchronously, but the write is queued and answered before it lands:
+        `stored` and `duplicates` are post-write facts and cannot survive
+        that. A `503` here means the ingest queue is at capacity -- retry,
+        exactly as for a bundle rejected by `/logs/v1/bundles`.
       security:
         - basicAuth: []
       requestBody:
@@ -326,8 +328,6 @@ paths:
                 $ref: "#/components/schemas/ThreatIngestResponse"
               example:
                 accepted: true
-                stored: 3
-                duplicates: 1
                 dropped:
                   accepted: 4
                   dropped_type: 0
@@ -366,16 +366,16 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "method not allowed" }
         "503":
-          description: Forward-auth validator unreachable, or the store failed to write.
+          description: >-
+            Forward-auth validator unreachable, or the ingest queue is at
+            capacity. Retryable, exactly like a `503` from
+            `/logs/v1/bundles`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
-  /v1/blocklist:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /blocklist/v1/feed:
     get:
       operationId: getBlocklist
       tags: [threat-shield]
@@ -480,17 +480,12 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "blocklist not generated yet" }
 
-  /v1/allowlist-requests:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /blocklist/v1/allowlist-requests:
     post:
       operationId: postAllowlistRequest
       tags: [threat-shield]
       summary: Request a CIDR be added to the allowlist
       description: |
-        **Planned, not yet implemented** (`docs/plans/2026-08-28-allowlist-management.md`).
-
         A review-queue entry, never a decision procedure: there is no
         automatic promotion to `threat_allowlist` from any number of
         requests. The two consensus rules look symmetric and are not -- a
@@ -499,7 +494,7 @@ paths:
         *not* being blocked) and permanent until a human notices, and would
         cost an attacker nothing more than a subscription credential. So
         this endpoint only ever queues a request for a human to act on
-        through the admin API or the operator UI.
+        through the operator UI.
 
         Idempotent per `(cidr, system_id)`: one system counts once,
         mirroring the blocklist's distinct-system rule. `requests` in the
@@ -509,7 +504,7 @@ paths:
         that is already on the allowlist is a successful no-op.
 
         `reason` is free text from a customer: length-capped, and rendered
-        escaped wherever the admin UI shows it, never trusted or
+        escaped wherever the operator UI shows it, never trusted or
         interpreted.
       security:
         - basicAuth: []
@@ -562,10 +557,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
-  /v1/sizing-reports:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
+  /sizing/v1/reports:
     post:
       operationId: postSizingReports
       tags: [sizing]
@@ -573,9 +565,10 @@ paths:
       description: |
         An NS8 cluster **leader** posts one report per complete UTC day, one
         entry per node in the cluster. Fleet sizing is a third pipeline beside
-        the log-bundle path and Threat Shield, sharing only this listener, the
-        forward-auth `Authenticator`, the SQLite file and `model.ModuleFamily`:
-        no LLM call, no gate, no fingerprint, no queue.
+        the log-bundle path and Threat Shield -- its own binary (`sizingd`)
+        with its own SQLite file, sharing only Traefik, the `authd`
+        forward-auth cache and `model.ModuleFamily`: no LLM call, no gate, no
+        fingerprint, no queue.
 
         **The unit is a cluster-day, and a day is absolute.** One `system_id`
         is a *cluster*, so the storage key is `(system_id, node_id, day)`.
@@ -746,500 +739,6 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
-  /admin/v1/allowlist:
-    servers:
-      - url: http://localhost:9597
-    get:
-      operationId: listAllowlist
-      tags: [admin]
-      summary: List current allowlist entries
-      description: |
-        **Planned, not yet implemented.** Read-only; no `X-Admin-Actor`
-        required, since nothing is written or attributed.
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: Every current entry.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [entries]
-                properties:
-                  entries:
-                    type: array
-                    items: { $ref: "#/components/schemas/AllowlistEntry" }
-              example:
-                entries:
-                  - cidr: 203.0.113.0/24
-                    reason: our partner's vulnerability scanner
-                    created_by: alice
-                    created_at: 1756368000000
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `GET`, `POST` or `DELETE`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-    post:
-      operationId: putAllowlistEntry
-      tags: [admin]
-      summary: Add or update an allowlist entry
-      description: |
-        **Planned, not yet implemented.** Upsert by `cidr`: `200` whether
-        the entry was created or already present -- this is never an error,
-        so a retried or repeated add is always safe.
-
-        Adding an entry unlists the address on the next consensus pass
-        (within `BLOCKLIST_CONSENSUS_INTERVAL`); it does not take effect at
-        read time. A bare address normalises to `/32` or `/128` and is
-        stored `Masked()`, so text equality stays identity, as it does for
-        `attacker_ip`.
-
-        A prefix broader than `/24` (v4) or `/48` (v6) is refused unless
-        `force` is `true`: `0.0.0.0/0` on the allowlist silently disables
-        the entire feed, and nothing would report it, so the guardrail is
-        here rather than left to operator discipline. A non-public address
-        is accepted with a warning rather than rejected -- it can never be
-        promoted in the first place, so allowlisting one is pointless but
-        harmless, and refusing it would be a confusing error for a request
-        that cannot do damage.
-
-        `X-Admin-Actor` is required and is **not a security control**:
-        anyone holding `ADMIN_API_KEY` can claim any actor name. It exists
-        so "the allowlist changed" has a "who" attached, recorded with the
-        row and appended to the audit log.
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: X-Admin-Actor
-          in: header
-          required: true
-          description: Free-text attribution for this write, recorded with the entry and in the audit log.
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AllowlistEntryInput"
-            example:
-              cidr: 203.0.113.0/24
-              reason: our partner's vulnerability scanner
-      responses:
-        "200":
-          description: Created or updated -- always `200`, never a distinct "created" status.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AllowlistUpsertResult" }
-              example:
-                cidr: 203.0.113.0/24
-        "400":
-          description: >-
-            Unparseable `cidr`, a prefix broader than the `/24`/`/48` floor
-            without `force: true`, `reason` missing/too long/non-printable,
-            or missing `X-Admin-Actor`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "X-Admin-Actor header is required" }
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `GET`, `POST` or `DELETE`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-    delete:
-      operationId: deleteAllowlistEntry
-      tags: [admin]
-      summary: Remove an allowlist entry
-      description: |
-        **Planned, not yet implemented.** The CIDR travels as a **query
-        parameter**, never a path segment: a `/` in a path means every
-        caller has to get `%2F` right, and some proxies normalise it away.
-
-        **Deleting an entry re-blocks nothing.** The address only returns
-        to the blocklist if it is reported again by enough distinct systems
-        -- removal is not retroactive. This is documented rather than fixed
-        because retroactively re-blocking on delete would need to replay
-        historical reports the server may have already pruned.
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: cidr
-          in: query
-          required: true
-          description: The exact CIDR to remove, as stored (post-`Masked()` form).
-          schema: { type: string }
-          example: 203.0.113.0/24
-        - name: X-Admin-Actor
-          in: header
-          required: true
-          description: Free-text attribution for this write, recorded in the audit log.
-          schema: { type: string }
-      responses:
-        "200":
-          description: The entry existed and was removed.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AllowlistDeleteResult" }
-              example: { cidr: 203.0.113.0/24, deleted: true }
-        "400":
-          description: Missing/unparseable `cidr` query parameter, or missing `X-Admin-Actor`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "X-Admin-Actor header is required" }
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "404":
-          description: No entry exists for that `cidr`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "not found" }
-        "405":
-          description: Method other than `GET`, `POST` or `DELETE`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-  /admin/v1/allowlist/requests:
-    servers:
-      - url: http://localhost:9597
-    get:
-      operationId: listAllowlistRequests
-      tags: [admin]
-      summary: List pending allowlist requests, ranked by distinct systems
-      description: |
-        **Planned, not yet implemented.** The review queue: every pending
-        `(cidr, system_id)` request rolled up by `cidr`, ranked by distinct
-        reporting systems descending, so a resolver forty customers are
-        hitting floats to the top and a single opportunistic request sinks.
-        Ranking is the only thing the count does -- crossing any threshold
-        never promotes anything by itself; see decision 1 in the plan.
-
-        A CIDR that has been rejected does not resurface here, though its
-        underlying requests are retained so "who asked, and when" stays
-        answerable from the audit trail.
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: The current pending queue.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [requests]
-                properties:
-                  requests:
-                    type: array
-                    items: { $ref: "#/components/schemas/AllowlistRequestSummary" }
-              example:
-                requests:
-                  - cidr: 203.0.113.0/24
-                    distinct_systems: 12
-                    reason: our partner's vulnerability scanner
-                    first_requested_at: 1756360000000
-                    last_requested_at: 1756368000000
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `GET`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-  /admin/v1/allowlist/requests/approve:
-    servers:
-      - url: http://localhost:9597
-    post:
-      operationId: approveAllowlistRequest
-      tags: [admin]
-      summary: Approve a pending allowlist request
-      description: |
-        **Planned, not yet implemented.** Creates the allowlist entry from
-        the request, marks the `(cidr)` review state `approved`, and removes
-        the handled request from the pending queue. This is the only path by
-        which a client request becomes an allowlist entry -- always an
-        explicit human decision, never automatic.
-
-        A later request for the same CIDR re-enters the queue: a decision is
-        recorded, not a permanent gag. Approving an already-allowlisted CIDR
-        is an idempotent no-op.
-
-        `force` overrides the same over-broad-prefix guardrail as
-        `POST /admin/v1/allowlist` (required to approve anything shorter
-        than a `/24` v4 or `/48` v6 prefix). `note` is optional free text
-        recorded on the audit row alongside the decision.
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: X-Admin-Actor
-          in: header
-          required: true
-          description: Free-text attribution, recorded as the entry's `created_by` and in the audit log.
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AllowlistDecisionRequest"
-            example:
-              cidr: 203.0.113.0/24
-      responses:
-        "200":
-          description: The allowlist entry now exists.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ReviewResult" }
-              example: { cidr: 203.0.113.0/24, state: approved }
-        "400":
-          description: Unparseable `cidr`, or missing `X-Admin-Actor`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "X-Admin-Actor header is required" }
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `POST`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-  /admin/v1/allowlist/requests/reject:
-    servers:
-      - url: http://localhost:9597
-    post:
-      operationId: rejectAllowlistRequest
-      tags: [admin]
-      summary: Reject a pending allowlist request
-      description: |
-        **Planned, not yet implemented.** Marks the `(cidr)` review state
-        `rejected` and removes the handled request from the pending queue.
-        The per-system request rows are deleted, but the history of who
-        asked for what and how it was decided survives in the append-only
-        audit trail (`GET /admin/v1/allowlist/audit`).
-
-        A later request for the same CIDR re-enters the queue to be reviewed
-        on its own merits -- one rejection on thin evidence must not bury
-        every future ask for that address.
-
-        `note` is optional free text recorded on the audit row explaining
-        the rejection. `force` has no effect here -- the guardrail only
-        matters for an operation that can create an entry.
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: X-Admin-Actor
-          in: header
-          required: true
-          description: Free-text attribution, recorded in the audit log.
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AllowlistDecisionRequest"
-            example:
-              cidr: 203.0.113.0/24
-      responses:
-        "200":
-          description: The request is marked rejected.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ReviewResult" }
-              example: { cidr: 203.0.113.0/24, state: rejected }
-        "400":
-          description: Unparseable `cidr`, or missing `X-Admin-Actor`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "X-Admin-Actor header is required" }
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `POST`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-  /admin/v1/allowlist/audit:
-    servers:
-      - url: http://localhost:9597
-    get:
-      operationId: listAllowlistAudit
-      tags: [admin]
-      summary: Read the append-only allowlist write log
-      description: |
-        **Planned, not yet implemented.** One row per admin write --
-        add, delete, approve, reject -- with the actor that made it. This
-        table exists because `DELETE` removes the row that would otherwise
-        hold the trail: without it, "who removed the exemption that let
-        this through" is unanswerable, which is the question that actually
-        gets asked. `actor` is self-declared: `X-Admin-Actor` is not a
-        security control, anyone holding `ADMIN_API_KEY` can claim any
-        name, and this endpoint's data should be read with that in mind.
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: The audit log, newest first.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [audit]
-                properties:
-                  audit:
-                    type: array
-                    items: { $ref: "#/components/schemas/AuditEntry" }
-              example:
-                audit:
-                  - id: 01J8Z2A3B4C5D6E7F8G9H0J1K2
-                    cidr: 203.0.113.0/24
-                    action: approve
-                    actor: alice
-                    at: 1756368000000
-                    detail: "created from 12 distinct-system requests"
-        "401":
-          description: Missing or invalid bearer token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
-        "405":
-          description: Method other than `GET`.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "method not allowed" }
-
-        "503":
-          description: >-
-            The store could not be reached. The admin plane has no queue and
-            no retry of its own, so a write that answers 503 did not happen
-            and is safe to repeat.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "temporarily unavailable" }
-  /healthz:
-    servers:
-      - url: https://insights.nethesis.it
-      - url: http://localhost:9595
-    get:
-      operationId: getHealthz
-      tags: [health]
-      summary: Liveness probe
-      description: >-
-        Unauthenticated by design: it answers process liveness only, before
-        any dependency (auth validator, database) is consulted, so it stays
-        useful precisely when those dependencies are the problem.
-      security: []
-      responses:
-        "200":
-          description: The process is up.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status: { type: string, const: ok }
-              example: { status: ok }
-
 components:
   securitySchemes:
     basicAuth:
@@ -1250,17 +749,6 @@ components:
         `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`) with a
         TTL cache. Fail-closed: a rejected credential is `401`, a validator
         that cannot be reached is `503` (retryable), never a silent `401`.
-    bearerAuth:
-      type: http
-      scheme: bearer
-      description: >-
-        A single shared `ADMIN_API_KEY`. When unset, the admin listener
-        (`ADMIN_LISTEN_ADDR`) never starts and every route under
-        `/admin/v1` is absent (`404`) rather than answering `401` -- there
-        is never a default credential. Not a per-user identity: see
-        `X-Admin-Actor` for attribution on writes, which this scheme does
-        not provide by itself.
-
   schemas:
     Error:
       type: object
@@ -1459,16 +947,19 @@ components:
 
     ThreatIngestResponse:
       type: object
-      required: [accepted, stored, duplicates, dropped]
+      description: >-
+        Ingest is asynchronous: the batch is sanitized and queued for
+        storage before this is returned, so stored/duplicates (post-write
+        facts) cannot be part of it -- only accepted and dropped, both known
+        before the batch is queued.
+      required: [accepted, dropped]
       properties:
         accepted: { type: boolean }
-        stored: { type: integer, description: New rows written. Normally lower than dropped.accepted, since same-second same-scenario decisions for one IP fold into one row with a summed hit count. }
-        duplicates: { type: integer, description: Decisions that matched an existing row via the redelivery-safe unique key and were ignored. }
         dropped: { $ref: "#/components/schemas/ThreatCounters" }
 
     SizingReport:
       type: object
-      description: "POST /v1/sizing-reports body -- mirrors internal/model.SizingReport."
+      description: "POST /sizing/v1/reports body -- mirrors internal/model.SizingReport."
       required: [schema_version, days]
       properties:
         schema_version: { type: integer, const: 1 }
@@ -1708,7 +1199,7 @@ components:
 
     AllowlistRequestInput:
       type: object
-      description: "Planned. POST /v1/allowlist-requests body -- mirrors internal/model.AllowlistRequestBody."
+      description: "POST /blocklist/v1/allowlist-requests body -- mirrors internal/model.AllowlistRequestBody."
       required: [cidr, reason]
       properties:
         cidr:
@@ -1720,128 +1211,8 @@ components:
 
     AllowlistRequestAccepted:
       type: object
-      description: "Planned. POST /v1/allowlist-requests response -- mirrors internal/model.AllowlistRequestResult."
+      description: "POST /blocklist/v1/allowlist-requests response -- mirrors internal/model.AllowlistRequestResult."
       required: [accepted, requests]
       properties:
         accepted: { type: boolean }
         requests: { type: integer, description: Current distinct-system count for this CIDR. Never a promise of promotion. }
-
-    AllowlistEntry:
-      type: object
-      description: "Planned. One threat_allowlist row, as returned by the admin API."
-      required: [cidr, reason, created_by, created_at]
-      properties:
-        cidr: { type: string, description: Stored in Masked() form; text equality is identity. }
-        reason: { type: string }
-        created_by:
-          type: string
-          description: "seed for entries added before the admin API existed, or an admin actor name. Never auto -- see decision 1 (no automatic allowlisting) in the plan."
-        created_at: { type: integer, format: int64 }
-        expires_at:
-          type: ["integer", "null"]
-          format: int64
-          description: Null for a permanent entry.
-
-    AllowlistEntryInput:
-      type: object
-      description: "Planned. POST /admin/v1/allowlist body -- mirrors internal/model.AllowlistEntryRequest."
-      required: [cidr, reason]
-      properties:
-        cidr: { type: string }
-        reason: { type: string }
-        force:
-          type: boolean
-          description: Required true to accept a prefix broader than the /24 (v4) / /48 (v6) floor. Defaults to false.
-
-    AllowlistRequestSummary:
-      type: object
-      description: "One row in the pending-review queue, rolled up per CIDR across all requesting systems."
-      required: [cidr, distinct_systems, first_requested_at, last_requested_at]
-      properties:
-        cidr: { type: string }
-        distinct_systems:
-          type: integer
-          description: Ranks the queue. Never a promotion threshold -- see decision 1 in the plan, there is no automatic allowlisting.
-        reasons:
-          type: array
-          items: { type: string }
-          description: >-
-            Every distinct non-empty reason offered for this CIDR, most recently
-            seen first. Omitted when no requester supplied one. It is customer
-            free text and is rendered escaped wherever it is shown.
-        first_requested_at: { type: integer, format: int64 }
-        last_requested_at: { type: integer, format: int64 }
-
-    AllowlistDecisionRequest:
-      type: object
-      description: >-
-        Planned. Body for both POST /admin/v1/allowlist/requests/approve and
-        .../reject -- mirrors internal/model.AllowlistDecisionRequest.
-      required: [cidr]
-      properties:
-        cidr: { type: string }
-        note:
-          type: string
-          description: Optional free text recorded on the audit row for this decision.
-        force:
-          type: boolean
-          description: >-
-            Approve only: required true to approve a CIDR broader than the
-            /24 (v4) / /48 (v6) floor. Has no effect on reject. Defaults to
-            false.
-
-    ReviewResult:
-      type: object
-      description: "Response body for both the approve and reject admin operations."
-      required: [cidr, state]
-      properties:
-        cidr:
-          type: string
-          description: The normalized, masked prefix the decision was recorded against.
-        state: { type: string, enum: [approved, rejected] }
-        warning:
-          type: string
-          description: >-
-            Present when the approved prefix is not a public unicast address.
-            Such an address can never be promoted in the first place, so
-            allowlisting it is pointless but harmless -- which is why this is a
-            warning on a 200 rather than a rejection.
-
-    AllowlistUpsertResult:
-      type: object
-      description: Response body for adding or updating an allowlist entry.
-      required: [cidr]
-      properties:
-        cidr:
-          type: string
-          description: >-
-            The normalized, masked prefix that was stored. A bare address
-            becomes a /32 or /128; host bits in a prefix are masked off, so
-            203.0.113.5/24 is stored as 203.0.113.0/24.
-        warning:
-          type: string
-          description: Present when the prefix is not a public unicast address. See ReviewResult.warning.
-
-    AllowlistDeleteResult:
-      type: object
-      description: Response body for removing an allowlist entry.
-      required: [cidr, deleted]
-      properties:
-        cidr: { type: string }
-        deleted: { type: boolean, const: true }
-
-    AuditEntry:
-      type: object
-      description: "Planned. One append-only row in threat_allowlist_audit."
-      required: [id, cidr, action, actor, at]
-      properties:
-        id: { type: string, description: ULID. }
-        cidr: { type: string }
-        action: { type: string, enum: [add, delete, approve, reject] }
-        actor:
-          type: string
-          description: The X-Admin-Actor value (admin API) or HTTP Basic username (operator UI) at write time. Self-declared, not a security control.
-        at: { type: integer, format: int64 }
-        detail:
-          type: string
-          description: Free-text context, e.g. the distinct-request count an approval was based on.

@@ -1,0 +1,60 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Fleet-sizing pipeline
+After=authd.service
+
+[Container]
+Image=ghcr.io/nethesis/nethesis-insights-sizingd:latest
+ContainerName=sizingd
+# No PublishPort: this container has no port of its own. It shares the pod's
+# network namespace, so Traefik reaches it over real loopback and it sees
+# RemoteAddr == 127.0.0.1 -- which is what makes the default
+# TRUSTED_PROXY_CIDRS correct, and what the published-port arrangement could
+# not deliver (a rootful PublishPort DNAT is masqueraded on the reply path, so
+# the container would see the bridge gateway instead).
+#
+# One namespace means one port space: 9615/9616 are sizingd's alone and a
+# collision is a startup failure, not a subtle misroute.
+Pod=insights.pod
+Volume=insights-sizing.volume:/var/lib/sizing
+Environment=LISTEN_ADDR=127.0.0.1:9615
+Environment=UI_LISTEN_ADDR=127.0.0.1:9616
+Environment=UI_BASE_PATH=/sizing
+Environment=DB_PATH=/var/lib/sizing/sizing.db
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
+# Test-deploy only: at info level the two rejected-request sentinels
+# (untrusted proxy vs. no credential) are indistinguishable, so a pod
+# networking mistake (every valid credential 401ing) reads identically to a
+# client sending nothing. Lower this to info (or drop it) before production.
+Environment=LOG_LEVEL=debug
+# sizingd has no admin API and no secret of its own, but EnvironmentFile= is
+# still required here: quadlet's Container key takes only an absolute-or-
+# relative path (man 5 podman-systemd.unit), not systemd's leading-"-"
+# optional-file syntax -- verified against podman 5.8.4's quadlet generator,
+# which resolved a "-/etc/insights/sizingd.env" value as a *relative* path
+# next to this unit file rather than as an optional absolute one. The deploy
+# step creates an empty /etc/insights/sizingd.env so this unit has something
+# to read.
+EnvironmentFile=/etc/insights/sizingd.env
+# Each unit's OWN port. In a shared namespace a healthcheck pointed at the
+# wrong port succeeds against a sibling container and reports its health as
+# this one's -- a failure that looks like everything is fine.
+HealthCmd=wget -qO- http://127.0.0.1:9615/healthz || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

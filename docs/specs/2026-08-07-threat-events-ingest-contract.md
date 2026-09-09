@@ -17,20 +17,26 @@ design document).
 
 | method | path | who |
 |---|---|---|
-| `POST` | `/v1/threat-events` | the edge reports ban decisions |
-| `GET`  | `/v1/blocklist` | the edge fetches the consensus feed |
+| `POST` | `/blocklist/v1/events` | the edge reports ban decisions |
+| `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed |
+
+`threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
+behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
+the request reaches it, so these two paths are what a client sends and
+`/v1/events`/`/v1/feed` are what the server's own route table says.
 
 ## Authentication
 
-HTTP Basic, `system_id:auth_token`, the same credential and the same forward-auth
-validator as `/v1/bundles`. There is no separate key, no API token and no
-per-tier feed: every subscriber fetches the same global list.
+HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`.
+Traefik calls `authd`, a shared forward-auth cache, before either request
+reaches a pipeline; there is no separate key, no API token and no per-tier
+feed — every subscriber fetches the same global list.
 
 Both endpoints are fail-closed on authentication: `401` on a rejected
 credential, `503` when the validator itself is unreachable. A `503` is
 retryable; a `401` is not.
 
-## `POST /v1/threat-events`
+## `POST /blocklist/v1/events`
 
 Request body, `Content-Type: application/json`, optionally
 `Content-Encoding: gzip`, at most 8 MiB:
@@ -73,8 +79,6 @@ hand-written collection needs no coordination with the server at all.
 ```json
 {
   "accepted": true,
-  "stored": 3,
-  "duplicates": 1,
   "dropped": {
     "accepted": 4,
     "dropped_type": 0,
@@ -88,12 +92,21 @@ hand-written collection needs no coordination with the server at all.
 }
 ```
 
-- `stored` — new rows written.
-- `duplicates` — decisions that matched an existing row and were ignored.
 - `dropped` — the full per-rule accounting for the batch, including `accepted`,
-  the number of decisions that passed every filter. `stored` is normally lower
-  than `accepted`, because decisions describing the same `(ip, scenario,
-  second)` are folded into one row with a summed hit count.
+  the number of decisions that passed every filter.
+
+**Ingest is asynchronous.** Sanitizing runs synchronously, so `dropped` is
+always accurate in the `202` body; the write itself is queued and happens
+after the response is sent, to bound how many decoded batches can be waiting
+on the single-writer database at once. `stored` and `duplicates` are
+post-write facts and therefore cannot appear here any more — read them from
+the operator UI's per-system ingest accounting instead. Only a request with
+**no decisions at all** skips the queue, since there is nothing to write and
+nothing to count. A batch every decision of which is dropped is still
+queued: the per-day counters that make "why is this node contributing
+nothing" answerable from `/systems` instead of from logs are recorded by the
+same queued write, and a reporter whose every event is rejected is exactly
+the case that page exists for.
 
 | status | meaning |
 |---|---|
@@ -102,7 +115,14 @@ hand-written collection needs no coordination with the server at all.
 | `401` | invalid credential |
 | `403` | `system_id` does not match the authenticated system |
 | `405` | method other than `POST` |
-| `503` | validator unreachable, or the store failed |
+| `429` | rate limited by the edge proxy |
+| `503` | validator unreachable, or the ingest queue is at capacity |
+
+**A `503` here means retry**, exactly as for `/logs/v1/bundles`: the batch was
+never queued, so nothing was lost, and the reporter should re-send it (or wait
+for its next cycle) rather than treating it as a permanent failure. **A `429`
+means retry with backoff too** — the request never reached the pipeline at
+all, so nothing was lost there either.
 
 **Ingest is fail-closed on authentication and fail-open on content.** A
 malformed decision is dropped and counted; the rest of the batch is stored. A
@@ -111,6 +131,16 @@ reporter under active attack must not lose its whole batch to one bad row.
 **Advance the watermark only on `2xx`.** A server outage should produce delayed
 events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, scenario,
 observed_at)` is unique, so a repeated batch cannot inflate anything.
+
+That uniqueness is about *duplicate* delivery, not about recovering a batch
+lost after the `202`: the reporter is alert-driven and advances its watermark
+on every `2xx`, so once this endpoint has answered `202` it will not re-send
+those decisions on its own. A batch dropped from the queue between the `202`
+and the write — a crash, or a handler error — is genuinely lost; there is no
+compensation and no replay. This is judged acceptable only because promotion
+needs three distinct systems observing the same address (spec §7), and an
+attacker active enough to matter keeps triggering fresh alerts and fresh
+batches, each with its own chance to land.
 
 ### Drop rules
 
@@ -130,8 +160,12 @@ Applied in this order; each drop increments exactly one counter.
    lands here) and must be public unicast (`dropped_private_ip`). Rejected:
    RFC1918, loopback, unspecified, CGNAT `100.64.0.0/10`, link-local including
    IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, benchmark
-   `198.18.0.0/15`, and the address the server saw the report arrive from. The
-   documentation ranges are *not* rejected.
+   `198.18.0.0/15`, and the reporter's own observed source address. That
+   address is the `X-Forwarded-For` value Traefik sets, trusted only because
+   the request reached `threatd` from Traefik's own address
+   (`TRUSTED_PROXY_CIDRS`) — never the bare TCP peer address, which behind a
+   proxy is always the proxy's own. The documentation ranges are *not*
+   rejected.
 6. **`created_at`** must parse as RFC3339 (`dropped_time`). A value more than
    24 h in the future is clamped to the server clock rather than dropped.
 
@@ -157,7 +191,7 @@ characters, and caps it at 128 runes before storage. It is never rewritten
 otherwise, and it is what `threat_blocklist.scenarios` and the daily rollup are
 grouped by.
 
-## `GET /v1/blocklist`
+## `GET /blocklist/v1/feed`
 
 Plain text, one address per line, two comment lines of header:
 
@@ -187,6 +221,7 @@ Vary: Accept-Encoding
 | `304` | unchanged since the client's `ETag` |
 | `401` | invalid credential |
 | `405` | method other than `GET` or `HEAD` |
+| `429` | rate limited by the edge proxy |
 | `503` | validator unreachable, or no snapshot generated yet |
 
 ### Client rules

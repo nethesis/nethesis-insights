@@ -146,10 +146,10 @@ Every window, gated out or not, gets one row in the **analyses** ledger, with
 a `gated` yes/no flag and the exact reasons behind that decision. This is
 where gated windows live and how you find them:
 
-- **operator UI, `/analyses`** — every window for a machine, each row marked
-  whether it was gated and whether the AI was called;
-- **operator UI, `/gate`** — the same decisions, grouped by *why*, so you can
-  see which reason is driving spend across the whole fleet;
+- **logs dashboard, `/logs/analyses`** — every window for a machine, each row
+  marked whether it was gated and whether the AI was called;
+- **logs dashboard, `/logs/gate`** — the same decisions, grouped by *why*, so
+  you can see which reason is driving spend across the whole fleet;
 - **on disk**, the `analyses` table, `gated` column (see `docs/architecture.md`
   § Data model).
 
@@ -283,10 +283,11 @@ alert every 15 minutes forever — it's the *same* finding, just bumped.
 A node authenticates with a NethServer subscription credential (checked
 against Nethesis's own validator, not stored or checked locally) and:
 
-- **sends** its bundle: `POST /v1/bundles` — the server answers immediately
-  with "accepted" or "try later," never with the analysis result itself,
-  since the actual analysis (and any AI call) happens in the background;
-- **reads** its own findings: `GET /v1/findings` — only ever for its own
+- **sends** its bundle: `POST /logs/v1/bundles` — the server answers
+  immediately with "accepted" or "try later," never with the analysis result
+  itself, since the actual analysis (and any AI call) happens in the
+  background;
+- **reads** its own findings: `GET /logs/v1/findings` — only ever for its own
   machine, never anyone else's.
 
 ## Threat Shield: the fleet as one sensor network
@@ -308,7 +309,7 @@ collected, counted and handed back.
 ### How it works, in four steps
 
 1. **A node reports its bans.** When CrowdSec bans an address, the node posts
-   that decision to `POST /v1/threat-events` using the same subscription
+   that decision to `POST /blocklist/v1/events` using the same subscription
    credential it uses for log bundles.
 
 2. **The server throws most of it away.** Before anything is stored, every
@@ -328,14 +329,14 @@ collected, counted and handed back.
    24 hours after the last sighting, so an address that has been reassigned to
    somebody innocent does not stay blocked forever.
 
-4. **Nodes fetch the result.** `GET /v1/blocklist` returns a plain list of
+4. **Nodes fetch the result.** `GET /blocklist/v1/feed` returns a plain list of
    addresses, which the node imports into CrowdSec. Every subscriber gets the
    same list.
 
-### The two safety nets
+### The safety net
 
 Consensus alone has an obvious failure mode: what if the fleet agrees on
-something it shouldn't? Two exclusions run before anything is published.
+something it shouldn't? One exclusion runs before anything is published.
 
 - **The allowlist.** A hand-maintained list of addresses and ranges that must
   never be published, whatever the fleet says — a partner's security scanner, a
@@ -343,10 +344,12 @@ something it shouldn't? Two exclusions run before anything is published.
   the list is read, so adding an entry actually *removes* the address on the
   next pass rather than just hiding it.
 
-- **Fleet self-protection.** The server remembers the address each reporting
-  node connects from, and never publishes any of them. This closes the worst
-  case: one customer's misconfigured appliance reporting the fleet's own
-  gateway, and the fleet then blocking itself.
+An earlier design also automatically excluded the address each reporting node
+connects from ("fleet self-protection"), so a misconfigured appliance
+reporting the fleet's own gateway could not get the fleet to block itself.
+That automatic exclusion was removed as too complex and too easy to get wrong
+for what it bought — the allowlist above is now the only promotion exclusion,
+and it is a human decision rather than an automatic one.
 
 ### One thing the server refuses to do
 
@@ -365,7 +368,7 @@ original design required agreement across at least two different
 organizations, precisely so one customer's misconfiguration could not get an
 address published fleet-wide. That requirement cannot be enforced here yet, so
 three machines belonging to the same customer do count as consensus. The
-allowlist and fleet self-protection above are what stands in for it.
+allowlist above is what stands in for it.
 
 ### Asking for an address to be left alone
 
@@ -373,10 +376,10 @@ Sometimes the fleet agrees about an address that is not actually an attacker —
 a partner's security scanner, a shared resolver, a customer's own gateway. Two
 things exist for that.
 
-A node can **ask**: `POST /v1/allowlist-requests` puts the address in a review
-queue, ranked by how many different machines asked for it. Forty customers all
-hitting the same shared resolver floats it to the top; a single opportunistic
-request sinks.
+A node can **ask**: `POST /blocklist/v1/allowlist-requests` puts the address in
+a review queue, ranked by how many different machines asked for it. Forty
+customers all hitting the same shared resolver floats it to the top; a single
+opportunistic request sinks.
 
 A human then **decides**. Nothing is ever exempted automatically, and this is
 deliberate rather than an unfinished feature. The blocklist and the allowlist
@@ -387,9 +390,10 @@ be made about not being blocked — and it stays exempt forever. Reporting an
 attack is evidence; asking to be exempted is an opinion. So the counter ranks
 the queue and does nothing else.
 
-Approving or rejecting is done either through the operator UI's
-`/allowlist-requests` page or through the admin API, both of which require the
-admin key and record who did it.
+Approving or rejecting is done through the blocklist dashboard's
+`/allowlist-requests` page, which asks for the operator credential and records
+who did it. There is no separate admin API any more — the dashboard is the
+only way in.
 
 Once a request has been approved or rejected it **leaves the queue** — the
 queue only ever shows addresses still waiting on a decision. What was asked
@@ -563,51 +567,80 @@ reconfiguration, and no waiting another month.
 
 ## The operator UI: looking at what the server knows
 
-The operator UI is a separate, optional, read-only web page built into the
-server binary. It is **off by default** and must be explicitly turned on
-(`UI_LISTEN_ADDR=127.0.0.1:9596`) — see `README.md` for exposure guidance,
-since unlike the API above, this page shows data across *every* machine at
-once and isn't authenticated.
+There are now **three separate dashboards**, one per pipeline, each built into
+its own server binary: the logs dashboard at `/logs`, the blocklist dashboard
+at `/blocklist`, and the sizing dashboard at `/sizing`. Each is **off by
+default** and must be explicitly turned on for that binary
+(`UI_LISTEN_ADDR=127.0.0.1:9596` and friends) — see `README.md` for exposure
+guidance, since unlike the API above, a page shows data across *every* machine
+at once.
 
-What each page shows, in plain terms:
+In the normal deployment all three sit behind the same reverse proxy, which
+asks for a username and password before serving *any* page of any of the
+three — read-only pages included. The username must be one an administrator
+has already provisioned in the proxy's own password file; an unrecognized
+username is rejected before the request ever reaches the dashboard. The
+password for every provisioned username is the same: the server's
+`ADMIN_API_KEY` value. Whichever provisioned username is used to sign in is
+what gets recorded as the actor on anything that page lets you change. So
+there is one login for the whole operator surface, not three, and not a
+separate one for making a change versus just looking.
+
+Each dashboard's landing page (`/`) is its single most useful page; everything
+else, including a `/status` page with queue backlog, uptime, build version and
+the effective configuration, lives alongside it.
+
+**The logs dashboard**, at `/logs`:
 
 | Page | What you're looking at |
 |---|---|
-| `/` (home) | Is the server healthy? Queue backlog, uptime, build version, and the full effective configuration it's running with. |
-| `/systems` | Every machine the server has ever heard from, with a quick summary: how many templates, findings, analysis windows, and how much it's cost so far. |
-| `/findings` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. Click a row to see the full summary, suggested action, evidence and fingerprint. |
-| `/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
-| `/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
-| `/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
-| `/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
-| `/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
-| `/threat-systems` | The blocklist pipeline's counterpart to `/systems`: one row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
-| `/blocklist` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist and the fleet's own addresses, i.e. the two reasons an address might *never* appear here. |
-| `/threat-events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
-| `/threat-stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, with a per-day total, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
-| `/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here. |
-| `/sizing` | One row per node, showing its most recent day: pressure, the four resource penalties behind it, the utilization percentiles beside it, and the multi-day verdict. Below it, what each node is running with its workload counts; the score's thresholds, each labelled as physically grounded, conventional or still a guess; and per-cluster ingest accounting, so "this cluster sends reports and stores nothing" comes with the rule that dropped them. |
-| `/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the capped share alongside. On a small fleet this page correctly says "not enough data yet" — publishing a percentile computed from three nodes would be worse than publishing nothing. |
+| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. Click a row to see the full summary, suggested action, evidence and fingerprint. |
+| `/logs/systems` | Every machine the server has ever heard from, with a quick summary: how many templates, findings, analysis windows, and how much it's cost so far. |
+| `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
+| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
+| `/logs/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
+| `/logs/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
+| `/logs/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
+| `/logs/status` | Is the server healthy? Queue backlog, uptime, build version, and the full effective configuration it's running with. |
 
-If an admin key is configured, this UI also gains a small number of **buttons**
-— add or remove an allowlist entry, approve or reject a request. Those actions,
-and only those, ask for a password; everything else on every page stays
-readable without one. Whatever username you type at that prompt is recorded
-alongside the change, so the audit trail says who did it.
+**The blocklist dashboard**, at `/blocklist`:
 
-Nothing on this UI ever shows a raw, unmasked log line — the server never
-stores those in the first place, so there's nothing to show. And the page
-itself makes no outside network requests and needs no JavaScript enabled —
-it's meant to work even on an offline management network.
+| Page | What you're looking at |
+|---|---|
+| `/blocklist/` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist, i.e. the reason an address might *never* appear here despite the fleet reporting it. |
+| `/blocklist/systems` | One row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
+| `/blocklist/events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
+| `/blocklist/stats` | Two things: the day-by-day threat trend broken down by CrowdSec scenario, with a per-day total, and what each machine contributed — including how much of what it sent was discarded, and for which reason. |
+| `/blocklist/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here — the buttons on this page and the allowlist itself are the only things on any of the three dashboards that make a change. |
+| `/blocklist/audit` | The append-only trail of every allowlist change: who added, removed, approved or rejected what, and when. This exists because deleting an allowlist entry destroys the row that would otherwise say who removed the exemption that let something through. |
+| `/blocklist/status` | Is the server healthy? Uptime, build version, and the full effective configuration it's running with. |
+
+**The sizing dashboard**, at `/sizing`:
+
+| Page | What you're looking at |
+|---|---|
+| `/sizing/` | One row per node, showing its most recent day: pressure, the four resource penalties behind it, the utilization percentiles beside it, and the multi-day verdict. Below it, what each node is running with its workload counts; the score's thresholds, each labelled as physically grounded, conventional or still a guess; and per-cluster ingest accounting, so "this cluster sends reports and stores nothing" comes with the rule that dropped them. |
+| `/sizing/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the capped share alongside. On a small fleet this page correctly says "not enough data yet" — publishing a percentile computed from three nodes would be worse than publishing nothing. |
+| `/sizing/status` | Is the server healthy? Uptime, build version, and the full effective configuration it's running with. |
+
+Only the blocklist dashboard has buttons that change anything — add or remove
+an allowlist entry, approve or reject a request. The logs and sizing
+dashboards are read-only end to end; there is nothing on either for an
+operator to approve or reject.
+
+Nothing on any of these dashboards ever shows a raw, unmasked log line — the
+server never stores those in the first place, so there's nothing to show. And
+the pages make no outside network requests and need no JavaScript enabled —
+they're meant to work even on an offline management network.
 
 ## What this system deliberately does *not* do
 
 - It does not decide *what counts as security-relevant* — that tag comes from
   the node, which has full context on its own logs. The server only reacts to
   it.
-- It does not show you a *per-customer* dashboard — the operator UI is an
-  internal, fleet-wide diagnostic tool for the people running the server, not
-  a product feature for end customers.
+- It does not show you a *per-customer* dashboard — the three operator
+  dashboards are internal, fleet-wide diagnostic tools for the people running
+  the server, not a product feature for end customers.
 - It does not retain raw log content anywhere — only masked templates and
   their counts.
 - It does not measure any individual module's memory or CPU cost, and cannot:

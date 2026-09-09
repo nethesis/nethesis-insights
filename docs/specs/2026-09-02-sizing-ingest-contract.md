@@ -11,18 +11,23 @@ to build a request; the reasoning behind each rule is in
 `docs/plans/2026-09-02-fleet-sizing-server.md`.
 
 Sizing is a **third independent pipeline**, beside the log-bundle pipeline and
-Threat Shield. It shares the HTTP listener, `internal/auth`, the SQLite file and
-`model.ModuleFamily` — and nothing else. No LLM call, no gate, no fingerprint,
-no queue.
+Threat Shield — its own binary (`sizingd`), its own SQLite file. It shares
+Traefik, the `authd` forward-auth cache and `model.ModuleFamily` with the other
+two, and nothing else. No LLM call, no gate, no fingerprint, no queue.
 
 | method | path | who |
 |---|---|---|
-| `POST` | `/v1/sizing-reports` | the cluster leader reports one or more complete UTC days |
+| `POST` | `/sizing/v1/reports` | the cluster leader reports one or more complete UTC days |
+
+Traefik strips the `/sizing` prefix before the request reaches `sizingd`, so
+this is what a client sends and `/v1/reports` is what the server's own route
+table says.
 
 ## Authentication
 
-HTTP Basic, `system_id:auth_token`, the same credential and the same forward-auth
-validator as `/v1/bundles` and `/v1/threat-events`. There is no separate key.
+HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`
+and `/blocklist/v1/events`. Traefik calls `authd`, a shared forward-auth cache,
+before the request reaches `sizingd`; there is no separate key.
 
 Fail-closed on authentication: `401` on a rejected credential, `503` when the
 validator itself is unreachable. A `503` is retryable; a `401` is not.
@@ -125,7 +130,7 @@ field, `workload` included, is still a `400`.
 
 `system_id` is optional — the credential already identifies the reporter — but a
 mismatch when present is `403`, never something to silently override. Same rule
-as `/v1/bundles` and `/v1/threat-events`.
+as `/logs/v1/bundles` and `/blocklist/v1/events`.
 
 `schema_version` must equal `1` (`model.SizingSchemaVersion`). It versions
 independently of the bundle and threat envelopes.
@@ -284,6 +289,7 @@ is asserted by a test.
 | `403` | `system_id` present and not the authenticated system |
 | `405` | method other than `POST` |
 | `413` | body over 8 MiB |
+| `429` | rate limited by the edge proxy |
 | `503` | forward-auth validator unreachable, or the store failed to write |
 
 ## Client rules
@@ -292,15 +298,17 @@ is asserted by a test.
    answers `get-facts` both live on the leader.
 2. **Send the last complete UTC day**, and backfill up to 7 earlier days that
    have not been acknowledged. Never send today.
-3. **Retry on `503` and on a transport error; never on `400`, `403` or `413`.**
-   Redelivery is free by construction, so a delayed report is always better than
-   a lost one.
+3. **Retry on `503`, on `429` and on a transport error; never on `400`, `403`
+   or `413`.** Redelivery is free by construction, so a delayed report is
+   always better than a lost one.
 4. **Stagger.** `OnCalendar=03:00` with `RandomizedDelaySec=2h` — 2700 clusters
    posting at the same instant is the one load pattern this endpoint cannot
    absorb.
 5. **Ship a partial result rather than failing.** No Prometheus → send
    `metrics_present: false`. One module's `get-facts` raising → omit that family
    or send it with `facts_ok` short of `instances`.
-6. Turning insights off in the Logs UI turns sizing off too: the endpoint comes
-   from the same `INSIGHTS_SERVER_URL` the log collector uses, so there is one
-   on/off switch and no second place to point at a different server.
+6. **`sizingd` is a separate binary from the log-bundle pipeline, on a
+   separate path (`/sizing/v1/reports`).** It is no longer reachable through
+   the same `INSIGHTS_SERVER_URL` the log collector uses — `ns8-core` needs
+   its own configured endpoint for this report, and turning off the log
+   collector does not turn off sizing reporting or vice versa.

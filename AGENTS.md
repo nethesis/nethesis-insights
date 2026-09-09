@@ -39,11 +39,21 @@ A related, separate feature also lives here and is **implemented**:
 `docs/specs/2026-08-07-threat-events-ingest-contract.md` (the wire contract
 `ns8-crowdsec` builds against — keep it in step with
 `internal/threat/sanitize.go`'s drop rules). Server-side fleet-wide CrowdSec ban sharing:
-`POST /v1/threat-events` in, `GET /v1/blocklist` out. It is **not** part of the
+`POST /blocklist/v1/events` in, `GET /blocklist/v1/feed` out. It is **not** part of the
 ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
-gate, no fingerprint, no queue. Treat it as a distinct pipeline sharing only the
-listener, the `Authenticator` and the SQLite file; do not use it as context for changes
-to bundles, gating or findings, and do not conflate the two when editing either.
+gate, no fingerprint. Treat it as a distinct pipeline — its own binary,
+`threatd`, with its own SQLite file — sharing only Traefik, the `authd` forward-auth
+cache and the SQLite runtime settings (`internal/platform/sqlitex`); do not use it as
+context for changes to bundles, gating or findings, and do not conflate the two when
+editing either.
+
+`threatd` does have an ingest queue (`internal/platform/ingestq`, distinct from the
+log pipeline's `internal/queue`), but not for the log pipeline's reason: there is no
+LLM call here to keep off the request goroutine. `POST /v1/events` sanitizes
+synchronously and then queues the write, bounding how many decoded, sanitized
+reports can be waiting on the single-writer database at once — the queue exists to
+bound concurrency against that single writer, not to hide latency. See "Ingest is
+bounded, not serialized" below.
 
 Threat Shield rules that are as load-bearing as the gate's:
 
@@ -74,30 +84,74 @@ Threat Shield rules that are as load-bearing as the gate's:
   the allowlist is now the only promotion exclusion.)
 - **Roll up before pruning.** `RollupThreatDailyStats` must precede
   `PruneThreatEvents`, or the dropped day loses its history permanently.
-- **Never serve blank.** `GET /v1/blocklist` answers 503 before the first successful
+- **Ingest is bounded, not serialized.** The database already has exactly one
+  writer — `SetMaxOpenConns(1)` plus the store's write mutex, and
+  `InsertThreatEvents` already wraps a whole report in one transaction with
+  `ON CONFLICT … DO NOTHING` — so `internal/platform/ingestq` in front of
+  `POST /v1/events` does not introduce single-writer semantics; those hold
+  regardless. What it adds is a bound: without it, a burst of reporters
+  produces one blocked goroutine per in-flight request, each holding a
+  decoded, sanitized report, all queued on the mutex with no limit and no way
+  to shed load. `threat.Sanitize` still runs synchronously in the handler —
+  so the `202`'s `dropped` counters stay accurate and the queue only ever
+  holds clean events — and only the `InsertThreatEvents`/`RecordIngestCounters`
+  write (`api/threat.NewConsumer`) moves behind `Publish`. Past capacity,
+  `Publish` returns `ErrFull` and the handler answers `503` for the reporter to
+  retry, instead of the process growing until it dies. `stored` and
+  `duplicates` are consequently gone from the `202` body — they are
+  post-write facts and cannot survive an asynchronous ingest — leaving
+  `accepted` and `dropped`. Only a report with **no decisions at all** skips
+  the queue; a batch every decision of which was dropped is still queued,
+  because `RecordIngestCounters` (now run by the consumer) is what keeps that
+  reporter visible on `/systems`, and `InsertThreatEvents` no-ops on an empty
+  `Events` slice. A batch dropped from the queue on a crash or a store error
+  is **lost, with no compensation**: the `(system_id, attacker_ip, scenario,
+  observed_at)` unique index only makes a *duplicate* delivery harmless, and
+  the reporter is alert-driven and already advanced its watermark on the
+  `202`, so it will not re-send on its own — acceptable only because
+  promotion needs three distinct systems and a live attacker keeps
+  re-alerting. This is a different queue type from the log pipeline's
+  `internal/queue` — no window claim, no idempotency logic, because threat
+  events don't need it and rewriting working code for symmetry buys nothing.
+- **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.
-- **The reporter's source IP comes from `RemoteAddr`, never `X-Forwarded-For`.** It
-  feeds `threat.Sanitize`'s reporter-own-address check (a decision naming the
-  reporter's own address is dropped as a misconfiguration), and the header is
-  client-controlled. Consequence: behind a reverse proxy this records the proxy's
-  address, which makes that check useless but never wrong.
+- **`X-Forwarded-For` is trusted, but only from a configured proxy address.** This
+  reverses the prototype's rule. Traefik now sits in front of every pipeline, so
+  `RemoteAddr` is always the proxy — which made `threat.Sanitize`'s
+  reporter-own-address check (a decision naming the reporter's own address is
+  dropped as a misconfiguration) permanently dead: the address it compared against
+  was never the reporter's, it was Traefik's. The header is client-controlled, so it
+  is believed only when `RemoteAddr` is inside `TRUSTED_PROXY_CIDRS`, and then only
+  its rightmost value. In the deployed shape all five containers share one podman
+  pod and therefore one network namespace, so Traefik's connection to a backend is a
+  genuine loopback connection with no NAT in the path — `RemoteAddr` really is
+  `127.0.0.1` by construction, not merely by convention, which is what makes the
+  default `TRUSTED_PROXY_CIDRS=127.0.0.0/8` correct without a per-deployment value.
 - **Nothing is ever allowlisted automatically.** A client request
-  (`POST /v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
+  (`POST /blocklist/v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
   an explicit admin approval creates an entry. Never add a consensus threshold that
   promotes one. A wrong blocklist entry blocks a legitimate address loudly and expires;
   a wrong allowlist entry exempts an attacker silently and permanently, so the two
   consensus rules are not symmetric however much they look it.
-- **The admin plane is off unless both `ADMIN_LISTEN_ADDR` and `ADMIN_API_KEY` are
-  set**, on its own listener, and there is never a default key. `X-Admin-Actor` is
-  required on every write and recorded in an append-only audit table — which exists
-  because `DELETE` destroys the row that would hold the trail. The actor is not a
-  security control; say so wherever it is documented.
+- **The separate admin plane is gone.** `internal/admin`, `ADMIN_LISTEN_ADDR` and
+  `X-Admin-Actor` no longer exist. The operator UI's write routes are now the only
+  writer, and they exist only when `ADMIN_API_KEY` is set — never a default key.
+  Every write authenticates against that key (HTTP Basic; the username is the actor)
+  and is recorded in an append-only audit table — which exists because `DELETE`
+  destroys the row that would hold the trail — readable on threatd's `/audit` page.
+  The actor is not a security control, since anyone holding the key can claim any
+  name; say so wherever it is documented.
 - **The operator UI's GET-only rule is now GET-plus-an-enumerated-POST-list.** Every
   write route authenticates against `ADMIN_API_KEY` (Basic; the username is the actor)
   and refuses cross-site requests — a browser replays cached Basic credentials
   automatically, so without that check any page could exempt an attacker's address.
-  Keep the enumeration in `writableRoutes`, next to the central check.
+  Keep the enumeration in `writableRoutes`, next to the central check. Traefik also
+  BasicAuths every operator UI request, using the same `ADMIN_API_KEY` value as the
+  htpasswd password. That layer is **additive, not a replacement**: `ADMIN_API_KEY`
+  and the cross-site check stay in the app, because Traefik BasicAuth is still Basic
+  auth, and a browser replays it on a forged cross-site POST exactly as it would
+  replay credentials cached against the app directly.
 - **Allowlist prefixes wider than `/24` (v4) or `/48` (v6) need an explicit `force`.**
   `0.0.0.0/0` on the allowlist silently disables the whole feed.
 - **Every endpoint must appear in `docs/api/openapi.yaml`**, whose schemas mirror
@@ -111,12 +165,13 @@ the source draft got wrong) and
 builds against — keep it in step with `internal/sizing/sanitize.go`'s drop
 rules). NS8 cluster leaders post one complete-UTC-day workload and performance
 report per cluster; the server scores each node, folds a multi-day verdict, and
-publishes cohort hardware baselines. `POST /v1/sizing-reports` in, two operator
-UI pages out. It shares only the listener, the `Authenticator`, the SQLite file
-and `model.ModuleFamily` — deliberately, because that is already the single
-definition of module identity and a second one would eventually disagree. **No
-LLM call, no gate, no fingerprint, no queue.** Do not use it as context for
-changes to bundles, gating or findings.
+publishes cohort hardware baselines. `POST /sizing/v1/reports` in, three operator
+UI pages out. It is its own binary, `sizingd`, with its own SQLite file, sharing
+only Traefik, the `authd` forward-auth cache, the SQLite runtime settings
+(`internal/platform/sqlitex`) and `model.ModuleFamily` — deliberately, because
+that is already the single definition of module identity and a second one
+would eventually disagree. **No LLM call, no gate, no fingerprint, no queue.**
+Do not use it as context for changes to bundles, gating or findings.
 
 Fleet-sizing rules that are as load-bearing as the gate's:
 
@@ -234,16 +289,16 @@ of the spec are **not** built before assuming a bug:
 | Area | Prototype (built) | Design (Task 11+) |
 |---|---|---|
 | Ingest → analysis | asynchronous: `internal/queue`, an in-memory bounded channel — this is the permanent design | same |
-| Auth | `internal/auth.ForwardAuth`: forward-auth to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design; `api.StaticAuth` still exists for tests only | same |
-| Schema | `CREATE TABLE IF NOT EXISTS` in `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
-| Backends | SQLite only | `Store` iface already in place; `pgStore` added later |
-| Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
-| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
+| Auth | moved to the proxy: `cmd/authd` is a caching forward-auth service (`internal/platform/auth.ForwardAuth`) that Traefik calls as a `forwardAuth` middleware — forwards to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design. Each pipeline no longer validates a credential itself: it reads `system_id` from the already-forwarded Basic username via `httpx.SystemID`, trusting it only when the request arrived from `TRUSTED_PROXY_CIDRS` — that check is the whole security boundary, so a pipeline reached directly (bypassing authd/Traefik) accepts any password | same |
+| Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
+| Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | per-pipeline `Store` iface already in place; `pgStore` added later |
+| Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
-| Operator UI | `internal/ui`: zero-JavaScript dashboard on its own listener, off unless `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide, so bind it to loopback (a wider bind warns, never refuses); an enumerated set of `POST` routes authenticates against `ADMIN_API_KEY` and exists only when that is set. Backed by the cross-system read methods in `internal/store/ui.go` and `internal/store/threat_ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
-| Allowlist management | built: `POST /v1/allowlist-requests`, `internal/admin` on `ADMIN_LISTEN_ADDR`, UI review pages. Both off unless configured | cross-org scoping once auth returns a tenant |
-| Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing.go` + `sizing_ui.go`, `internal/api/sizing.go`, `internal/baseline`, two UI pages. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
-| Threat Shield | built: `internal/threat` (pure), `internal/store/threat.go`, `internal/blocklist`, `internal/api/threat.go`, three UI pages. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
+| Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's enumerated `POST` routes additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
+| Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
+| Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.
@@ -280,12 +335,21 @@ curl -u <system_id>:<auth_token> -X POST localhost:9595/v1/bundles -d @bundle.js
 curl -u <system_id>:<auth_token> 'localhost:9595/v1/findings?since=0'
 ```
 
-`system_id`/`auth_token` must be a credential the configured `AUTH_VALIDATE_URL`
-(default `https://my.nethesis.it/auth`) accepts — a real NethServer subscription
-pair, or point `AUTH_VALIDATE_URL` at a private validator for isolated testing.
+This runs `insightsd` standalone, with no Traefik and no `authd` in front of
+it. `insightsd` no longer validates the credential itself — that moved to
+`authd`, which Traefik calls as a `forwardAuth` middleware — so it only checks
+that the request came from `TRUSTED_PROXY_CIDRS` (default `127.0.0.0/8`, which
+already covers a local `curl`) and reads `system_id` off the Basic username
+with **any** password. In the deployed shape these same two calls go to
+`https://<host>/logs/v1/bundles` and `https://<host>/logs/v1/findings`, and
+`system_id`/`auth_token` are then genuinely checked by `authd` against
+`AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`).
 
-`scripts/insights-api.sh` wraps the same calls (`health`, `findings`, `open`,
-`post <bundle.json>`, `raw <path>`); it defaults to `http://localhost:9595`.
+`scripts/insights-api.sh` wraps the same calls, plus threatd's and sizingd's
+(`health`, `findings`, `open`, `post <bundle.json>`, `events`, `feed`,
+`allowlist-request`, `raw <path>`); it defaults to `http://localhost`, using
+each command's own prefixed path (`/logs`, `/blocklist`) against a
+Traefik-fronted deployment.
 
 To inspect what the server stored, add `UI_LISTEN_ADDR=127.0.0.1:9596` and open
 the operator UI — findings, the cost ledger with its `gate_reasons`, the gate
@@ -301,31 +365,58 @@ here.
 
 ### Package layering
 
+Four binaries now, one per pipeline plus the shared forward-auth cache, behind
+one Traefik proxy:
+
 ```
+cmd/authd  cmd/insightsd  cmd/threatd  cmd/sizingd    four binaries; authd owns
+                                                       no pipeline of its own
+
+internal/platform/auth  httpx  sqlitex   shared: ForwardAuth+cache, HTTP
+                                          plumbing (ClientIP, SystemID, Logging,
+                                          Healthz), SQLite Open — the only
+                                          packages every binary may import
+
 model                       no deps; imported by everything
-fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now()
-threat                      PURE — Threat Shield's sanitizer, category map, allowlist
-sizing                      PURE — fleet sizing's sanitizer, pressure score, cohorts
-llm  store                  interfaces, each with a real and a stub impl
+fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
+threat                      PURE — the Threat Shield sanitizer and allowlist
+sizing                      PURE — the sizing sanitizer, pressure score, cohorts
+llm  queue  budget          logs only; interfaces where I/O is needed
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 baseline                    fleet-sizing cohort pass; same shape as blocklist
-api                         HTTP: ingest + read, auth via the Authenticator iface
-ui                          HTTP: optional operator dashboard, off by default
-cmd/insightsd               env config, wiring, graceful shutdown
+
+store/logs  store/threat  store/sizing   one store package per pipeline, each
+                                          its own SQLite file — no combined
+                                          `Store` interface any more
+api/logs  api/threat  api/sizing         HTTP: ingest + read, per pipeline
+ui/chrome                                shared layout, static assets, write
+                                          auth, base-path-aware `Link`
+ui/logs  ui/threat  ui/sizing            per-pipeline operator dashboard,
+                                          off by default
 ```
 
-`ui` sits beside `api`, not under it: it depends on `store` + `model` only, and
-never on `api`, `analyzer` or `queue`. Live process state reaches it through a
-local `Runtime` interface (`Depth`/`Cap`, which `*queue.Queue` satisfies) and the
-store through a local `Reader` interface, so the package stays testable with a
-fake and the layering stays a DAG. It deliberately copies `api`'s ~30-line
-logging handler rather than importing it.
+Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*` —
+never another pipeline's. Traefik terminates the deploy-configured host, strips
+a per-pipeline path prefix, and calls `authd` as a `forwardAuth` middleware
+before any pipeline sees a request; `authd` is a thin HTTP shell over
+`internal/platform/auth` and owns no store and no UI.
 
-The purity of `gate`, `fingerprint` and `prompt` is the point: they hold all the
-correctness and all the cost logic, and they are table-driven-testable with no
-fixtures. `llm` and `store` being interfaces is what lets `analyzer_test.go` run
-the whole pipeline end to end with nothing running.
+`ui/logs`, `ui/threat` and `ui/sizing` sit beside their pipeline's `api`
+package, not under it: each depends on its own `store/*` package (through a
+local, narrow `Reader`/`Writer` interface) plus `internal/ui/chrome` for
+everything shared — layout, static assets, the GET-only-plus-enumerated-POST
+discipline, write authentication, base-path-aware link building — and
+`internal/platform/httpx` for the request logger and `/healthz`. Nothing under
+`ui/*` copies another package's logging handler any more; `httpx.Logging`
+removed the reason that copy existed.
+
+The purity of `gate`, `fingerprint`, `prompt`, `threat` and `sizing` is the
+point: each holds all the correctness and privacy logic for its concern and is
+table-driven-testable with no fixtures. `llm` and every `store/*` package being
+interfaces at the consumer is what lets `analyzer_test.go` and each pipeline's
+`api`/`ui` tests run end to end with nothing running — there is no longer one
+88-method `Store` interface; each consumer declares its own narrow one.
 
 ### The analyzer's step order is a correctness requirement
 
@@ -452,12 +543,12 @@ after:
 ```
 
 `#`-comment form for SQL, YAML, Makefile and shell; `<!-- … -->` for HTML
-templates; `/* … */` for CSS. In `internal/ui/templates/layout.html` the header
+templates; `/* … */` for CSS. In `internal/ui/chrome/templates/layout.html` the header
 sits outside any `{{define}}` block, so it is emitted into the served page
 source — that is correct and intended for GPL.
 
 **Vendored third-party files are exempt and must stay exempt.** Anything under
-`internal/ui/static/` that is not ours — today `pico.min.css` and `pico.LICENSE`
+`internal/ui/chrome/static/` that is not ours — today `pico.min.css` and `pico.LICENSE`
 (Pico CSS v2.1.1, MIT) — keeps its own upstream copyright and permission notice
 byte-for-byte and must **never** receive the Nethesis GPL header: we did not
 write them, and MIT requires the original notice ship intact. MIT is

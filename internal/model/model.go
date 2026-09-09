@@ -209,7 +209,7 @@ func (b Bundle) CategoryOf(template string) string {
 //
 // A module that owns a dedicated pipeline must not also be analysed by the LLM
 // one. CrowdSec is the case this exists for: its decisions already travel
-// through /v1/threat-events into the blocklist, so shipping its log lines to the
+// through /blocklist/v1/events into the blocklist, so shipping its log lines to the
 // model pays twice for the same signal and floods the gate with novelty churn.
 //
 // All three collections are filtered together. Dropping only Templates would

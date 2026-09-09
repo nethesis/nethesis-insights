@@ -60,20 +60,20 @@ process supervisor is needed — the container's `ENTRYPOINT` is the binary
 itself.
 
 ```
-                     ┌──────────── container ─────────────┐
-edge (2700 nodes)    │                                    │
-  bundle/15min ──────┼─► ingest HTTP ─► in-memory queue ─┐ │
-   POST /v1/bundles  │      (auth)      (bounded, RAM)   │ │
-                     │                                   ▼ │
-   GET /v1/findings ─┼─◄─ read API ◄─ SQLite ◄── analyzer  │
-                     │                            │        │
-                     └────────────────────────────┼────────┘
-                                                   ▼
-                                        OpenAI / OpenRouter
+                           ┌──────────── container ─────────────┐
+edge (2700 nodes)          │                                    │
+  bundle/15min ────────────┼─► ingest HTTP ─► in-memory queue ─┐ │
+   POST /logs/v1/bundles   │      (auth)      (bounded, RAM)   │ │
+                           │                                   ▼ │
+   GET /logs/v1/findings ──┼─◄─ read API ◄─ SQLite ◄── analyzer  │
+                           │                            │        │
+                           └────────────────────────────┼────────┘
+                                                        ▼
+                                             OpenAI / OpenRouter
 ```
 
 The `bundles` buffer is an in-process, in-memory bounded channel
-(`internal/queue`), not a broker. `POST /v1/bundles` validates and enqueues,
+(`internal/queue`), not a broker. `POST /logs/v1/bundles` validates and enqueues,
 then answers `202` immediately, so an edge node's own HTTP timeout can never
 abort an analysis in flight; a worker pool drains the queue, gates each
 bundle, and calls the LLM only when the gate fires.
@@ -179,7 +179,7 @@ cache, stubbable in tests.
 
 ## 5. Wire protocol
 
-`POST /v1/bundles` · `Authorization: Basic` · `Content-Encoding: gzip` ·
+`POST /logs/v1/bundles` · `Authorization: Basic` · `Content-Encoding: gzip` ·
 body cap 1 MB · → `202 Accepted`
 
 ```json
@@ -304,7 +304,7 @@ in the channel survives a process restart (§3.1, §9.4).
 
 ### 5.6 Read API
 
-`GET /v1/findings?since=<unix_ms>&status=<open|stale>` — scoped to the
+`GET /logs/v1/findings?since=<unix_ms>&status=<open|stale>` — scoped to the
 authenticated `system_id`. Returns findings sorted severity-descending, then
 `last_seen` descending.
 
@@ -587,6 +587,7 @@ the wrong evidence.
 | invalid credentials | `401` | do not retry |
 | validator unreachable, no cache hit | `503` | retry with backoff |
 | queue saturated (`QUEUE_SIZE` full) | `503` | retry with backoff |
+| rate limited by the edge proxy | `429` | retry with backoff |
 | duplicate window | `200 {"duplicate": true}` | treat as success |
 
 ### 9.2 Analyzer

@@ -1,12 +1,16 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// Command insightsd runs the logs pipeline as its own service: masked log
+// bundles in, the gate deciding whether a window is worth an LLM call,
+// fingerprinted findings out -- see internal/api/logs, internal/analyzer and
+// internal/ui/logs. Authentication happens at the proxy (Traefik's
+// forwardAuth calls authd); this process trusts a request only when it
+// arrives from a configured trusted proxy (TRUSTED_PROXY_CIDRS).
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,26 +23,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/admin"
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
-	"github.com/nethesis/nethesis-insights/internal/api"
-	"github.com/nethesis/nethesis-insights/internal/auth"
-	"github.com/nethesis/nethesis-insights/internal/baseline"
-	"github.com/nethesis/nethesis-insights/internal/blocklist"
+	logsapi "github.com/nethesis/nethesis-insights/internal/api/logs"
 	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/queue"
-	"github.com/nethesis/nethesis-insights/internal/sizing"
-	"github.com/nethesis/nethesis-insights/internal/store"
-	"github.com/nethesis/nethesis-insights/internal/threat"
-	"github.com/nethesis/nethesis-insights/internal/ui"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
+	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
+	logsui "github.com/nethesis/nethesis-insights/internal/ui/logs"
 )
-
-// defaultAuthValidateURL is Nethesis's own subscription/auth endpoint. It
-// forwards the edge's Authorization: Basic header verbatim and answers 200
-// (valid), 401 (invalid) or an empty body either way -- no tenant/org id.
-const defaultAuthValidateURL = "https://my.nethesis.it/auth"
 
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -111,18 +106,6 @@ func setupLogger(level string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
 }
 
-// randomPepper returns a fresh 32-byte hex key. It exits on a rand.Reader
-// failure, matching this project's other os.Exit(1)-on-startup-error style
-// -- a broken entropy source is not a condition to run degraded under.
-func randomPepper() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		slog.Error("failed to generate a random AUTH_PEPPER", "error", err)
-		os.Exit(1)
-	}
-	return hex.EncodeToString(b)
-}
-
 // secretState reduces a secret to its mere presence. The status page and the
 // logs get this, never the value.
 func secretState(set bool) string {
@@ -130,49 +113,6 @@ func secretState(set bool) string {
 		return "set"
 	}
 	return "unset"
-}
-
-// newUIServer builds the operator UI's own listener, or nil when
-// UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly turns
-// it on. Split out of main so that off-by-default behaviour is testable
-// without booting the process.
-//
-// It gets its own http.Server, deliberately: the public ingest socket must
-// never serve an unauthenticated fleet-wide page, so a reverse-proxy or
-// firewall mistake on :9595 cannot expose it.
-func newUIServer(addr string, r ui.Reader, rt ui.Runtime, feed ui.Feed, info ui.Info, w ui.Writer, adminKey string) *http.Server {
-	if addr == "" {
-		return nil
-	}
-	return &http.Server{
-		Addr:              addr,
-		Handler:           ui.NewServer(r, rt, feed, info, w, adminKey),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-}
-
-// newAdminServer builds the allowlist admin API's own listener, or nil when
-// either half of its configuration is missing.
-//
-// Both an address and a key are required, and neither has a default. The
-// admin plane can write the exclusion set that decides which addresses the
-// fleet stops blocking, so "no configuration" must mean "no listener at all"
-// rather than "a listener with a guessable credential" -- an operator who
-// configures nothing gets a closed port, which is the only safe reading of
-// silence.
-//
-// It is a separate listener from the ingest socket deliberately: on :9595 the
-// key would be the entire defence, whereas on a loopback-bound admin port it
-// is the second layer behind the network.
-func newAdminServer(addr, key string, s admin.AllowlistStore) *http.Server {
-	if addr == "" || key == "" {
-		return nil
-	}
-	return &http.Server{
-		Addr:              addr,
-		Handler:           admin.NewServer(s, key, func() int64 { return time.Now().UnixMilli() }),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
 }
 
 // isLoopbackBind reports whether addr binds a loopback address only. It is
@@ -202,18 +142,31 @@ func warnIfNotLoopback(addr string) {
 		"ui_listen_addr", addr)
 }
 
-// warnIfAdminNotLoopback is warnIfNotLoopback for the admin plane. The admin
-// API is authenticated, so a wider bind is not the same class of mistake as it
-// is for the UI -- but the key would then be the only thing between the
-// internet and the fleet's exclusion set, which is exactly the single point of
-// failure the separate listener exists to avoid.
-func warnIfAdminNotLoopback(addr string) {
-	if isLoopbackBind(addr) {
-		return
+// newUIServer builds the operator UI's own listener, or nil when
+// UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly turns
+// it on. Split out of main so that off-by-default behaviour is testable
+// without booting the process.
+//
+// It gets its own http.Server, deliberately: the public ingest socket must
+// never serve an unauthenticated fleet-wide page, so a reverse-proxy or
+// firewall mistake on :9595 cannot expose it.
+func newUIServer(addr, basePath string, r logsui.Reader, rt logsui.Runtime, info chrome.Info) *http.Server {
+	if addr == "" {
+		return nil
 	}
-	slog.Warn("the allowlist admin API is not bound to a loopback address; the API key is then the only "+
-		"barrier to writing the fleet's allowlist -- bind it to 127.0.0.1 or a trusted management network",
-		"admin_listen_addr", addr)
+	handler, err := logsui.NewServer(r, rt, chrome.Config{
+		BasePath: basePath,
+		Info:     info,
+	})
+	if err != nil {
+		slog.Error("failed to build the operator UI", "error", err)
+		os.Exit(1)
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 }
 
 func main() {
@@ -226,15 +179,12 @@ func main() {
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
 	// enabling it is one explicit operator act, never a default.
 	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
+	uiBasePath := getenv("UI_BASE_PATH", "")
 	dbPath := getenv("DB_PATH", "/var/lib/insights/insights.db")
+	trustedProxyCIDRs := getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
 	llmBaseURL := getenv("LLM_BASE_URL", "")
 	llmModel := getenv("LLM_MODEL", "")
 	llmAPIKey := getenv("LLM_API_KEY", "")
-	authValidateURL := getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
-	authPepper := getenv("AUTH_PEPPER", "")
-	authCacheTTL := getenvDuration("AUTH_CACHE_TTL", 5*time.Minute)
-	authNegCacheTTL := getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
-	authTimeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
 	// Absolute floors under the deviation condition. A ratio is not evidence
 	// when the denominator is 2: the dev fleet's median bucket baseline was
@@ -253,7 +203,7 @@ func main() {
 	llmMaxConcurrency := getenvInt("LLM_MAX_CONCURRENCY", 4)
 	llmMaxCallsPerSystemPerDay := getenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 12)
 	llmDailySpendCapUSD := getenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
-	// CrowdSec has its own pipeline (/v1/threat-events -> blocklist), so its
+	// CrowdSec has its own pipeline (threatd's /v1/events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
 	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec1")
 	// Host records name their unit, e.g. "<3> [insights] ...". Excluding this
@@ -268,31 +218,12 @@ func main() {
 	queueSize := getenvInt("QUEUE_SIZE", 256)
 	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
 	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
-	// Threat Shield. Every one has a default, so an existing deployment picks
-	// the pipeline up without being reconfigured.
-	consensusInterval := getenvDuration("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
-	blocklistWindow := getenvDuration("BLOCKLIST_WINDOW", time.Hour)
-	blocklistMinSystems := getenvInt("BLOCKLIST_MIN_SYSTEMS", 3)
-	blocklistTTL := getenvDuration("BLOCKLIST_TTL", 24*time.Hour)
-	blocklistMaxEntries := getenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
-	threatRetention := getenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
-	threatMaxDecisions := getenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
-	// Fleet sizing. Every one has a default, so an existing deployment picks
-	// the pipeline up without being reconfigured. The pass interval is an
-	// hour because the inputs are whole days: running it faster cannot
-	// produce a different answer.
-	sizingRetention := getenvDuration("SIZING_RETENTION", 100*24*time.Hour)
-	sizingPassInterval := getenvDuration("SIZING_PASS_INTERVAL", time.Hour)
-	sizingWindowDays := getenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
-	sizingMinDistinctSystems := getenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
-	sizingMinNodes := getenvInt("SIZING_MIN_NODES", 30)
-	sizingMinDaysPresent := getenvInt("SIZING_MIN_DAYS_PRESENT", sizing.MinDaysPresent)
-	sizingMaxNodesPerReport := getenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
-	// The allowlist admin plane. Both are empty by default: writing the
-	// exclusion set is the one operation that can stop the fleet blocking an
-	// address, so it stays off until an operator turns it on explicitly.
-	adminListenAddr := getenv("ADMIN_LISTEN_ADDR", "")
-	adminAPIKey := getenv("ADMIN_API_KEY", "")
+
+	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
+	if err != nil {
+		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
+		os.Exit(1)
+	}
 
 	if dir := filepath.Dir(dbPath); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -301,7 +232,7 @@ func main() {
 		}
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := logsstore.Open(dbPath)
 	if err != nil {
 		slog.Error("failed to open store", "error", err)
 		os.Exit(1)
@@ -346,83 +277,35 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 
-	// Captured before the fallback below overwrites authPepper, so the status
-	// page can distinguish an operator-supplied pepper from a generated one.
-	authPepperSupplied := authPepper != ""
-	if authPepper == "" {
-		// A pepper is only defense in depth here -- the cache it keys never
-		// leaves memory (spec §10) -- so an unset AUTH_PEPPER gets a random
-		// one for this process's lifetime rather than refusing to start.
-		authPepper = randomPepper()
-		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
-	}
-	authenticator := auth.New(authValidateURL, authPepper, authTimeout, time.Now)
-	authenticator.PositiveTTL = authCacheTTL
-	authenticator.NegativeTTL = authNegCacheTTL
-
-	// Threat Shield: a second pipeline sharing this listener and this
-	// authenticator, and nothing else. No LLM, no gate, no queue.
-	snapshot := blocklist.NewSnapshot()
-	consensus := blocklist.New(s, snapshot, blocklist.Config{
-		Window:     blocklistWindow,
-		MinSystems: blocklistMinSystems,
-		TTL:        blocklistTTL,
-		MaxEntries: blocklistMaxEntries,
-		Retention:  threatRetention,
+	handler := logsapi.NewServer(q, s, trusted, logsapi.Config{
+		ExcludeModules:  excludeModules,
+		ExcludeServices: excludeServices,
 	})
-
-	// Fleet sizing: a third pipeline sharing this listener, this
-	// authenticator and the SQLite file, and nothing else. No LLM, no gate,
-	// no fingerprint, no queue.
-	cohortPass := baseline.New(s, baseline.Config{
-		WindowDays:         sizingWindowDays,
-		MinDistinctSystems: sizingMinDistinctSystems,
-		MinNodes:           sizingMinNodes,
-		MinDaysPresent:     sizingMinDaysPresent,
-		Retention:          sizingRetention,
-	})
-
-	handler := api.NewServer(q, s, authenticator, api.ThreatConfig{
-		Store:        s,
-		Feed:         snapshot,
-		MaxDecisions: threatMaxDecisions,
-		Now:          func() int64 { return time.Now().UnixMilli() },
-	}, api.SizingConfig{
-		Store:    s,
-		MaxNodes: sizingMaxNodesPerReport,
-		Now:      func() int64 { return time.Now().UnixMilli() },
-	}, excludeModules, excludeServices)
 
 	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: handler,
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// The status page's configuration table, built here field by field and
 	// never by iterating os.Environ(): an accidental new secret in the
 	// environment must not appear on an unauthenticated page just because it
 	// was set. This mirrors the slog.Debug("configuration", ...) block below,
-	// including its treatment of LLM_API_KEY, extended to AUTH_PEPPER.
-	authPepperState := "set (ephemeral)"
-	if authPepperSupplied {
-		authPepperState = "set"
-	}
-	cfgItems := []ui.ConfigItem{
+	// including its treatment of LLM_API_KEY.
+	cfgItems := []chrome.ConfigItem{
 		{Name: "LISTEN_ADDR", Value: listenAddr},
 		{Name: "UI_LISTEN_ADDR", Value: uiListenAddr},
+		{Name: "UI_BASE_PATH", Value: uiBasePath},
 		{Name: "DB_PATH", Value: dbPath},
 		{Name: "LOG_LEVEL", Value: logLevel},
+		{Name: "TRUSTED_PROXY_CIDRS", Value: trustedProxyCIDRs},
 		{Name: "LLM_BASE_URL", Value: llmBaseURL},
 		{Name: "LLM_MODEL", Value: llmModel},
 		{Name: "LLM_API_KEY", Value: secretState(llmAPIKey != "")},
 		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
 		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
 		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
-		{Name: "AUTH_VALIDATE_URL", Value: authValidateURL},
-		{Name: "AUTH_PEPPER", Value: authPepperState},
-		{Name: "AUTH_CACHE_TTL", Value: authCacheTTL.String()},
-		{Name: "AUTH_NEG_CACHE_TTL", Value: authNegCacheTTL.String()},
-		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
 		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
 		{Name: "GATE_MIN_EXPECTED", Value: strconv.FormatFloat(gateMinExpected, 'f', -1, 64)},
 		{Name: "GATE_MIN_OBSERVED", Value: strconv.FormatFloat(gateMinObserved, 'f', -1, 64)},
@@ -438,51 +321,27 @@ func main() {
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
-		{Name: "BLOCKLIST_CONSENSUS_INTERVAL", Value: consensusInterval.String()},
-		{Name: "BLOCKLIST_WINDOW", Value: blocklistWindow.String()},
-		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(blocklistMinSystems)},
-		{Name: "BLOCKLIST_TTL", Value: blocklistTTL.String()},
-		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
-		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
-		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
-		{Name: "SIZING_RETENTION", Value: sizingRetention.String()},
-		{Name: "SIZING_PASS_INTERVAL", Value: sizingPassInterval.String()},
-		{Name: "SIZING_WINDOW_DAYS", Value: strconv.Itoa(sizingWindowDays)},
-		{Name: "SIZING_MIN_DISTINCT_SYSTEMS", Value: strconv.Itoa(sizingMinDistinctSystems)},
-		{Name: "SIZING_MIN_NODES", Value: strconv.Itoa(sizingMinNodes)},
-		{Name: "SIZING_MIN_DAYS_PRESENT", Value: strconv.Itoa(sizingMinDaysPresent)},
-		{Name: "SIZING_MAX_NODES_PER_REPORT", Value: strconv.Itoa(sizingMaxNodesPerReport)},
-		{Name: "ADMIN_LISTEN_ADDR", Value: adminListenAddr},
-		{Name: "ADMIN_API_KEY", Value: secretState(adminAPIKey != "")},
 	}
 
-	// BuildInfo reads runtime/debug once here, not per request.
-	// The UI's write half is handed the same key as the admin API and is
-	// registered only when it is set: with no key the dashboard is exactly the
-	// read-only page it has always been.
-	uiServer := newUIServer(uiListenAddr, s, q, snapshot, ui.Info{
+	// BuildInfo reads runtime/debug once here, not per request. q satisfies
+	// logsui.Runtime (Depth/Cap/Workers): insightsd is the only one of the
+	// three binaries with a queue, so it is the only one that wires one in.
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, q, chrome.Info{
 		StartedAt: startedAt,
-		Workers:   queueWorkers,
-		Build:     ui.BuildInfo(),
+		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
-	}, s, adminAPIKey)
+	})
 
-	adminServer := newAdminServer(adminListenAddr, adminAPIKey, s)
-
-	// NEVER log the API key, the pepper, or any credential.
+	// NEVER log the API key or any credential.
 	slog.Info("starting insightsd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,
 		"model", llmModel, "db_path", dbPath,
 		"log_level", logLevel, "queue_size", queueSize, "queue_workers", queueWorkers,
-		"auth_validate_url", authValidateURL)
+		"trusted_proxy_cidrs", trustedProxyCIDRs)
 	slog.Debug("configuration",
 		"llm_base_url", llmBaseURL,
 		"llm_timeout", llmTimeout.String(),
 		"analysis_timeout", analysisTimeout.String(),
 		"llm_api_key_set", llmAPIKey != "",
-		"auth_validate_url", authValidateURL,
-		"auth_cache_ttl", authCacheTTL.String(),
-		"auth_neg_cache_ttl", authNegCacheTTL.String(),
-		"auth_timeout", authTimeout.String(),
 		"gate_tolerance", gateTolerance,
 		"gate_min_expected", gateMinExpected,
 		"gate_min_observed", gateMinObserved,
@@ -506,8 +365,7 @@ func main() {
 
 	if uiServer != nil {
 		warnIfNotLoopback(uiListenAddr)
-		slog.Info("operator UI enabled", "ui_listen_addr", uiListenAddr,
-			"writes_enabled", adminAPIKey != "")
+		slog.Info("operator UI enabled", "ui_listen_addr", uiListenAddr)
 		go func() {
 			if err := uiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("ui server error", "error", err)
@@ -515,35 +373,6 @@ func main() {
 			}
 		}()
 	}
-
-	if adminServer != nil {
-		warnIfAdminNotLoopback(adminListenAddr)
-		// The key itself is never logged, only the fact that one is set.
-		slog.Info("allowlist admin API enabled", "admin_listen_addr", adminListenAddr)
-		go func() {
-			if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("admin server error", "error", err)
-				os.Exit(1)
-			}
-		}()
-	} else if adminListenAddr != "" || adminAPIKey != "" {
-		// Half-configured is a mistake worth naming: an operator who set one
-		// of the two almost certainly meant to set both, and silently serving
-		// nothing would look identical to a working deployment.
-		slog.Warn("the allowlist admin API needs BOTH ADMIN_LISTEN_ADDR and ADMIN_API_KEY; it is disabled",
-			"admin_listen_addr_set", adminListenAddr != "", "admin_api_key_set", adminAPIKey != "")
-	}
-
-	// The consensus loop is started after the listeners so a slow first pass
-	// cannot delay readiness. The first pass runs immediately rather than one
-	// interval in, so a restart does not leave the feed answering 503 for five
-	// minutes with a database full of promoted entries.
-	consensusCtx, stopConsensus := context.WithCancel(context.Background())
-	consensusDone := runPassLoop(consensusCtx, "blocklist consensus", consensus, consensusInterval)
-
-	// The sizing cohort pass runs on the same loop for the same reasons.
-	sizingCtx, stopSizing := context.WithCancel(context.Background())
-	sizingDone := runPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -560,55 +389,9 @@ func main() {
 			slog.Error("ui graceful shutdown failed", "error", err)
 		}
 	}
-	if adminServer != nil {
-		if err := adminServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("admin graceful shutdown failed", "error", err)
-		}
-	}
 
 	// Stop accepting first, then drain: every queued bundle was already
 	// acknowledged to an edge that will not send it again.
 	q.Stop()
 	slog.Info("queue drained")
-
-	// The consensus loop holds no acknowledged work -- a cancelled pass just
-	// leaves the previous snapshot in place -- so it is stopped last and
-	// simply waited on.
-	stopConsensus()
-	<-consensusDone
-	slog.Info("consensus loop stopped")
-
-	stopSizing()
-	<-sizingDone
-	slog.Info("sizing cohort loop stopped")
-}
-
-// pass is a periodic background job. Both the Threat Shield consensus pass
-// and the fleet-sizing cohort pass satisfy it, which is why there is one loop
-// rather than two copies of one.
-type pass interface {
-	Run(ctx context.Context, now int64) error
-}
-
-// runPassLoop runs a pass immediately and then every interval until ctx is
-// cancelled. A failed pass is logged and the loop continues: whatever it did
-// not replace keeps being served, which is the designed degradation.
-func runPassLoop(ctx context.Context, name string, r pass, interval time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("background pass failed", "pass", name, "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return done
 }

@@ -7,8 +7,7 @@
 // OpenAPI, that the set of documented paths exactly matches the routes this
 // server actually registers (nothing missing, nothing stale left over from
 // a removed endpoint), that the set of documented (path, method) operations
-// matches too, and that every operation except /healthz declares a security
-// scheme.
+// matches too, and that every operation declares a security scheme.
 //
 // What this test CANNOT prove: that the request/response *schemas* in the
 // YAML match the Go structs in internal/model, that examples are
@@ -18,9 +17,9 @@
 // of which this repo depends on.
 //
 // The failure this test exists to catch is the one that actually happens:
-// someone adds `mux.HandleFunc("/v1/new-thing", ...)` in internal/api or
-// internal/admin and forgets docs/api/openapi.yaml entirely. A missing or
-// extra path, or an operation with no security block, fails the build.
+// someone adds `mux.HandleFunc("/v1/new-thing", ...)` in insightsd, threatd
+// or sizingd and forgets docs/api/openapi.yaml entirely. A missing or extra
+// path, or an operation with no security block, fails the build.
 //
 // This parses the file with gopkg.in/yaml.v3 rather than scanning lines by
 // indentation, so it survives reformatting -- the earlier hand-rolled
@@ -56,8 +55,7 @@ type parsed struct {
 	operations map[operation]bool
 	// securityDeclared[op] is true when the operation has a non-empty
 	// security requirement (a `security:` key followed by a scheme list).
-	// It is explicitly false for `security: []`, which is how /healthz
-	// opts out.
+	// It is explicitly false for `security: []`.
 	securityDeclared map[operation]bool
 	// sawSecurityLine records that a security key existed at all, so a
 	// missing key (as opposed to an explicit empty one) can be told apart.
@@ -132,56 +130,72 @@ func scanPaths(t *testing.T, path string) parsed {
 	return out
 }
 
-// expectedPaths is the explicit, hardcoded list of every route this server
-// registers, across all three surfaces (edge log-pipeline, edge Threat
-// Shield, admin) plus the unauthenticated health check. It intentionally
-// includes routes that are planned but not yet implemented -- see
-// docs/plans/2026-08-28-allowlist-management.md -- because the point of
-// this document is to describe the full intended surface, not merely what
-// has landed so far.
-var expectedPaths = []string{
-	// Edge, log pipeline (internal/api).
-	"/v1/bundles",
-	"/v1/findings",
-	// Edge, Threat Shield (internal/api).
-	"/v1/threat-events",
-	"/v1/blocklist",
-	"/v1/allowlist-requests", // planned
-	// Edge, fleet sizing (internal/api).
-	"/v1/sizing-reports",
-	// Admin (internal/admin, planned).
-	"/admin/v1/allowlist",
-	"/admin/v1/allowlist/requests",
-	"/admin/v1/allowlist/requests/approve",
-	"/admin/v1/allowlist/requests/reject",
-	"/admin/v1/allowlist/audit",
-	// Unauthenticated.
-	"/healthz",
+// services is the explicit, hardcoded description of every route this
+// system registers, grouped by the binary that serves it. Traefik gives
+// each pipeline a path prefix and strips it before proxying, so a service's
+// registered route (what the handler sees) and its documented public path
+// (prefix + route) differ by exactly that prefix. Keeping the prefix here
+// rather than in the handlers is what lets a pipeline be run without a
+// proxy in front of it during development.
+//
+// /healthz is registered by all three binaries but routed by none of them --
+// the quadlet's HealthCmd= reaches it inside the container -- so it is
+// deliberately absent from this list and from the documented surface; see
+// TestHealthzNotDocumented.
+var services = []struct {
+	name   string
+	prefix string
+	routes []struct {
+		path   string
+		method string
+	}
+}{
+	{
+		name:   "insightsd",
+		prefix: "/logs",
+		routes: []struct{ path, method string }{
+			{"/v1/bundles", "post"},
+			{"/v1/findings", "get"},
+		},
+	},
+	{
+		name:   "threatd",
+		prefix: "/blocklist",
+		routes: []struct{ path, method string }{
+			{"/v1/events", "post"},
+			{"/v1/feed", "get"},
+			{"/v1/allowlist-requests", "post"},
+		},
+	},
+	{
+		name:   "sizingd",
+		prefix: "/sizing",
+		routes: []struct{ path, method string }{
+			{"/v1/reports", "post"},
+		},
+	},
 }
 
-// expectedOperations lists every (path, method) pair, catching a method
-// dropped or added on an already-documented path (e.g. DELETE quietly
-// removed from /admin/v1/allowlist) that a path-only comparison would miss.
-var expectedOperations = []operation{
-	{"/v1/bundles", "post"},
-	{"/v1/findings", "get"},
-	{"/v1/threat-events", "post"},
-	{"/v1/blocklist", "get"},
-	{"/v1/allowlist-requests", "post"},
-	{"/v1/sizing-reports", "post"},
-	{"/admin/v1/allowlist", "get"},
-	{"/admin/v1/allowlist", "post"},
-	{"/admin/v1/allowlist", "delete"},
-	{"/admin/v1/allowlist/requests", "get"},
-	{"/admin/v1/allowlist/requests/approve", "post"},
-	{"/admin/v1/allowlist/requests/reject", "post"},
-	{"/admin/v1/allowlist/audit", "get"},
-	{"/healthz", "get"},
+// expectedPathsAndOperations derives the flat path list and (path, method)
+// operation list from services, so the two can never disagree with each
+// other about what a route's public path is.
+func expectedPathsAndOperations() ([]string, []operation) {
+	var paths []string
+	var ops []operation
+	for _, svc := range services {
+		for _, r := range svc.routes {
+			p := svc.prefix + r.path
+			paths = append(paths, p)
+			ops = append(ops, operation{p, r.method})
+		}
+	}
+	return paths, ops
 }
 
 func TestDocumentedPathsMatchRegisteredRoutes(t *testing.T) {
 	got := scanPaths(t, openAPIPath)
 
+	expectedPaths, _ := expectedPathsAndOperations()
 	want := map[string]bool{}
 	for _, p := range expectedPaths {
 		want[p] = true
@@ -212,6 +226,7 @@ func TestDocumentedPathsMatchRegisteredRoutes(t *testing.T) {
 func TestDocumentedOperationsMatchExpected(t *testing.T) {
 	got := scanPaths(t, openAPIPath)
 
+	_, expectedOperations := expectedPathsAndOperations()
 	want := map[operation]bool{}
 	for _, op := range expectedOperations {
 		want[op] = true
@@ -239,22 +254,24 @@ func TestDocumentedOperationsMatchExpected(t *testing.T) {
 	}
 }
 
-func TestEveryOperationExceptHealthzDeclaresSecurity(t *testing.T) {
+// TestHealthzNotDocumented pins down that /healthz is deliberately excluded
+// from the public API surface: every binary registers it, but the proxy
+// never routes to it, so documenting it would describe an endpoint no
+// client can reach.
+func TestHealthzNotDocumented(t *testing.T) {
+	got := scanPaths(t, openAPIPath)
+
+	if got.paths["/healthz"] {
+		t.Errorf("%s documents /healthz, but it is not routed by the proxy and must not appear in the public API surface", openAPIPath)
+	}
+}
+
+func TestEveryOperationDeclaresSecurity(t *testing.T) {
 	got := scanPaths(t, openAPIPath)
 
 	for op := range got.operations {
-		if op.path == "/healthz" {
-			if !got.sawSecurityLine[op] {
-				t.Errorf("%s %s: expected an explicit 'security: []', found no security key at all", op.method, op.path)
-				continue
-			}
-			if got.securityDeclared[op] {
-				t.Errorf("%s %s: expected 'security: []' (unauthenticated), found a non-empty security requirement", op.method, op.path)
-			}
-			continue
-		}
 		if !got.sawSecurityLine[op] {
-			t.Errorf("%s %s: no 'security:' key found -- every non-/healthz operation must declare a security scheme", op.method, op.path)
+			t.Errorf("%s %s: no 'security:' key found -- every operation must declare a security scheme", op.method, op.path)
 			continue
 		}
 		if !got.securityDeclared[op] {

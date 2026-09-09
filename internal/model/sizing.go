@@ -7,12 +7,12 @@ import "encoding/json"
 
 // Fleet-sizing wire and internal types.
 //
-// This is a third pipeline, beside the bundle/gate/LLM path and Threat Shield.
-// It shares the HTTP listener, the Authenticator, the SQLite file and
-// ModuleFamily below -- deliberately, because ModuleFamily is already the
-// single definition of module identity and a second one would eventually
-// disagree -- and nothing else. No LLM call, no gate, no fingerprint, no
-// queue.
+// This is a third pipeline, beside the bundle/gate/LLM path and Threat Shield,
+// and it is its own binary (sizingd) with its own SQLite file. It shares only
+// Traefik, the authd forward-auth cache and ModuleFamily below --
+// deliberately, because ModuleFamily is already the single definition of
+// module identity and a second one would eventually disagree -- and nothing
+// else. No LLM call, no gate, no fingerprint, no queue.
 //
 // The wire -> sanitized -> counters split mirrors threat.go: the Sizing*
 // types below are what a reporter sends, the Sanitized* types are what the
@@ -27,7 +27,7 @@ import "encoding/json"
 // separately.
 const SizingSchemaVersion = 1
 
-// SizingReport is the POST /v1/sizing-reports body. One report is one
+// SizingReport is the POST /sizing/v1/reports body. One report is one
 // cluster, carrying one or more complete UTC days, each with one entry per
 // node in the cluster.
 //
