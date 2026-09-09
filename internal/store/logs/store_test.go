@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package logs
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-func newTestStore(t *testing.T) *SQLiteStore {
+func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")

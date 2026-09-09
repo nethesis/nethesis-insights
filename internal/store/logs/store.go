@@ -1,23 +1,26 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+// Package logs is insightsd's storage: the ingest bookkeeping (systems,
+// templates, baselines), the analyses cost ledger, the findings table, and
+// the cross-system reads the operator UI needs (see ui.go). It is
+// insightsd's only store package -- a separate SQLite file from the threat
+// and sizing pipelines, sharing nothing with them but the sqlitex runtime
+// settings.
+package logs
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/sqlitedialect"
-	_ "modernc.org/sqlite"
 
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/sqlitex"
 )
 
 type Outcome string
@@ -61,61 +64,33 @@ type Analysis struct {
 	SuppressedBy string
 }
 
-type Store interface {
-	Init(ctx context.Context) error
-	Close() error
-
-	UpsertSystem(ctx context.Context, s System) error
-	KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error)
-	UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error
-	Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error)
-	UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error
-	BeginAnalysis(ctx context.Context, systemID string, windowStart, windowEnd, now int64) (bool, error)
-	FinalizeAnalysis(ctx context.Context, a Analysis) error
-	RecordAttemptError(ctx context.Context, systemID string, windowStart int64, reasons []string, durationMs int, msg string) error
-	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
-	UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error)
-	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
-	DailySpendMicros(ctx context.Context, since int64) (int64, error)
-	SystemCallsSince(ctx context.Context, systemID string, since int64) (int, error)
-	ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error)
-
-	// Cross-system, read-only paths for the operator UI (internal/ui).
-	// Every one takes an explicit limit and never returns raw samples.
-	Counts(ctx context.Context) (Counts, error)
-	ListSystems(ctx context.Context) ([]SystemRow, error)
-	ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error)
-	GateRollup(ctx context.Context, since int64) ([]GateRow, error)
-	CostRollup(ctx context.Context) ([]CostRow, error)
-	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
-	ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error)
-	ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error)
+// Store is insightsd's SQLite-backed store: ingest bookkeeping, the analyses
+// cost ledger, findings, and the operator UI's cross-system reads (ui.go).
+// Write methods take the shared write mutex (sqlitex.DB.Lock/Unlock); read
+// methods do not.
+type Store struct {
+	db *sqlitex.DB
 }
 
-type SQLiteStore struct {
-	db *bun.DB
-	mu sync.Mutex
-}
-
-func Open(path string) (*SQLiteStore, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
-	sqldb, err := sql.Open("sqlite", dsn)
+// Open opens the logs pipeline's database at path with the project's
+// standard SQLite runtime settings (WAL, busy_timeout, a single connection
+// plus the write mutex) -- see internal/platform/sqlitex.
+func Open(path string) (*Store, error) {
+	db, err := sqlitex.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
-	sqldb.SetMaxOpenConns(1)
-
-	db := bun.NewDB(sqldb, sqlitedialect.New())
-	return &SQLiteStore{db: db}, nil
+	return &Store{db: db}, nil
 }
 
-func (s *SQLiteStore) Close() error {
-	return s.db.DB.Close()
+func (s *Store) Close() error {
+	return s.db.Close()
 }
 
-func (s *SQLiteStore) Init(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Init creates the logs pipeline's tables if they do not already exist.
+func (s *Store) Init(ctx context.Context) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS systems (
@@ -209,9 +184,9 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLiteStore) UpsertSystem(ctx context.Context, sys System) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertSystem(ctx context.Context, sys System) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO systems (system_id, tenant_id, collector_version, first_seen, last_seen)
@@ -227,7 +202,7 @@ func (s *SQLiteStore) UpsertSystem(ctx context.Context, sys System) error {
 	return nil
 }
 
-func (s *SQLiteStore) KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error) {
+func (s *Store) KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT module_id, template_key FROM system_templates WHERE system_id = ?`, systemID)
 	if err != nil {
@@ -250,9 +225,9 @@ func (s *SQLiteStore) KnownTemplates(ctx context.Context, systemID string) (map[
 	return result, rows.Err()
 }
 
-func (s *SQLiteStore) UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -288,7 +263,7 @@ func (s *SQLiteStore) UpsertTemplates(ctx context.Context, systemID string, ts [
 	return tx.Commit()
 }
 
-func (s *SQLiteStore) Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error) {
+func (s *Store) Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT module_id, priority, ewma_rate FROM module_baselines WHERE system_id = ?`, systemID)
 	if err != nil {
 		return nil, fmt.Errorf("store: baselines: %w", err)
@@ -308,9 +283,9 @@ func (s *SQLiteStore) Baselines(ctx context.Context, systemID string) (map[gate.
 	return result, rows.Err()
 }
 
-func (s *SQLiteStore) UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -350,9 +325,9 @@ func (s *SQLiteStore) UpsertBaselines(ctx context.Context, systemID string, d []
 	return tx.Commit()
 }
 
-func (s *SQLiteStore) BeginAnalysis(ctx context.Context, systemID string, windowStart, windowEnd, now int64) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) BeginAnalysis(ctx context.Context, systemID string, windowStart, windowEnd, now int64) (bool, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	// A window is claimable unless a COMPLETED analysis already exists for it.
 	//
@@ -387,9 +362,9 @@ func (s *SQLiteStore) BeginAnalysis(ctx context.Context, systemID string, window
 // This is the difference between a transient failure and a permanent one. A
 // timeout or a 5xx must leave the window reprocessable; only a completed run,
 // or a failure that will recur identically, may close it.
-func (s *SQLiteStore) RecordAttemptError(ctx context.Context, systemID string, windowStart int64, reasons []string, durationMs int, msg string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) RecordAttemptError(ctx context.Context, systemID string, windowStart int64, reasons []string, durationMs int, msg string) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	reasonsJSON, err := json.Marshal(reasons)
 	if err != nil {
@@ -406,9 +381,9 @@ func (s *SQLiteStore) RecordAttemptError(ctx context.Context, systemID string, w
 	return nil
 }
 
-func (s *SQLiteStore) FinalizeAnalysis(ctx context.Context, a Analysis) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) FinalizeAnalysis(ctx context.Context, a Analysis) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	reasonsJSON, err := json.Marshal(a.GateReasons)
 	if err != nil {
@@ -433,7 +408,7 @@ func (s *SQLiteStore) FinalizeAnalysis(ctx context.Context, a Analysis) error {
 // DailySpendMicros sums what the fleet has spent since `since`. It reads the
 // analyses ledger rather than an in-process counter, so a restart cannot reset
 // the cap.
-func (s *SQLiteStore) DailySpendMicros(ctx context.Context, since int64) (int64, error) {
+func (s *Store) DailySpendMicros(ctx context.Context, since int64) (int64, error) {
 	var total sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT SUM(cost_micros) FROM analyses WHERE created_at >= ?`, since).Scan(&total)
@@ -446,7 +421,7 @@ func (s *SQLiteStore) DailySpendMicros(ctx context.Context, since int64) (int64,
 // SystemCallsSince counts LLM calls attempted for one system since `since`.
 // It counts attempts, not successes: a system whose calls keep failing is
 // still spending, and is still the thing the cap exists to bound.
-func (s *SQLiteStore) SystemCallsSince(ctx context.Context, systemID string, since int64) (int, error) {
+func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int64) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM analyses WHERE system_id = ? AND created_at >= ? AND llm_called = 1`,
@@ -457,13 +432,13 @@ func (s *SQLiteStore) SystemCallsSince(ctx context.Context, systemID string, sin
 	return n, nil
 }
 
-func (s *SQLiteStore) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
+func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
 	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
 }
 
-func (s *SQLiteStore) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	// Read prior status FIRST: it is what distinguishes a bump from a
 	// reopen, and the upsert below would otherwise destroy it.
@@ -532,9 +507,9 @@ func (s *SQLiteStore) UpsertFinding(ctx context.Context, f model.Finding, now in
 	return outcome, nil
 }
 
-func (s *SQLiteStore) MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx, `UPDATE findings SET status = ? WHERE system_id = ? AND status = ? AND last_seen < ?`,
 		model.StatusStale, systemID, model.StatusOpen, olderThan)
@@ -548,7 +523,7 @@ func (s *SQLiteStore) MarkStale(ctx context.Context, systemID string, olderThan 
 	return int(n), nil
 }
 
-func (s *SQLiteStore) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
+func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
 	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version FROM findings WHERE system_id = ? AND last_seen >= ?`
 	args := []any{systemID, since}
 	if status != "" {
@@ -564,7 +539,7 @@ func (s *SQLiteStore) ListFindings(ctx context.Context, systemID string, since i
 	return findings, nil
 }
 
-func (s *SQLiteStore) queryFindings(ctx context.Context, query string, args ...any) ([]model.Finding, error) {
+func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([]model.Finding, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query findings: %w", err)

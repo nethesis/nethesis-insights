@@ -74,8 +74,10 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 	}
 }
 
-// Validate has the same signature as api.Authenticator so it drops into
-// api.NewServer without this package importing api.
+// Validate has the same signature as authd's own narrow validator interface
+// (cmd/authd/handler.go), so a *ForwardAuth drops straight into authd's
+// handler, which is tested against a fake implementing that interface
+// instead of a real ForwardAuth.
 func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, error) {
 	systemID, secret, err := ParseBasic(authHeader)
 	if err != nil {

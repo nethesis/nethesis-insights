@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package ui
+package logs
 
 import (
 	"context"
@@ -15,40 +15,40 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
-// fakeReader is an in-package stand-in for the Reader slice of store.Store.
-// It never touches a database, so this package's tests never wait on a real
-// store implementation.
+// fakeReader is an in-package stand-in for the Reader slice of
+// logsstore.Store. It never touches a database, so this package's tests
+// never wait on a real store implementation.
 type fakeReader struct {
-	counts    store.Counts
-	systems   []store.SystemRow
-	analyses  []store.AnalysisRow
-	gate      []store.GateRow
+	counts    logsstore.Counts
+	systems   []logsstore.SystemRow
+	analyses  []logsstore.AnalysisRow
+	gate      []logsstore.GateRow
 	gateSince int64 // the last since GateRollup was called with
-	cost      []store.CostRow
+	cost      []logsstore.CostRow
 	findings  []model.Finding
-	templates []store.TemplateRow
-	baselines []store.BaselineRow
+	templates []logsstore.TemplateRow
+	baselines []logsstore.BaselineRow
 
 	err error // when set, every method returns this error instead
 }
 
-func (f *fakeReader) Counts(ctx context.Context) (store.Counts, error) {
+func (f *fakeReader) Counts(ctx context.Context) (logsstore.Counts, error) {
 	return f.counts, f.err
 }
 
-func (f *fakeReader) ListSystems(ctx context.Context) ([]store.SystemRow, error) {
+func (f *fakeReader) ListSystems(ctx context.Context) ([]logsstore.SystemRow, error) {
 	return f.systems, f.err
 }
 
-func (f *fakeReader) ListAnalyses(ctx context.Context, systemID string, limit int) ([]store.AnalysisRow, error) {
+func (f *fakeReader) ListAnalyses(ctx context.Context, systemID string, limit int) ([]logsstore.AnalysisRow, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	var out []store.AnalysisRow
+	var out []logsstore.AnalysisRow
 	for _, a := range f.analyses {
 		if systemID != "" && a.SystemID != systemID {
 			continue
@@ -61,12 +61,12 @@ func (f *fakeReader) ListAnalyses(ctx context.Context, systemID string, limit in
 	return out, nil
 }
 
-func (f *fakeReader) GateRollup(ctx context.Context, since int64) ([]store.GateRow, error) {
+func (f *fakeReader) GateRollup(ctx context.Context, since int64) ([]logsstore.GateRow, error) {
 	f.gateSince = since
 	return f.gate, f.err
 }
 
-func (f *fakeReader) CostRollup(ctx context.Context) ([]store.CostRow, error) {
+func (f *fakeReader) CostRollup(ctx context.Context) ([]logsstore.CostRow, error) {
 	return f.cost, f.err
 }
 
@@ -90,7 +90,7 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 		}
 		out = append(out, fnd)
 	}
-	if sortMode == store.SortRecent {
+	if sortMode == logsstore.SortRecent {
 		sort.SliceStable(out, func(i, j int) bool { return out[i].LastSeen > out[j].LastSeen })
 	} else {
 		model.SortFindings(out)
@@ -101,11 +101,11 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 	return out, nil
 }
 
-func (f *fakeReader) ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error) {
+func (f *fakeReader) ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	var out []store.TemplateRow
+	var out []logsstore.TemplateRow
 	for _, t := range f.templates {
 		if systemID != "" && t.SystemID != systemID {
 			continue
@@ -118,11 +118,11 @@ func (f *fakeReader) ListTemplates(ctx context.Context, systemID string, limit i
 	return out, nil
 }
 
-func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error) {
+func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	var out []store.BaselineRow
+	var out []logsstore.BaselineRow
 	for _, b := range f.baselines {
 		if systemID != "" && b.SystemID != systemID {
 			continue
@@ -133,24 +133,25 @@ func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]stor
 }
 
 type fakeRuntime struct {
-	depth, cap int
+	depth, cap, workers int
 }
 
-func (f fakeRuntime) Depth() int { return f.depth }
-func (f fakeRuntime) Cap() int   { return f.cap }
+func (f fakeRuntime) Depth() int   { return f.depth }
+func (f fakeRuntime) Cap() int     { return f.cap }
+func (f fakeRuntime) Workers() int { return f.workers }
 
 func seededReader() *fakeReader {
 	reopenedAt := int64(1700000200000)
 	return &fakeReader{
-		counts: store.Counts{Systems: 2, Templates: 5, Baselines: 3, Findings: 4, Analyses: 7},
-		systems: []store.SystemRow{
+		counts: logsstore.Counts{Systems: 2, Templates: 5, Baselines: 3, Findings: 4, Analyses: 7},
+		systems: []logsstore.SystemRow{
 			{
 				SystemID: "sys-1", TenantID: "tenant-a", CollectorVersion: "1.2.3",
 				FirstSeen: 1700000000000, LastSeen: 1700000100000,
 				Templates: 5, OpenFindings: 1, Findings: 2, Windows: 10, LLMCalls: 3, CostMicros: 4200,
 			},
 		},
-		analyses: []store.AnalysisRow{
+		analyses: []logsstore.AnalysisRow{
 			{
 				ID: "01ANALYSISID000000000000000", SystemID: "sys-1",
 				WindowStart: 1700000000000, WindowEnd: 1700000900000,
@@ -160,11 +161,11 @@ func seededReader() *fakeReader {
 				Model: "gpt-4o-mini", DurationMs: 820,
 			},
 		},
-		gate: []store.GateRow{
+		gate: []logsstore.GateRow{
 			{Reasons: []string{"new_template"}, Windows: 4, LLMCalls: 4, PaidCalls: 3, CostMicros: 8000},
 			{Reasons: nil, Windows: 10, LLMCalls: 0, PaidCalls: 0, CostMicros: 0},
 		},
-		cost: []store.CostRow{
+		cost: []logsstore.CostRow{
 			{Day: "2026-08-20", Model: "gpt-4o-mini", Windows: 4, LLMCalls: 4, InputTokens: 400, OutputTokens: 200, CostMicros: 8000},
 		},
 		findings: []model.Finding{
@@ -183,12 +184,24 @@ func seededReader() *fakeReader {
 				LLMModel: "gpt-4o-mini", PromptVersion: "v1",
 			},
 		},
-		templates: []store.TemplateRow{
+		templates: []logsstore.TemplateRow{
 			{SystemID: "sys-1", Template: "sshd: Failed password for USER from IP", ModuleID: "sshd", Category: "security", Priority: 5, TotalCount: 42, FirstSeen: 1700000000000, LastSeen: 1700000100000},
 			{SystemID: "sys-1", Template: "runagent: heartbeat", ModuleID: "", Category: "", Priority: 1, TotalCount: 99, FirstSeen: 1700000000000, LastSeen: 1700000100000},
 		},
-		baselines: []store.BaselineRow{
+		baselines: []logsstore.BaselineRow{
 			{SystemID: "sys-1", ModuleID: "sshd", Priority: 5, EWMARate: 3.14159, UpdatedAt: 1700000100000},
+		},
+	}
+}
+
+func testInfo() chrome.Info {
+	return chrome.Info{
+		StartedAt: 1700000000000,
+		Build:     "test-build",
+		Config: []chrome.ConfigItem{
+			{Name: "LLM_API_KEY", Value: "set"},
+			{Name: "AUTH_PEPPER", Value: "set"},
+			{Name: "DB_PATH", Value: "/tmp/insights.db"},
 		},
 	}
 }
@@ -198,20 +211,11 @@ func seededReader() *fakeReader {
 // internal/ui/threat's newWriteTestServer).
 func newTestServer(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	return NewServer(r, rt, testInfo())
-}
-
-func testInfo() Info {
-	return Info{
-		StartedAt: 1700000000000,
-		Workers:   4,
-		Build:     "test-build",
-		Config: []chrome.ConfigItem{
-			{Name: "LLM_API_KEY", Value: "set"},
-			{Name: "AUTH_PEPPER", Value: "set"},
-			{Name: "DB_PATH", Value: "/tmp/insights.db"},
-		},
+	h, err := NewServer(r, rt, chrome.Config{Info: testInfo()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
 	}
+	return h
 }
 
 func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {
@@ -226,18 +230,18 @@ var routes = []struct {
 	path   string
 	marker string
 }{
-	{"/", "<h1>Status</h1>"},
+	{"/", "<h1>Findings</h1>"},
 	{"/systems", "<h1>Systems</h1>"},
-	{"/findings", "<h1>Findings</h1>"},
 	{"/analyses", "<h1>Analyses</h1>"},
 	{"/gate", "<h1>Gate</h1>"},
 	{"/cost", "<h1>Cost</h1>"},
 	{"/templates", "<h1>Templates</h1>"},
 	{"/baselines", "<h1>Baselines</h1>"},
+	{"/status", "<h1>Status</h1>"},
 }
 
 func TestRoutesOK(t *testing.T) {
-	h := newTestServer(t, seededReader(), fakeRuntime{depth: 2, cap: 100})
+	h := newTestServer(t, seededReader(), fakeRuntime{depth: 2, cap: 100, workers: 4})
 	for _, rt := range routes {
 		t.Run(rt.path, func(t *testing.T) {
 			rec := get(t, h, rt.path)
@@ -254,7 +258,7 @@ func TestRoutesOK(t *testing.T) {
 // The shared chrome layout must identify this dashboard as insightsd's own,
 // not the last binary that happened to render it -- see chrome.Config.Name.
 // The footer's write-routes clause must also be gone entirely: insightsd's
-// dashboard has no write routes at all (see internal/ui's package doc).
+// dashboard has no write routes at all (see this package's doc comment).
 func TestPageIdentifiesAsInsightsd(t *testing.T) {
 	h := newTestServer(t, seededReader(), fakeRuntime{})
 	body := get(t, h, "/").Body.String()
@@ -367,11 +371,16 @@ func TestRefreshMeta(t *testing.T) {
 	}
 
 	// The raw invalid value must never be reflected into the page, anywhere.
-	rec := get(t, h, "/?refresh=abc")
+	// Checked against /status rather than "/": "/" is now the findings page
+	// (findings became the index page in this move), and the seeded fixture's
+	// fingerprint "abcd1234" contains "abc" as an unrelated substring, which
+	// would make this assertion fail on content that was never a reflection
+	// of the query string.
+	rec := get(t, h, "/status?refresh=abc")
 	if strings.Contains(rec.Body.String(), "abc") {
 		t.Fatalf("invalid refresh value %q was reflected into the body", "abc")
 	}
-	rec = get(t, h, "/?refresh=-1")
+	rec = get(t, h, "/status?refresh=-1")
 	if strings.Contains(rec.Body.String(), "refresh=-1") {
 		t.Fatalf("invalid refresh value was reflected into the body")
 	}
@@ -442,7 +451,7 @@ func TestNoJavaScript(t *testing.T) {
 		t.Fatalf("walking embedded assets: %v", err)
 	}
 
-	h := newTestServer(t, seededReader(), fakeRuntime{depth: 1, cap: 10})
+	h := newTestServer(t, seededReader(), fakeRuntime{depth: 1, cap: 10, workers: 2})
 	for _, rt := range routes {
 		rec := get(t, h, rt.path)
 		assertNoJS(t, "rendered page "+rt.path, rec.Body.Bytes())
@@ -457,23 +466,25 @@ func TestNoJavaScript(t *testing.T) {
 }
 
 // TestSecretRedaction asserts this package cannot leak a secret value even
-// when handed one: Info.Config is the caller's contract to have already
+// when handed one: cfg.Info.Config is the caller's contract to have already
 // redacted LLM_API_KEY / AUTH_PEPPER down to set/unset, and a raw secret
 // that was never placed in Config must never appear in the rendered page.
 func TestSecretRedaction(t *testing.T) {
 	const decoySecret = "sk-live-do-not-leak-1234567890"
 
-	h := NewServer(seededReader(), fakeRuntime{}, Info{
+	h, err := NewServer(seededReader(), fakeRuntime{}, chrome.Config{Info: chrome.Info{
 		StartedAt: 1700000000000,
-		Workers:   2,
 		Build:     "test-build",
 		Config: []chrome.ConfigItem{
 			{Name: "LLM_API_KEY", Value: "set"},
 			{Name: "AUTH_PEPPER", Value: "set (ephemeral)"},
 		},
-	})
+	}})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
-	rec := get(t, h, "/")
+	rec := get(t, h, "/status")
 	body := rec.Body.String()
 	if strings.Contains(body, decoySecret) {
 		t.Fatalf("status page leaked a secret value never present in Info.Config")
@@ -486,7 +497,7 @@ func TestSecretRedaction(t *testing.T) {
 func TestFindingsFilters(t *testing.T) {
 	h := newTestServer(t, seededReader(), fakeRuntime{})
 
-	rec := get(t, h, "/findings?severity=critical")
+	rec := get(t, h, "/?severity=critical")
 	body := rec.Body.String()
 	if !strings.Contains(body, "sshd failing repeatedly") {
 		t.Fatalf("severity=critical: expected finding missing")
@@ -498,7 +509,7 @@ func TestFindingsFilters(t *testing.T) {
 	// An unknown filter value is ignored (treated as "no filter"), not
 	// reflected into the selected <option> or passed through as a narrowing
 	// filter.
-	rec = get(t, h, "/findings?severity=bogus")
+	rec = get(t, h, "/?severity=bogus")
 	body = rec.Body.String()
 	if !strings.Contains(body, "sshd failing repeatedly") || !strings.Contains(body, "disk usage crept up") {
 		t.Fatalf("severity=bogus: expected an unfiltered result set, got %q", body)
@@ -569,7 +580,7 @@ func TestGateSummaryReportsTheGatedShare(t *testing.T) {
 
 func TestNilRuntimeDoesNotPanic(t *testing.T) {
 	h := newTestServer(t, seededReader(), nil)
-	rec := get(t, h, "/")
+	rec := get(t, h, "/status")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

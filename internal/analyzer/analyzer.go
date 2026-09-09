@@ -18,12 +18,32 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/prompt"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 )
 
 // ErrPermanent marks failures that a retry cannot fix (e.g. a schema
 // rejection from the LLM, or a non-retryable 4xx).
 var ErrPermanent = errors.New("permanent failure")
+
+// Store is the slice of logsstore.Store the analyzer needs: the write path
+// that records templates, baselines, findings and the analyses ledger, plus
+// the prior-state reads the gate depends on. Declared here, narrow, rather
+// than importing logsstore.Store itself -- the same idiom as
+// internal/budget's Reader and internal/ui's Reader. *logsstore.Store
+// satisfies it.
+type Store interface {
+	UpsertSystem(ctx context.Context, s logsstore.System) error
+	KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error)
+	UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error
+	Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error)
+	UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error
+	BeginAnalysis(ctx context.Context, systemID string, windowStart, windowEnd, now int64) (bool, error)
+	FinalizeAnalysis(ctx context.Context, a logsstore.Analysis) error
+	RecordAttemptError(ctx context.Context, systemID string, windowStart int64, reasons []string, durationMs int, msg string) error
+	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
+	UpsertFinding(ctx context.Context, f model.Finding, now int64) (logsstore.Outcome, error)
+	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
+}
 
 type Config struct {
 	Gate          gate.Config
@@ -36,14 +56,14 @@ type Config struct {
 }
 
 type Analyzer struct {
-	store  store.Store
+	store  Store
 	llm    llm.Client
 	budget *budget.Controller
 	cfg    Config
 	now    func() int64
 }
 
-func New(s store.Store, c llm.Client, b *budget.Controller, cfg Config, now func() int64) *Analyzer {
+func New(s Store, c llm.Client, b *budget.Controller, cfg Config, now func() int64) *Analyzer {
 	return &Analyzer{store: s, llm: c, budget: b, cfg: cfg, now: now}
 }
 
@@ -84,7 +104,7 @@ func (a *Analyzer) record(ctx context.Context, b model.Bundle, entry analysisEnt
 		return fmt.Errorf("analyzer: mark stale: %w", err)
 	}
 
-	if err := a.store.FinalizeAnalysis(ctx, store.Analysis{
+	if err := a.store.FinalizeAnalysis(ctx, logsstore.Analysis{
 		SystemID:     b.SystemID,
 		WindowStart:  entry.windowStart,
 		WindowEnd:    entry.windowEnd,
@@ -122,7 +142,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	}
 
 	// 2. Register the system.
-	if err := a.store.UpsertSystem(ctx, store.System{
+	if err := a.store.UpsertSystem(ctx, logsstore.System{
 		SystemID:         b.SystemID,
 		CollectorVersion: b.CollectorVersion,
 		FirstSeen:        now,
@@ -250,7 +270,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		if permanent {
 			// The request itself is wrong and will fail identically forever.
 			// Close the window so it is not retried into the same wall.
-			if finalizeErr := a.store.FinalizeAnalysis(ctx, store.Analysis{
+			if finalizeErr := a.store.FinalizeAnalysis(ctx, logsstore.Analysis{
 				SystemID:    b.SystemID,
 				WindowStart: b.Window.Start,
 				WindowEnd:   b.Window.End,
@@ -286,7 +306,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// 8. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
-		finalizeErr := a.store.FinalizeAnalysis(ctx, store.Analysis{
+		finalizeErr := a.store.FinalizeAnalysis(ctx, logsstore.Analysis{
 			SystemID:     b.SystemID,
 			WindowStart:  b.Window.Start,
 			WindowEnd:    b.Window.End,
@@ -363,7 +383,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		if err != nil {
 			return fmt.Errorf("analyzer: upsert finding: %w", err)
 		}
-		if outcome != store.OutcomeBumped {
+		if outcome != logsstore.OutcomeBumped {
 			slog.Info("finding outcome", "system_id", b.SystemID, "fingerprint", fp, "outcome", outcome)
 		}
 	}

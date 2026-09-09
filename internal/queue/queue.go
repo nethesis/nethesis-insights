@@ -52,6 +52,11 @@ type Queue struct {
 	// the lifetime of the process.
 	mu       sync.Mutex
 	inflight map[window]bool
+
+	// workers records what Start was called with, for the operator UI's queue
+	// status -- it never changes after Start, so reading it concurrently with
+	// Depth/Cap needs no lock, the same as those two.
+	workers int
 }
 
 // New returns a queue holding at most size bundles. Each bundle gets at most
@@ -121,6 +126,7 @@ func (q *Queue) Start(workers int) {
 	if workers < 1 {
 		workers = 1
 	}
+	q.workers = workers
 	for i := 0; i < workers; i++ {
 		q.wg.Add(1)
 		go func(worker int) {
@@ -179,3 +185,7 @@ func (q *Queue) Depth() int { return len(q.ch) }
 
 // Cap reports the configured buffer size. Exposed for logging and tests.
 func (q *Queue) Cap() int { return cap(q.ch) }
+
+// Workers reports how many worker goroutines Start launched. Exposed for the
+// operator UI's queue status -- insightsd is the only binary with a queue.
+func (q *Queue) Workers() int { return q.workers }

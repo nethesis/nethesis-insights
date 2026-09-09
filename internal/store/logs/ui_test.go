@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package logs
 
 import (
 	"context"
@@ -491,7 +491,7 @@ func TestCostRollupFiltersOnLLMCalled(t *testing.T) {
 
 // --- ListAllFindings ---
 
-func seedFinding(t *testing.T, ctx context.Context, s *SQLiteStore, systemID, fp, severity, status string, lastSeen int64) {
+func seedFinding(t *testing.T, ctx context.Context, s *Store, systemID, fp, severity, status string, lastSeen int64) {
 	t.Helper()
 	if _, err := s.UpsertFinding(ctx, model.Finding{
 		SystemID: systemID, Fingerprint: fp, Severity: severity, Title: "t", Summary: "s", SuggestedAction: "a",

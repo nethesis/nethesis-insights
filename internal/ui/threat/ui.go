@@ -4,7 +4,7 @@
 // Package threat serves threatd's operator dashboard: the blocklist and its
 // allowlist, per-system ingest accounting, the raw event stream, the daily
 // rollup and the client-facing allowlist review queue. It sits on chrome the
-// same way insightsd's internal/ui does -- see that package's doc comment
+// same way insightsd's internal/ui/logs does -- see that package's doc comment
 // for the shared shape (zero JavaScript, every list bounded, secrets never
 // rendered) and this file for what is specific to Threat Shield.
 package threat

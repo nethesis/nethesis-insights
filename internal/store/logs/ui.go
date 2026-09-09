@@ -1,14 +1,14 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Cross-system, read-only query paths for the operator UI (internal/ui). Kept
-// in a separate file so store.go, which is the write path used by the
-// analyzer, does not balloon.
+// Cross-system, read-only query paths for the operator UI
+// (internal/ui/logs). Kept in a separate file so store.go, which is the
+// write path used by the analyzer, does not balloon.
 //
-// None of these take s.mu: that mutex serializes writers only, and the
-// existing read paths (KnownTemplates, Baselines, queryFindings) already
-// follow that precedent.
-package store
+// None of these take s.db's write mutex: that mutex serializes writers only,
+// and the existing read paths (KnownTemplates, Baselines, queryFindings)
+// already follow that precedent.
+package logs
 
 import (
 	"context"
@@ -147,7 +147,7 @@ func normalizeGateReasons(raw string) []string {
 }
 
 // Counts reports per-table row counts.
-func (s *SQLiteStore) Counts(ctx context.Context) (Counts, error) {
+func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	var c Counts
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM systems`).Scan(&c.Systems); err != nil {
 		return Counts{}, fmt.Errorf("store: count systems: %w", err)
@@ -170,7 +170,7 @@ func (s *SQLiteStore) Counts(ctx context.Context) (Counts, error) {
 // ListSystems returns every system plus per-system aggregates, ordered by
 // last_seen descending. The six correlated subqueries each hit an index
 // prefixed by system_id.
-func (s *SQLiteStore) ListSystems(ctx context.Context) ([]SystemRow, error) {
+func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			s.system_id, s.tenant_id, s.collector_version, s.first_seen, s.last_seen,
@@ -205,7 +205,7 @@ func (s *SQLiteStore) ListSystems(ctx context.Context) ([]SystemRow, error) {
 
 // ListAnalyses returns the cost ledger, most recent window first. systemID
 // == "" means every system.
-func (s *SQLiteStore) ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error) {
+func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([]AnalysisRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, system_id, window_start, window_end, gated, llm_called, completed,
 		       gate_reasons, input_tokens, output_tokens, cached_tokens, cost_micros, model,
@@ -260,7 +260,7 @@ func (s *SQLiteStore) ListAnalyses(ctx context.Context, systemID string, limit i
 // novelty-scoped carries "security_category" and embedded counts and ratios
 // ("new_templates=5", "deviation:/3=3.03"), which both group as separate keys
 // and answer a question about a gate that no longer exists.
-func (s *SQLiteStore) GateRollup(ctx context.Context, since int64) ([]GateRow, error) {
+func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) {
 	// count(case when ...) rather than sum(cost_micros > 0): SQLite yields 1/0
 	// for a comparison, Postgres yields a boolean sum() will not take.
 	rows, err := s.db.QueryContext(ctx, `
@@ -329,7 +329,7 @@ func (s *SQLiteStore) GateRollup(ctx context.Context, since int64) ([]GateRow, e
 // CostRollup buckets analyses that called the LLM into UTC days, per model.
 // Bucketing is portable integer division on the unix-millis column, exactly
 // as the spec requires -- SQLite and Postgres agree on integer /.
-func (s *SQLiteStore) CostRollup(ctx context.Context) ([]CostRow, error) {
+func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT created_at / ? AS day_idx, model,
 		       count(*) AS windows, coalesce(sum(llm_called), 0) AS llm_calls,
@@ -379,7 +379,7 @@ const SortRecent = "recent"
 // (default) re-sorts into the canonical severity/last_seen order via
 // model.SortFindings; SortRecent leaves the SQL's last_seen-descending order
 // as is.
-func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
+func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
 	query := `
 		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version
 		FROM findings
@@ -405,7 +405,7 @@ func (s *SQLiteStore) ListAllFindings(ctx context.Context, systemID, status, sev
 
 // ListTemplates returns system_templates rows, most recently seen first.
 // systemID == "" means every system.
-func (s *SQLiteStore) ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error) {
+func (s *Store) ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, template, module_id, priority, category, total_count, first_seen, last_seen
 		FROM system_templates
@@ -436,7 +436,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, systemID string, limit 
 // system. Unlike the other list methods this has no limit: baselines are
 // bounded by (system_id, module_id, priority) cardinality, not by an
 // unbounded event stream.
-func (s *SQLiteStore) ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error) {
+func (s *Store) ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, module_id, priority, ewma_rate, updated_at
 		FROM module_baselines

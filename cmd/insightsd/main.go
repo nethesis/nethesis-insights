@@ -1,12 +1,16 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// Command insightsd runs the logs pipeline as its own service: masked log
+// bundles in, the gate deciding whether a window is worth an LLM call,
+// fingerprinted findings out -- see internal/api/logs, internal/analyzer and
+// internal/ui/logs. Authentication happens at the proxy (Traefik's
+// forwardAuth calls authd); this process trusts a request only when it
+// arrives from a configured trusted proxy (TRUSTED_PROXY_CIDRS).
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,21 +24,16 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
-	"github.com/nethesis/nethesis-insights/internal/api"
+	logsapi "github.com/nethesis/nethesis-insights/internal/api/logs"
 	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
-	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/queue"
-	"github.com/nethesis/nethesis-insights/internal/store"
-	"github.com/nethesis/nethesis-insights/internal/ui"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
+	logsui "github.com/nethesis/nethesis-insights/internal/ui/logs"
 )
-
-// defaultAuthValidateURL is Nethesis's own subscription/auth endpoint. It
-// forwards the edge's Authorization: Basic header verbatim and answers 200
-// (valid), 401 (invalid) or an empty body either way -- no tenant/org id.
-const defaultAuthValidateURL = "https://my.nethesis.it/auth"
 
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -107,18 +106,6 @@ func setupLogger(level string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
 }
 
-// randomPepper returns a fresh 32-byte hex key. It exits on a rand.Reader
-// failure, matching this project's other os.Exit(1)-on-startup-error style
-// -- a broken entropy source is not a condition to run degraded under.
-func randomPepper() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		slog.Error("failed to generate a random AUTH_PEPPER", "error", err)
-		os.Exit(1)
-	}
-	return hex.EncodeToString(b)
-}
-
 // secretState reduces a secret to its mere presence. The status page and the
 // logs get this, never the value.
 func secretState(set bool) string {
@@ -126,25 +113,6 @@ func secretState(set bool) string {
 		return "set"
 	}
 	return "unset"
-}
-
-// newUIServer builds the operator UI's own listener, or nil when
-// UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly turns
-// it on. Split out of main so that off-by-default behaviour is testable
-// without booting the process.
-//
-// It gets its own http.Server, deliberately: the public ingest socket must
-// never serve an unauthenticated fleet-wide page, so a reverse-proxy or
-// firewall mistake on :9595 cannot expose it.
-func newUIServer(addr string, r ui.Reader, rt ui.Runtime, info ui.Info) *http.Server {
-	if addr == "" {
-		return nil
-	}
-	return &http.Server{
-		Addr:              addr,
-		Handler:           ui.NewServer(r, rt, info),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
 }
 
 // isLoopbackBind reports whether addr binds a loopback address only. It is
@@ -174,6 +142,33 @@ func warnIfNotLoopback(addr string) {
 		"ui_listen_addr", addr)
 }
 
+// newUIServer builds the operator UI's own listener, or nil when
+// UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly turns
+// it on. Split out of main so that off-by-default behaviour is testable
+// without booting the process.
+//
+// It gets its own http.Server, deliberately: the public ingest socket must
+// never serve an unauthenticated fleet-wide page, so a reverse-proxy or
+// firewall mistake on :9595 cannot expose it.
+func newUIServer(addr, basePath string, r logsui.Reader, rt logsui.Runtime, info chrome.Info) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	handler, err := logsui.NewServer(r, rt, chrome.Config{
+		BasePath: basePath,
+		Info:     info,
+	})
+	if err != nil {
+		slog.Error("failed to build the operator UI", "error", err)
+		os.Exit(1)
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+}
+
 func main() {
 	startedAt := time.Now().UnixMilli()
 
@@ -184,15 +179,12 @@ func main() {
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
 	// enabling it is one explicit operator act, never a default.
 	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
+	uiBasePath := getenv("UI_BASE_PATH", "")
 	dbPath := getenv("DB_PATH", "/var/lib/insights/insights.db")
+	trustedProxyCIDRs := getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
 	llmBaseURL := getenv("LLM_BASE_URL", "")
 	llmModel := getenv("LLM_MODEL", "")
 	llmAPIKey := getenv("LLM_API_KEY", "")
-	authValidateURL := getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
-	authPepper := getenv("AUTH_PEPPER", "")
-	authCacheTTL := getenvDuration("AUTH_CACHE_TTL", 5*time.Minute)
-	authNegCacheTTL := getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
-	authTimeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
 	// Absolute floors under the deviation condition. A ratio is not evidence
 	// when the denominator is 2: the dev fleet's median bucket baseline was
@@ -227,6 +219,12 @@ func main() {
 	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
 	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
 
+	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
+	if err != nil {
+		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
+		os.Exit(1)
+	}
+
 	if dir := filepath.Dir(dbPath); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			slog.Error("failed to create db parent directory", "dir", dir, "error", err)
@@ -234,7 +232,7 @@ func main() {
 		}
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := logsstore.Open(dbPath)
 	if err != nil {
 		slog.Error("failed to open store", "error", err)
 		os.Exit(1)
@@ -279,21 +277,10 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 
-	// Captured before the fallback below overwrites authPepper, so the status
-	// page can distinguish an operator-supplied pepper from a generated one.
-	authPepperSupplied := authPepper != ""
-	if authPepper == "" {
-		// A pepper is only defense in depth here -- the cache it keys never
-		// leaves memory (spec §10) -- so an unset AUTH_PEPPER gets a random
-		// one for this process's lifetime rather than refusing to start.
-		authPepper = randomPepper()
-		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
-	}
-	authenticator := auth.New(authValidateURL, authPepper, authTimeout, time.Now)
-	authenticator.PositiveTTL = authCacheTTL
-	authenticator.NegativeTTL = authNegCacheTTL
-
-	handler := api.NewServer(q, s, authenticator, excludeModules, excludeServices)
+	handler := logsapi.NewServer(q, s, trusted, logsapi.Config{
+		ExcludeModules:  excludeModules,
+		ExcludeServices: excludeServices,
+	})
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
@@ -304,27 +291,20 @@ func main() {
 	// never by iterating os.Environ(): an accidental new secret in the
 	// environment must not appear on an unauthenticated page just because it
 	// was set. This mirrors the slog.Debug("configuration", ...) block below,
-	// including its treatment of LLM_API_KEY, extended to AUTH_PEPPER.
-	authPepperState := "set (ephemeral)"
-	if authPepperSupplied {
-		authPepperState = "set"
-	}
+	// including its treatment of LLM_API_KEY.
 	cfgItems := []chrome.ConfigItem{
 		{Name: "LISTEN_ADDR", Value: listenAddr},
 		{Name: "UI_LISTEN_ADDR", Value: uiListenAddr},
+		{Name: "UI_BASE_PATH", Value: uiBasePath},
 		{Name: "DB_PATH", Value: dbPath},
 		{Name: "LOG_LEVEL", Value: logLevel},
+		{Name: "TRUSTED_PROXY_CIDRS", Value: trustedProxyCIDRs},
 		{Name: "LLM_BASE_URL", Value: llmBaseURL},
 		{Name: "LLM_MODEL", Value: llmModel},
 		{Name: "LLM_API_KEY", Value: secretState(llmAPIKey != "")},
 		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
 		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
 		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
-		{Name: "AUTH_VALIDATE_URL", Value: authValidateURL},
-		{Name: "AUTH_PEPPER", Value: authPepperState},
-		{Name: "AUTH_CACHE_TTL", Value: authCacheTTL.String()},
-		{Name: "AUTH_NEG_CACHE_TTL", Value: authNegCacheTTL.String()},
-		{Name: "AUTH_TIMEOUT", Value: authTimeout.String()},
 		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
 		{Name: "GATE_MIN_EXPECTED", Value: strconv.FormatFloat(gateMinExpected, 'f', -1, 64)},
 		{Name: "GATE_MIN_OBSERVED", Value: strconv.FormatFloat(gateMinObserved, 'f', -1, 64)},
@@ -342,28 +322,25 @@ func main() {
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
 	}
 
-	// BuildInfo reads runtime/debug once here, not per request.
-	uiServer := newUIServer(uiListenAddr, s, q, ui.Info{
+	// BuildInfo reads runtime/debug once here, not per request. q satisfies
+	// logsui.Runtime (Depth/Cap/Workers): insightsd is the only one of the
+	// three binaries with a queue, so it is the only one that wires one in.
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, q, chrome.Info{
 		StartedAt: startedAt,
-		Workers:   queueWorkers,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
 	})
 
-	// NEVER log the API key, the pepper, or any credential.
+	// NEVER log the API key or any credential.
 	slog.Info("starting insightsd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,
 		"model", llmModel, "db_path", dbPath,
 		"log_level", logLevel, "queue_size", queueSize, "queue_workers", queueWorkers,
-		"auth_validate_url", authValidateURL)
+		"trusted_proxy_cidrs", trustedProxyCIDRs)
 	slog.Debug("configuration",
 		"llm_base_url", llmBaseURL,
 		"llm_timeout", llmTimeout.String(),
 		"analysis_timeout", analysisTimeout.String(),
 		"llm_api_key_set", llmAPIKey != "",
-		"auth_validate_url", authValidateURL,
-		"auth_cache_ttl", authCacheTTL.String(),
-		"auth_neg_cache_ttl", authNegCacheTTL.String(),
-		"auth_timeout", authTimeout.String(),
 		"gate_tolerance", gateTolerance,
 		"gate_min_expected", gateMinExpected,
 		"gate_min_observed", gateMinObserved,

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package api
+package logs
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
-	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 )
 
 type fakePublisher struct {
@@ -29,13 +29,39 @@ func (f *fakePublisher) Publish(b model.Bundle) error {
 	return nil
 }
 
+// fakeStore backs /v1/findings. Nothing here exercises it beyond
+// construction, but NewServer takes one Store for both routes.
+type fakeStore struct {
+	findings []model.Finding
+	err      error
+}
+
+func (f *fakeStore) ListFindings(_ context.Context, _ string, _ int64, _ string) ([]model.Finding, error) {
+	return f.findings, f.err
+}
+
+// The credential is never verified in this process -- authd and the
+// trusted-proxy check are the whole boundary -- so any non-empty pair works
+// here; it exists only to exercise HTTP Basic's wire format.
 const (
 	testSystemID = "sys1"
-	testSecret   = "s3cret"
+	testSecret   = "whatever"
 )
 
+// trustedProxy is the loopback prefix every test builds its trusted set from,
+// matching httptest.NewRequest's need for an explicit RemoteAddr.
+var trustedProxy = mustTrust("127.0.0.0/8")
+
+func mustTrust(cidr string) httpx.TrustedProxies {
+	t, err := httpx.ParseTrustedProxies(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret}, nil, nil)
+	return NewServer(p, &fakeStore{}, trustedProxy, Config{})
 }
 
 func validBundle() string {
@@ -50,6 +76,7 @@ func validBundle() string {
 func postBundle(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/bundles", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345" // the trusted proxy
 	if withAuth {
 		req.SetBasicAuth(testSystemID, testSecret)
 	}
@@ -127,22 +154,25 @@ func TestIngestRequiresCredentials(t *testing.T) {
 	}
 }
 
-// The 401 body stays opaque, but the error carries a reason for the debug log
-// -- and never the presented secret.
-func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
-	sa := StaticAuth{SystemID: testSystemID, Secret: testSecret}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetBasicAuth("wrong-system", "hunter2")
+// The credential is not verified in this process, so the trusted-proxy check
+// is the entire boundary: a direct connection must not be able to name a
+// system_id.
+func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
+	pub := &fakePublisher{}
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
 
-	_, err := sa.Validate(context.Background(), req.Header.Get("Authorization"))
-	if !errors.Is(err, auth.ErrInvalidCredentials) {
-		t.Fatalf("error: got %v, want ErrInvalidCredentials", err)
+	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", strings.NewReader(validBundle()))
+	r.RemoteAddr = "203.0.113.7:4444"
+	r.SetBasicAuth(testSystemID, testSecret)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
 	}
-	if !strings.Contains(err.Error(), "wrong-system") {
-		t.Fatalf("error %q does not name the presented system_id", err)
-	}
-	if strings.Contains(err.Error(), "hunter2") {
-		t.Fatalf("error %q leaks the presented secret", err)
+	if len(pub.published) != 0 {
+		t.Fatalf("a direct request published %d bundles", len(pub.published))
 	}
 }
 
@@ -151,8 +181,9 @@ func TestStaticAuthExplainsWhyItRejected(t *testing.T) {
 // cannot disagree about which modules are in scope.
 func TestIngestExcludesConfiguredModules(t *testing.T) {
 	pub := &fakePublisher{}
-	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		map[string]bool{"crowdsec1": true}, nil)
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
+		ExcludeModules: map[string]bool{"crowdsec1": true},
+	})
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
@@ -225,8 +256,9 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 // co-located deployment analysing its own log output.
 func TestIngestExcludesConfiguredServices(t *testing.T) {
 	pub := &fakePublisher{}
-	h := NewServer(pub, nil, StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		nil, map[string]bool{"insights": true})
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
+		ExcludeServices: map[string]bool{"insights": true},
+	})
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,

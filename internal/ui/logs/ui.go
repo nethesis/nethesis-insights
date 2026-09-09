@@ -1,26 +1,31 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package ui serves an optional, off-by-default operator dashboard for
-// insightsd. It replaces the shell helper that used to need sqlite3, root on
-// the node and the podman volume path, and adds the live process state a
-// query over the database could never see: queue depth, uptime, and the
-// effective configuration.
+// Package logs serves insightsd's operator dashboard: findings, systems, the
+// analyses cost ledger, the gate rollup, per-day spend and the stored
+// templates and baselines. It replaces the shell helper that used to need
+// sqlite3, root on the node and the podman volume path, and adds the live
+// process state a query over the database could never see: queue depth and
+// worker count, uptime, and the effective configuration.
 //
-// Reads are unauthenticated and fleet-wide -- every GET shows every
-// system's findings, templates, baselines and spend, across tenants, exactly
-// as before. That is why most of the constraints here are not optional:
+// It sits on chrome the same way threatd's and sizingd's dashboards do -- see
+// internal/ui/chrome's own doc comment for the shared layout and route
+// discipline. What is specific here:
 //
+//   - Reads are unauthenticated and fleet-wide -- every GET shows every
+//     system's findings, templates, baselines and spend, across tenants.
+//     That is why most of the constraints below are not optional.
 //   - Zero JavaScript. Interactions are <meta refresh>, <form> and
 //     <details>, never a <script> tag.
 //   - Every list is bounded server-side.
-//   - Secrets never render: Info.Config arrives already redacted by the
+//   - Secrets never render: cfg.Info.Config arrives already redacted by the
 //     caller, and this package never reads the environment.
-//
-// insightsd's own dashboard has no write routes: the log pipeline has
-// nothing to approve or reject, unlike Threat Shield's allowlist (see
-// internal/ui/threat).
-package ui
+//   - insightsd has no write routes: the log pipeline has nothing to
+//     approve or reject, unlike Threat Shield's allowlist (internal/ui/threat).
+//   - insightsd is the only one of the three binaries with a queue, so it is
+//     the only dashboard whose status page has a Queue section at all -- see
+//     Runtime and statusPageData.
+package logs
 
 import (
 	"context"
@@ -31,7 +36,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
@@ -42,17 +47,17 @@ import (
 //go:embed templates
 var pageAssets embed.FS
 
-// Reader is the read-only slice of store.Store the UI needs. *store.SQLiteStore
-// satisfies it.
+// Reader is the read-only slice of logsstore.Store the UI needs.
+// *logsstore.Store satisfies it.
 type Reader interface {
-	Counts(ctx context.Context) (store.Counts, error)
-	ListSystems(ctx context.Context) ([]store.SystemRow, error)
-	ListAnalyses(ctx context.Context, systemID string, limit int) ([]store.AnalysisRow, error)
-	GateRollup(ctx context.Context, since int64) ([]store.GateRow, error)
-	CostRollup(ctx context.Context) ([]store.CostRow, error)
+	Counts(ctx context.Context) (logsstore.Counts, error)
+	ListSystems(ctx context.Context) ([]logsstore.SystemRow, error)
+	ListAnalyses(ctx context.Context, systemID string, limit int) ([]logsstore.AnalysisRow, error)
+	GateRollup(ctx context.Context, since int64) ([]logsstore.GateRow, error)
+	CostRollup(ctx context.Context) ([]logsstore.CostRow, error)
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
-	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
-	ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error)
+	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
+	ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -61,18 +66,7 @@ type Reader interface {
 type Runtime interface {
 	Depth() int
 	Cap() int
-}
-
-// Info is the static half of the status page, built once by the caller. It
-// carries Workers, which chrome.Info deliberately does not: queue depth is
-// insightsd's alone and does not belong in the shared chrome package. This
-// package converts it to a chrome.Info (dropping Workers) when it builds the
-// chrome.Base, and keeps Workers itself for its own status page data.
-type Info struct {
-	StartedAt int64 // unix millis
-	Workers   int
-	Build     string              // from runtime/debug.ReadBuildInfo; "unknown" if absent
-	Config    []chrome.ConfigItem // explicit list; secrets ALREADY reduced to set/unset by the caller
+	Workers() int
 }
 
 // Bounds on unbounded-by-default queries. /analyses is the only page that
@@ -86,71 +80,64 @@ const (
 	analysesMaxLimit   = 500
 )
 
-// navGroups is this dashboard's nav bar structure, handed to chrome.New as
-// chrome.Config.Nav. There is exactly one unlabeled group (Status), which
-// chrome renders as a plain top-level link rather than a dropdown.
-var navGroups = []chrome.NavGroup{
-	{Label: "", Pages: []chrome.NavPage{{Key: "status", Path: "/", Label: "Status"}}},
-	{Label: "Logs Pipeline", Pages: []chrome.NavPage{
+// nav is this dashboard's nav bar structure. A single group with no label
+// renders as a flat row, the same shape threatd's and sizingd's dashboards
+// use.
+var nav = []chrome.NavGroup{
+	{Pages: []chrome.NavPage{
+		{Key: "index", Path: "/", Label: "Findings"},
 		{Key: "systems", Path: "/systems", Label: "Systems"},
-		{Key: "findings", Path: "/findings", Label: "Findings"},
 		{Key: "analyses", Path: "/analyses", Label: "Analyses"},
 		{Key: "gate", Path: "/gate", Label: "Gate"},
 		{Key: "cost", Path: "/cost", Label: "Cost"},
 		{Key: "templates", Path: "/templates", Label: "Templates"},
 		{Key: "baselines", Path: "/baselines", Label: "Baselines"},
+		{Key: "status", Path: "/status", Label: "Status"},
 	}},
 }
 
 // pages lists the content templates, each combined with chrome's layout
 // into its own *template.Template -- see chrome.ParseTemplates.
 var pages = []string{
-	"status.html", "systems.html", "findings.html", "analyses.html",
-	"gate.html", "cost.html", "templates.html", "baselines.html",
+	"index.html", "systems.html", "analyses.html",
+	"gate.html", "cost.html", "templates.html", "baselines.html", "status.html",
 }
 
 type server struct {
 	chrome *chrome.Base
 	reader Reader
 	rt     Runtime
-	info   Info
+	config []chrome.ConfigItem
 }
 
-// NewServer builds the operator UI handler. rt may be nil.
+// NewServer builds insightsd's operator UI handler. rt may be nil.
 //
-// This dashboard is not deployed behind Traefik's path-prefix split (it is
-// its own listener, meant to be bound to loopback), so it always passes an
-// empty BasePath to chrome. It has no write routes: the log pipeline has
-// nothing to approve or reject.
-func NewServer(r Reader, rt Runtime, info Info) http.Handler {
+// insightsd has no write routes: the log pipeline has nothing to approve or
+// reject.
+func NewServer(r Reader, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
 		// templates/ directory -- a build-time programming error, not a
 		// runtime condition.
-		panic("ui: page templates: " + err.Error())
+		return nil, err
 	}
 
-	base, err := chrome.New(chrome.Config{
-		Name: "insightsd",
-		Info: chrome.Info{
-			StartedAt: info.StartedAt,
-			Build:     info.Build,
-			Config:    info.Config,
-		},
-		Nav:       navGroups,
-		Pages:     pages,
-		Templates: pageTemplates,
-	})
+	cfg.Name = "insightsd"
+	cfg.Nav = nav
+	cfg.Pages = pages
+	cfg.Templates = pageTemplates
+
+	base, err := chrome.New(cfg)
 	if err != nil {
-		panic("ui: parsing templates: " + err.Error())
+		return nil, err
 	}
 
 	srv := &server{
 		chrome: base,
 		reader: r,
 		rt:     rt,
-		info:   info,
+		config: cfg.Info.Config,
 	}
 
 	mux := http.NewServeMux()
@@ -159,7 +146,7 @@ func NewServer(r Reader, rt Runtime, info Info) http.Handler {
 	// exactly one place.
 	mux.HandleFunc("/", srv.route)
 
-	return httpx.Logging(mux)
+	return httpx.Logging(mux), nil
 }
 
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
@@ -176,11 +163,9 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case "/":
-		s.handleStatus(w, r)
+		s.handleFindings(w, r)
 	case "/systems":
 		s.handleSystems(w, r)
-	case "/findings":
-		s.handleFindings(w, r)
 	case "/analyses":
 		s.handleAnalyses(w, r)
 	case "/gate":
@@ -191,11 +176,13 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplates(w, r)
 	case "/baselines":
 		s.handleBaselines(w, r)
+	case "/status":
+		s.handleStatus(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and
 		// dispatch by hand, an unrecognised path correctly falls through to
-		// this 404 rather than silently rendering the status page.
+		// this 404 rather than silently rendering the findings page.
 		http.NotFound(w, r)
 	}
 }
@@ -221,9 +208,13 @@ func sanitizeStatus(v string) string {
 
 // --- handlers ---
 
+// statusPageData carries queue depth, cap and worker count as its own
+// fields: chrome.Info deliberately has no Workers field (insightsd is the
+// only one of the three binaries with a queue), so this dashboard's own page
+// data is where that number lives.
 type statusPageData struct {
 	chrome.PageData
-	Counts     store.Counts
+	Counts     logsstore.Counts
 	HasQueue   bool
 	QueueDepth int
 	QueueCap   int
@@ -241,19 +232,19 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		PageData: s.chrome.PageData(r, "status"),
 		Counts:   counts,
 		HasQueue: s.rt != nil,
-		Workers:  s.info.Workers,
-		Config:   s.info.Config,
+		Config:   s.config,
 	}
 	if s.rt != nil {
 		data.QueueDepth = s.rt.Depth()
 		data.QueueCap = s.rt.Cap()
+		data.Workers = s.rt.Workers()
 	}
 	s.chrome.Render(w, "status.html", data)
 }
 
 type systemsPageData struct {
 	chrome.PageData
-	Systems []store.SystemRow
+	Systems []logsstore.SystemRow
 }
 
 func (s *server) handleSystems(w http.ResponseWriter, r *http.Request) {
@@ -289,11 +280,11 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 
 	findings, err := s.reader.ListAllFindings(r.Context(), systemID, status, severity, id, sort, findingsLimit)
 	if err != nil {
-		s.chrome.StoreError(w, "findings", err)
+		s.chrome.StoreError(w, "index", err)
 		return
 	}
-	s.chrome.Render(w, "findings.html", findingsPageData{
-		PageData:   s.chrome.PageData(r, "findings"),
+	s.chrome.Render(w, "index.html", findingsPageData{
+		PageData:   s.chrome.PageData(r, "index"),
 		Findings:   findings,
 		System:     systemID,
 		Status:     status,
@@ -308,7 +299,7 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 // to "" (the canonical severity/last_seen order) the same way
 // sanitizeStatus/sanitizeSeverity default an unrecognized value.
 func sanitizeFindingsSort(v string) string {
-	if v == store.SortRecent {
+	if v == logsstore.SortRecent {
 		return v
 	}
 	return ""
@@ -316,7 +307,7 @@ func sanitizeFindingsSort(v string) string {
 
 type analysesPageData struct {
 	chrome.PageData
-	Analyses []store.AnalysisRow
+	Analyses []logsstore.AnalysisRow
 	System   string
 	Limit    int
 }
@@ -354,7 +345,7 @@ type gateRange struct {
 // The default is deliberately not "all time": gate reasons are stored exactly
 // as the formula that produced them spelled them, so an unbounded rollup mixes
 // eras and the page that answers "why are we paying" ends up describing a gate
-// that has since been fixed. See store.GateRollup.
+// that has since been fixed. See logsstore.GateRollup.
 var gateRanges = []gateRange{
 	{Key: "24h", Label: "last 24 hours", Window: 24 * time.Hour},
 	{Key: "7d", Label: "last 7 days", Window: 7 * 24 * time.Hour},
@@ -404,7 +395,7 @@ type gateSummary struct {
 // the gate's invariant (a non-empty reason set is what makes the call), and
 // deriving it means legacy rows written by an older formula cannot make the
 // summary contradict the table.
-func summarizeGate(rows []store.GateRow) gateSummary {
+func summarizeGate(rows []logsstore.GateRow) gateSummary {
 	var g gateSummary
 	for _, row := range rows {
 		g.Windows += row.Windows
@@ -422,7 +413,7 @@ func summarizeGate(rows []store.GateRow) gateSummary {
 
 type gatePageData struct {
 	chrome.PageData
-	Rows    []store.GateRow
+	Rows    []logsstore.GateRow
 	Summary gateSummary
 	Range   string
 	Ranges  []gateRange
@@ -453,11 +444,11 @@ type costPageData struct {
 
 // costDayGroup folds CostRollup's per-day-per-model rows into one group per
 // day, plus that day's total across every model -- CostRollup is already
-// ordered by day, then model (internal/store/ui.go), so a single linear pass
-// suffices.
+// ordered by day, then model (internal/store/logs/ui.go), so a single linear
+// pass suffices.
 type costDayGroup struct {
 	Day             string
-	Rows            []store.CostRow
+	Rows            []logsstore.CostRow
 	TotalCostMicros int64
 }
 
@@ -487,7 +478,7 @@ func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 
 type templatesPageData struct {
 	chrome.PageData
-	Templates []store.TemplateRow
+	Templates []logsstore.TemplateRow
 	System    string
 }
 
@@ -507,7 +498,7 @@ func (s *server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 
 type baselinesPageData struct {
 	chrome.PageData
-	Baselines []store.BaselineRow
+	Baselines []logsstore.BaselineRow
 	System    string
 }
 

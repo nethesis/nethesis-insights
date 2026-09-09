@@ -3,7 +3,7 @@
 
 // Package sizing serves sizingd's operator dashboard: per-node pressure and
 // verdicts, the published cohort recommendations, and pipeline status. It
-// sits on chrome the same way insightsd's internal/ui does -- see that
+// sits on chrome the same way insightsd's internal/ui/logs does -- see that
 // package's doc comment for the shared shape (zero JavaScript, every list
 // bounded, secrets never rendered) and this file for what is specific to
 // fleet sizing.
