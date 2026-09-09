@@ -27,7 +27,7 @@ import (
 
 // Store is the slice of sizingstore.Store this package needs. Declared here,
 // narrow, so the handler is testable with a small fake instead of the whole
-// store -- the same idiom as internal/ui's Reader/Writer.
+// store -- the same idiom as internal/ui/sizing's Reader.
 // *sizingstore.Store satisfies it.
 type Store interface {
 	UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []sizingstore.SizingDayRows, now int64) (int, error)

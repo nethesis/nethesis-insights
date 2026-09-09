@@ -3,16 +3,26 @@
 # Copyright (C) 2026 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Query a running insightsd over HTTP.
+# Query the split pipelines (insightsd, threatd, sizingd) through the
+# Traefik front door, using the prefixed public paths (/logs, /blocklist,
+# /sizing) each command targets.
 #
-#   INSIGHTS_URL   base URL          (default http://localhost:9595)
+#   INSIGHTS_URL   base URL          (default http://localhost -- Traefik's
+#                  entrypoint; each command supplies its own /logs, /blocklist
+#                  or /sizing prefix)
 #   INSIGHTS_CRED  system_id:secret  (required for everything except `health`)
 #   INSIGHTS_CURL  extra curl flags  (default none; pass -k for a self-signed
-#                  route like the one in docs/runbooks/dev-machine-rl1.md)
+#                  route like the one in docs/runbooks/2026-09-09-insights-test-deploy.md)
+#
+# Talking to one binary directly instead (no Traefik in front), e.g. during
+# development -- see README.md's manual round trip -- set INSIGHTS_URL to
+# that binary's own LISTEN_ADDR (default http://localhost:9595) and drop the
+# /logs, /blocklist or /sizing prefix from the path yourself; the handlers
+# register unprefixed routes so a pipeline can run standalone.
 
 set -euo pipefail
 
-URL=${INSIGHTS_URL:-http://localhost:9595}
+URL=${INSIGHTS_URL:-http://localhost}
 CRED=${INSIGHTS_CRED:-}
 CURL_OPTS=${INSIGHTS_CURL:-}
 
@@ -32,6 +42,10 @@ shift || true
 
 case "$cmd" in
 health)
+    # health   — NOTE: /healthz is registered by every binary but routed by
+    # no Traefik rule (only the quadlet HealthCmd= reaches it, inside the
+    # container), so this only works when INSIGHTS_URL points directly at
+    # one binary's own LISTEN_ADDR, not at the Traefik-fronted host.
     # shellcheck disable=SC2086
     curl -s $CURL_OPTS -o /dev/null -w '%{http_code}\n' "$URL/healthz"
     ;;
@@ -41,14 +55,14 @@ findings)
     need_cred
     since=${1:-0}
     # shellcheck disable=SC2086
-    curl -s $CURL_OPTS -u "$CRED" "$URL/v1/findings?since=$since" | pretty
+    curl -s $CURL_OPTS -u "$CRED" "$URL/logs/v1/findings?since=$since" | pretty
     ;;
 
 open)
     # open   — one line per open finding: severity, title, modules
     need_cred
     # shellcheck disable=SC2086
-    curl -s $CURL_OPTS -u "$CRED" "$URL/v1/findings?since=0" \
+    curl -s $CURL_OPTS -u "$CRED" "$URL/logs/v1/findings?since=0" \
         | jq -r '.findings[]? | select(.status=="open")
                  | [.severity, .title, (.modules|join(",")), .occurrence_count] | @tsv' \
         | column -t -s "$(printf '\t')"
@@ -60,30 +74,30 @@ post)
     file=${1:?usage: post <bundle.json>}
     # shellcheck disable=SC2086
     curl -s $CURL_OPTS -u "$CRED" -X POST -H 'Content-Type: application/json' \
-        --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/v1/bundles"
+        --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/logs/v1/bundles"
     ;;
 
-threat-events)
-    # threat-events <decisions.json>   — report CrowdSec ban decisions
+events)
+    # events <decisions.json>   — report CrowdSec ban decisions
     need_cred
-    file=${1:?usage: threat-events <decisions.json>}
+    file=${1:?usage: events <decisions.json>}
     # shellcheck disable=SC2086
     curl -s $CURL_OPTS -u "$CRED" -X POST -H 'Content-Type: application/json' \
-        --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/v1/threat-events"
+        --data @"$file" -w '\nHTTP %{http_code} in %{time_total}s\n' "$URL/blocklist/v1/events"
     ;;
 
-blocklist)
-    # blocklist [etag]   — fetch the consensus feed; with an etag, expect 304
+feed)
+    # feed [etag]   — fetch the consensus feed; with an etag, expect 304
     need_cred
     etag=${1:-}
     if [ -n "$etag" ]; then
         # shellcheck disable=SC2086
         curl -s $CURL_OPTS -u "$CRED" -H "If-None-Match: $etag" \
-            -o /dev/null -w 'HTTP %{http_code}\n' "$URL/v1/blocklist"
+            -o /dev/null -w 'HTTP %{http_code}\n' "$URL/blocklist/v1/feed"
     else
         # -D- so the ETag, which the next poll needs, is visible.
         # shellcheck disable=SC2086
-        curl -s $CURL_OPTS -u "$CRED" -D- "$URL/v1/blocklist"
+        curl -s $CURL_OPTS -u "$CRED" -D- "$URL/blocklist/v1/feed"
     fi
     ;;
 
@@ -96,42 +110,11 @@ allowlist-request)
     # shellcheck disable=SC2086
     curl -s $CURL_OPTS -u "$CRED" -X POST -H 'Content-Type: application/json' \
         -d "{\"cidr\":\"$cidr\",\"reason\":\"$reason\"}" \
-        -w '\nHTTP %{http_code}\n' "$URL/v1/allowlist-requests"
-    ;;
-
-admin)
-    # admin <method> <path> [json]   — the allowlist admin API.
-    #   INSIGHTS_ADMIN_URL    base URL          (default http://127.0.0.1:9597)
-    #   INSIGHTS_ADMIN_KEY    ADMIN_API_KEY     (required)
-    #   INSIGHTS_ADMIN_ACTOR  X-Admin-Actor     (default $USER; required on writes)
-    #
-    # e.g. admin GET  /admin/v1/allowlist/requests
-    #      admin POST /admin/v1/allowlist '{"cidr":"203.0.113.0/24","reason":"partner"}'
-    admin_url=${INSIGHTS_ADMIN_URL:-http://127.0.0.1:9597}
-    admin_key=${INSIGHTS_ADMIN_KEY:-}
-    actor=${INSIGHTS_ADMIN_ACTOR:-${USER:-unknown}}
-    if [ -z "$admin_key" ]; then
-        echo "set INSIGHTS_ADMIN_KEY to the server's ADMIN_API_KEY" >&2
-        exit 2
-    fi
-    method=${1:?usage: admin <method> <path> [json]}
-    path=${2:?usage: admin <method> <path> [json]}
-    body=${3:-}
-    if [ -n "$body" ]; then
-        # shellcheck disable=SC2086
-        curl -s $CURL_OPTS -X "$method" \
-            -H "Authorization: Bearer $admin_key" -H "X-Admin-Actor: $actor" \
-            -H 'Content-Type: application/json' -d "$body" "$admin_url$path" | pretty
-    else
-        # shellcheck disable=SC2086
-        curl -s $CURL_OPTS -X "$method" \
-            -H "Authorization: Bearer $admin_key" -H "X-Admin-Actor: $actor" \
-            "$admin_url$path" | pretty
-    fi
+        -w '\nHTTP %{http_code}\n' "$URL/blocklist/v1/allowlist-requests"
     ;;
 
 raw)
-    # raw <path> [curl args...]   — anything else, e.g. raw '/v1/findings?since=0'
+    # raw <path> [curl args...]   — anything else, e.g. raw '/logs/v1/findings?since=0'
     need_cred
     path=${1:?usage: raw <path>}
     shift
@@ -140,11 +123,14 @@ raw)
     ;;
 
 *)
-    sed -n '7,13p' "$0"
+    sed -n '6,21p' "$0"
     echo
     echo "commands: health | findings [since] | open | post <bundle.json>"
-    echo "          threat-events <decisions.json> | blocklist [etag]"
-    echo "          allowlist-request <cidr> [reason] | admin <method> <path> [json] | raw <path>"
+    echo "          events <decisions.json> | feed [etag]"
+    echo "          allowlist-request <cidr> [reason] | raw <path>"
+    echo
+    echo "There is no admin API any more -- allowlist writes go through the"
+    echo "blocklist dashboard's own write routes (see README.md)."
     exit 2
     ;;
 esac

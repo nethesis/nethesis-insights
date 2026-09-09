@@ -17,20 +17,26 @@ design document).
 
 | method | path | who |
 |---|---|---|
-| `POST` | `/v1/threat-events` | the edge reports ban decisions |
-| `GET`  | `/v1/blocklist` | the edge fetches the consensus feed |
+| `POST` | `/blocklist/v1/events` | the edge reports ban decisions |
+| `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed |
+
+`threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
+behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
+the request reaches it, so these two paths are what a client sends and
+`/v1/events`/`/v1/feed` are what the server's own route table says.
 
 ## Authentication
 
-HTTP Basic, `system_id:auth_token`, the same credential and the same forward-auth
-validator as `/v1/bundles`. There is no separate key, no API token and no
-per-tier feed: every subscriber fetches the same global list.
+HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`.
+Traefik calls `authd`, a shared forward-auth cache, before either request
+reaches a pipeline; there is no separate key, no API token and no per-tier
+feed — every subscriber fetches the same global list.
 
 Both endpoints are fail-closed on authentication: `401` on a rejected
 credential, `503` when the validator itself is unreachable. A `503` is
 retryable; a `401` is not.
 
-## `POST /v1/threat-events`
+## `POST /blocklist/v1/events`
 
 Request body, `Content-Type: application/json`, optionally
 `Content-Encoding: gzip`, at most 8 MiB:
@@ -130,8 +136,12 @@ Applied in this order; each drop increments exactly one counter.
    lands here) and must be public unicast (`dropped_private_ip`). Rejected:
    RFC1918, loopback, unspecified, CGNAT `100.64.0.0/10`, link-local including
    IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, benchmark
-   `198.18.0.0/15`, and the address the server saw the report arrive from. The
-   documentation ranges are *not* rejected.
+   `198.18.0.0/15`, and the reporter's own observed source address. That
+   address is the `X-Forwarded-For` value Traefik sets, trusted only because
+   the request reached `threatd` from Traefik's own address
+   (`TRUSTED_PROXY_CIDRS`) — never the bare TCP peer address, which behind a
+   proxy is always the proxy's own. The documentation ranges are *not*
+   rejected.
 6. **`created_at`** must parse as RFC3339 (`dropped_time`). A value more than
    24 h in the future is clamped to the server clock rather than dropped.
 
@@ -157,7 +167,7 @@ characters, and caps it at 128 runes before storage. It is never rewritten
 otherwise, and it is what `threat_blocklist.scenarios` and the daily rollup are
 grouped by.
 
-## `GET /v1/blocklist`
+## `GET /blocklist/v1/feed`
 
 Plain text, one address per line, two comment lines of header:
 

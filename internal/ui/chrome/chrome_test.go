@@ -44,7 +44,7 @@ func max(a, b int) int {
 }
 
 // TestNoJavaScript is the byte-level half of the zero-JS guard for the
-// assets chrome itself owns: layout.html and static/. internal/ui's own
+// assets chrome itself owns: layout.html and static/. internal/ui/logs's own
 // TestNoJavaScript covers its remaining page templates the same way and
 // exercises these assets again through the served HTTP paths, but a
 // rendered-output check cannot see an unrendered branch -- layout.html's

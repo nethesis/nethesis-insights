@@ -25,7 +25,7 @@ import (
 
 // Store is the slice of threatstore.Store this package needs. Declared here,
 // narrow, so the handlers are testable with a small fake instead of the
-// whole store -- the same idiom as internal/ui's Reader/Writer.
+// whole store -- the same idiom as internal/ui/threat's Reader/Writer.
 // *threatstore.Store satisfies it.
 type Store interface {
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)

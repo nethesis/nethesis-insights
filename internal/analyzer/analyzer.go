@@ -29,7 +29,7 @@ var ErrPermanent = errors.New("permanent failure")
 // that records templates, baselines, findings and the analyses ledger, plus
 // the prior-state reads the gate depends on. Declared here, narrow, rather
 // than importing logsstore.Store itself -- the same idiom as
-// internal/budget's Reader and internal/ui's Reader. *logsstore.Store
+// internal/budget's Reader and internal/ui/logs's Reader. *logsstore.Store
 // satisfies it.
 type Store interface {
 	UpsertSystem(ctx context.Context, s logsstore.System) error

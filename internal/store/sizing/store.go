@@ -382,9 +382,9 @@ func (r *SizingNodeDayRow) ScoreInput() model.SanitizedSizingNode {
 }
 
 // SetScore copies a derived pressure onto the row. It exists so the ingest
-// path (internal/api) and the recompute path (internal/baseline) share one
-// mapping: two copies of it would eventually store different columns for the
-// same score.
+// path (internal/api/sizing) and the recompute path (internal/baseline) share
+// one mapping: two copies of it would eventually store different columns for
+// the same score.
 func (r *SizingNodeDayRow) SetScore(s SizingScore) {
 	r.Pressure = s.Pressure
 	r.PMem, r.PCPU, r.PIO, r.PDisk = s.Mem, s.CPU, s.IO, s.Disk
