@@ -3,6 +3,25 @@
 
 # Deployed state: `rl1` dev machine, captured 2026-09-01
 
+> **Superseded by the pipeline split.** This snapshot describes the single
+> `insights.container` deployment of the pre-split monolith — one binary, one
+> image, one published port pair. That deployment model no longer exists in
+> this repository: the pipeline split (`docs/plans/2026-09-09-pipeline-split.md`)
+> produces four binaries (`authd`, `insightsd`, `threatd`, `sizingd`) sharing one
+> podman pod behind Traefik, defined in `deploy/quadlet/` and `deploy/traefik/`
+> and walked through end to end in
+> `docs/runbooks/2026-09-09-insights-test-deploy.md`. Use those for any new or
+> rebuilt deployment.
+>
+> This file is kept, unrewritten below this notice, because its measurements
+> are cited elsewhere by section name (for instance
+> `docs/plans/2026-09-02-fleet-sizing-server.md` cites this file's "Deviation
+> on noise" section as the precedent for fixing the same "max over 24h" failure
+> in fleet sizing) and because it is the only record of the numbers that
+> motivated the gate fix. It was not re-captured against the split deployment:
+> doing so would mean deploying to a live host, which is out of scope for the
+> task that added this notice.
+
 Snapshot of what is **actually** running on
 `root@rl1.leader.default.gs.nethserver.net`, taken read-only on 2026-09-01 while
 measuring the log pipeline's LLM spend. This is a scratch reference, not a source of truth —

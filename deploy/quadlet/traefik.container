@@ -1,0 +1,30 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Traefik reverse proxy
+After=authd.service insightsd.service threatd.service sizingd.service
+
+[Container]
+Image=docker.io/library/traefik:v3.3
+ContainerName=traefik
+# In the pod, not on the host network: its connections to the four backends
+# stay inside the shared namespace, which is what makes their RemoteAddr a
+# real 127.0.0.1. Publishing is the pod's job (insights.pod), not this
+# unit's -- this is the only unit that reaches the other four's ports, and it
+# has none of its own to publish.
+Pod=insights.pod
+# :z relabels the bind-mounted host directory for SELinux (Enforcing on the
+# target) -- without it Traefik gets EACCES on a config it can perfectly well
+# read as root.
+Volume=/etc/traefik:/etc/traefik:z
+Volume=traefik-acme.volume:/acme
+Exec=--configFile=/etc/traefik/traefik.yaml
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

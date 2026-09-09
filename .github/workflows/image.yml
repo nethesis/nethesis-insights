@@ -22,6 +22,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        service: [authd, insightsd, threatd, sizingd]
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +45,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -51,7 +54,7 @@ jobs:
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
-            org.opencontainers.image.title=nethesis-insights
+            org.opencontainers.image.title=${{ matrix.service }}
             org.opencontainers.image.description=Central log-anomaly analysis server for NethServer fleets
             org.opencontainers.image.licenses=GPL-3.0-or-later
 
@@ -60,6 +63,7 @@ jobs:
         with:
           context: .
           file: ./Containerfile
+          build-args: SERVICE=${{ matrix.service }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

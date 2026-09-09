@@ -1,0 +1,42 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Threat Shield pipeline
+After=authd.service
+
+[Container]
+Image=ghcr.io/nethesis/nethesis-insights-threatd:latest
+ContainerName=threatd
+# No PublishPort: this container has no port of its own. It shares the pod's
+# network namespace, so Traefik reaches it over real loopback and it sees
+# RemoteAddr == 127.0.0.1 -- which is what makes the default
+# TRUSTED_PROXY_CIDRS correct, and what the published-port arrangement could
+# not deliver (a rootful PublishPort DNAT is masqueraded on the reply path, so
+# the container would see the bridge gateway instead).
+#
+# One namespace means one port space: 9605/9606 are threatd's alone and a
+# collision is a startup failure, not a subtle misroute.
+Pod=insights.pod
+Volume=insights-threat.volume:/var/lib/threat
+Environment=LISTEN_ADDR=127.0.0.1:9605
+Environment=UI_LISTEN_ADDR=127.0.0.1:9606
+Environment=UI_BASE_PATH=/blocklist
+Environment=DB_PATH=/var/lib/threat/threat.db
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
+EnvironmentFile=/etc/insights/threatd.env
+# Each unit's OWN port. In a shared namespace a healthcheck pointed at the
+# wrong port succeeds against a sibling container and reports its health as
+# this one's -- a failure that looks like everything is fine.
+HealthCmd=wget -qO- http://127.0.0.1:9605/healthz || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

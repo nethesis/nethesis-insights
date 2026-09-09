@@ -1,0 +1,20 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=nethesis-insights
+
+[Pod]
+PodName=insights
+# The only ports that exist outside this host. Every backend listens on
+# loopback inside the shared namespace and has no published port at all, which
+# is what keeps the three unauthenticated operator UIs reachable only through
+# Traefik's BasicAuth -- the target machine has no firewall of any kind, so
+# "not published" is worth a great deal more than "bound to 127.0.0.1".
+PublishPort=80:80
+PublishPort=443:443
+
+[Install]
+WantedBy=multi-user.target

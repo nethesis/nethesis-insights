@@ -1,0 +1,101 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Rendered to /etc/traefik/dynamic.yaml at deploy time:
+#   set -a; . /etc/insights/deploy.env; set +a
+#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < dynamic.yaml.tmpl > /etc/traefik/dynamic.yaml
+# Naming the variables in envsubst's argument matters: unquoted, it would
+# also expand Traefik's own ${...} syntax. INSIGHTS_HOST drives the six
+# Host() matchers below and the ACME certificate domain, and nothing else --
+# if a second consumer appears, it reads the same variable rather than
+# repeating the literal.
+#
+# A wrong or unset INSIGHTS_HOST fails recognisably: Traefik matches no
+# router and every request 404s, which looks nothing like a misconfigured
+# backend.
+http:
+  middlewares:
+    system-auth:
+      forwardAuth:
+        address: "http://127.0.0.1:9590/auth"
+    operator-auth:
+      basicAuth:
+        usersFile: /etc/traefik/operators.htpasswd
+        # false, deliberately: the app validates ADMIN_API_KEY itself and
+        # needs the header. Setting this true breaks every UI write with a
+        # 401 while the proxy still lets the request through.
+        removeHeader: false
+    strip-logs:
+      stripPrefix:
+        prefixes: ["/logs"]
+    strip-blocklist:
+      stripPrefix:
+        prefixes: ["/blocklist"]
+    strip-sizing:
+      stripPrefix:
+        prefixes: ["/sizing"]
+
+  routers:
+    # Priority is explicit on all six: /blocklist/v1/ and /blocklist/ share a
+    # prefix, and getting the order backwards would put operator BasicAuth on
+    # the ingest path, or the fleet's system credentials on the operator UI.
+    logs-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs/v1/`)"
+      priority: 200
+      middlewares: [system-auth, strip-logs]
+      service: logs-api
+    logs-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
+      priority: 100
+      middlewares: [operator-auth, strip-logs]
+      service: logs-ui
+    blocklist-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
+      priority: 200
+      middlewares: [system-auth, strip-blocklist]
+      service: blocklist-api
+    blocklist-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
+      priority: 100
+      middlewares: [operator-auth, strip-blocklist]
+      service: blocklist-ui
+    sizing-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
+      priority: 200
+      middlewares: [system-auth, strip-sizing]
+      service: sizing-api
+    sizing-ui:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"
+      priority: 100
+      middlewares: [operator-auth, strip-sizing]
+      service: sizing-ui
+
+  services:
+    logs-api:
+      loadBalancer:
+        # passHostHeader defaults to true and must stay true: the UI's
+        # cross-site write check compares Origin to r.Host, and a rewritten
+        # Host makes every write a 403.
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9595"}]
+    logs-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9596"}]
+    blocklist-api:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9605"}]
+    blocklist-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9606"}]
+    sizing-api:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9615"}]
+    sizing-ui:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9616"}]
