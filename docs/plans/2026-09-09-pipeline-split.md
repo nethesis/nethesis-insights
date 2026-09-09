@@ -150,15 +150,31 @@ Only threatd has write routes: `/blocklist/allowlist`, `/blocklist/allowlist/del
 
 ## Ports and environment
 
-Each pipeline publishes to loopback; Traefik runs with host networking, so every
-`RemoteAddr` a pipeline sees is `127.0.0.1`.
+**All five containers share one podman pod, and therefore one network namespace.**
+Traefik reaches every backend over real loopback, each pipeline genuinely sees
+`RemoteAddr == 127.0.0.1`, and the pod publishes 80/443 and nothing else.
+
+That last clause is the security property: the three operator UIs are unauthenticated
+and fleet-wide, and in a pod they are not merely bound to loopback by convention — they
+have no published port at all, so the only way to reach one is through Traefik and its
+BasicAuth. The target machine has no firewall of any kind, which makes "unreachable"
+worth considerably more than "bound to 127.0.0.1".
+
+A shared namespace means one port space, so **every listener needs a distinct port** and
+a collision is a startup failure rather than a subtle misroute:
 
 | Service | API | UI | Volume |
 |---|---|---|---|
-| authd | 127.0.0.1:9590 | — | — |
-| insightsd | 127.0.0.1:9595 | 127.0.0.1:9596 | `insights-logs` |
-| threatd | 127.0.0.1:9605 | 127.0.0.1:9606 | `insights-threat` |
-| sizingd | 127.0.0.1:9615 | 127.0.0.1:9616 | `insights-sizing` |
+| pod `insights` | :80, :443 published | — | — |
+| traefik | 80, 443 | — | — |
+| authd | 9590 | — | — |
+| insightsd | 9595 | 9596 | `insights-logs` |
+| threatd | 9605 | 9606 | `insights-threat` |
+| sizingd | 9615 | 9616 | `insights-sizing` |
+
+Every backend binds `127.0.0.1:<port>` explicitly rather than `:<port>`. Inside a shared
+namespace the two are nearly equivalent, but the explicit form states the intent and
+survives someone later moving a container out of the pod.
 
 **New variables**
 
@@ -167,11 +183,12 @@ Each pipeline publishes to loopback; Traefik runs with host networking, so every
   consumed only when rendering Traefik's dynamic configuration, which is what keeps the
   application host-agnostic.
 - `TRUSTED_PROXY_CIDRS` — comma-separated, default `127.0.0.0/8`. All four binaries.
-  **The default alone is wrong for a rootful-podman deployment**: a `PublishPort` DNAT is
-  masqueraded on the reply path, so the container sees the bridge gateway rather than the
-  loopback address. Pin the subnet in `insights.network` and name the gateway here
-  (`127.0.0.0/8,10.89.0.1/32`). Verify against a real request before believing either value —
-  see the runbook.
+  The default is correct **because** the containers share a pod: Traefik's connection to a
+  backend never leaves the namespace, so no DNAT and no masquerade occur and the source really
+  is `127.0.0.1`. Published-port plumbing was the thing that made this false — under rootful
+  podman a `PublishPort` DNAT is masqueraded on the reply path and the container sees the bridge
+  gateway instead. Verify against a real request anyway before believing it; the failure mode is
+  a 401 on a valid credential, which reads as an auth bug rather than a networking one.
 - `UI_BASE_PATH` — e.g. `/blocklist`, default empty. The three pipelines.
 - `AUTH_LISTEN_ADDR` — default `:9590`. authd only.
 
@@ -1807,7 +1824,7 @@ that contradict this task as originally written — are in
 
 **Files:**
 - Modify: `Containerfile`
-- Create: `deploy/quadlet/{insights.network,authd.container,insightsd.container,threatd.container,sizingd.container,traefik.container}`
+- Create: `deploy/quadlet/{insights.pod,authd.container,insightsd.container,threatd.container,sizingd.container,traefik.container}`
 - Create: `deploy/traefik/{traefik.yaml,dynamic.yaml.tmpl}`
 - Modify: `.github/workflows/image.yml`
 - Modify: `deploy.md`
@@ -1828,7 +1845,32 @@ The runtime stage copies `/out/service` to `/usr/local/bin/service` and drops th
 now belong to each quadlet, which knows its own port and path. Build with
 `podman build --build-arg SERVICE=threatd -t insights-threatd .`.
 
-- [ ] **Step 2: Write the quadlets**
+- [ ] **Step 2: Write the pod and the quadlets**
+
+`deploy/quadlet/insights.pod` is the only unit that publishes anything:
+
+```ini
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=nethesis-insights
+
+[Pod]
+PodName=insights
+# The only ports that exist outside this host. Every backend listens on
+# loopback inside the shared namespace and has no published port at all, which
+# is what keeps the three unauthenticated operator UIs reachable only through
+# Traefik's BasicAuth -- the target machine has no firewall of any kind, so
+# "not published" is worth a great deal more than "bound to 127.0.0.1".
+PublishPort=80:80
+PublishPort=443:443
+
+[Install]
+WantedBy=multi-user.target
+```
 
 `deploy/quadlet/threatd.container`, the others by analogy:
 
@@ -1845,26 +1887,24 @@ After=authd.service
 [Container]
 Image=localhost/insights-threatd:latest
 ContainerName=threatd
-# Published to loopback only, so nothing off the host reaches this container
-# directly -- which matters because the credential on a /v1 request is
-# validated by the proxy, not here.
+# No PublishPort: this container has no port of its own. It shares the pod's
+# network namespace, so Traefik reaches it over real loopback and it sees
+# RemoteAddr == 127.0.0.1 -- which is what makes the default
+# TRUSTED_PROXY_CIDRS correct, and what the published-port arrangement could
+# not deliver (a rootful PublishPort DNAT is masqueraded on the reply path, so
+# the container would see the bridge gateway instead).
 #
-# The address this process actually SEES is not 127.0.0.1. Under rootful
-# podman a PublishPort DNAT is masqueraded on the reply path, so RemoteAddr is
-# the bridge gateway. TRUSTED_PROXY_CIDRS must therefore name that gateway,
-# and insights.network must pin the subnet so the address is stable across
-# recreation. Get this wrong and every /v1 request 401s with a valid
-# credential, which reads as an auth bug rather than a networking one.
-PublishPort=127.0.0.1:9605:9595
-PublishPort=127.0.0.1:9606:9596
+# One namespace means one port space: 9605/9606 are threatd's alone and a
+# collision is a startup failure, not a subtle misroute.
+Pod=insights.pod
 Volume=insights-threat.volume:/var/lib/threat
-Environment=LISTEN_ADDR=:9595
-Environment=UI_LISTEN_ADDR=:9596
+Environment=LISTEN_ADDR=127.0.0.1:9605
+Environment=UI_LISTEN_ADDR=127.0.0.1:9606
 Environment=UI_BASE_PATH=/blocklist
 Environment=DB_PATH=/var/lib/threat/threat.db
 Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32
 EnvironmentFile=/etc/insights/threatd.env
-HealthCmd=wget -qO- http://127.0.0.1:9595/healthz || exit 1
+HealthCmd=wget -qO- http://127.0.0.1:9605/healthz || exit 1
 HealthInterval=30s
 HealthRetries=3
 HealthStartPeriod=5s
@@ -2018,11 +2058,20 @@ push.
 # (subuid/subgid map an unprivileged account only), and the quadlets live in
 # /etc/containers/systemd.
 systemctl daemon-reload
+# Starting a member starts the pod; insights-pod.service is the generated unit.
 systemctl start authd insightsd threatd sizingd traefik
+podman pod ps
 
-# Before anything else, confirm what address the pipelines actually see. If
-# this is not inside TRUSTED_PROXY_CIDRS, every /v1 request 401s.
+# Before anything else, confirm what address the pipelines actually see. It
+# must be 127.0.0.1; anything else means the container is not really sharing
+# the pod's namespace, and every /v1 request will 401 on a valid credential.
 journalctl -u threatd -n 50 | grep remote_addr | head
+
+# And confirm the operator UIs are not published. Both must fail to connect --
+# if either answers, the pod is publishing more than 80/443 and three
+# unauthenticated fleet-wide dashboards are on the internet.
+curl -sS --max-time 3 http://127.0.0.1:9606/ ; echo "exit=$?"
+curl -sS --max-time 3 "http://$(hostname -I | awk '{print $1}'):9606/" ; echo "exit=$?"
 
 curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/v1/feed
 # 401 without a credential
