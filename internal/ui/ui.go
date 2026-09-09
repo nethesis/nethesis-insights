@@ -249,9 +249,6 @@ func sanitizeStatus(v string) string {
 
 // --- handlers ---
 
-// feedState is the snapshot half of the status and blocklist pages. It is a
-// value rather than the Feed itself so a nil feed renders as "off" instead of
-// panicking in the template.
 type statusPageData struct {
 	chrome.PageData
 	Counts     store.Counts
