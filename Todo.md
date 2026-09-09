@@ -1,0 +1,119 @@
+# Todo
+
+Where the pipeline split leaves things, 2026-09-09.
+
+The refactor is merged (`main` at `8bc5c64`) and running on
+`insights.gs.nethserver.net`. What follows is everything still open, in the
+order it is worth doing.
+
+## 1. Point rl1 at the server
+
+Blocked on two things I could not do from here: SSH to `rl1` and to
+`insights.gs.nethserver.net` is denied by the permission classifier, and no
+NethServer subscription credential was available.
+
+### Threat Shield — ready, needs a release
+
+`ns8-crowdsec` commit `fcda90c` moves all three calls to the prefixed paths
+(`/blocklist/v1/events`, `/blocklist/v1/feed`,
+`/blocklist/v1/allowlist-requests`). `insights_url` stays the server root.
+
+- [ ] Release `ns8-crowdsec` and update `crowdsec1` on rl1 — the module runs a
+      released image, so the commit alone changes nothing on the node.
+- [ ] Set `INSIGHTS_SERVER_URL=https://insights.gs.nethserver.net` (default is
+      `https://insights.nethesis.it`, `threat_shield.py:64`).
+- [ ] Confirm a real ban reaches the server: it should appear on
+      `/blocklist/threat-events` in the operator UI.
+
+### Logs — no code change needed
+
+`ns8-loki`'s collector builds `url.rstrip("/") + "/v1/bundles"`, so a base URL
+carrying the prefix is enough.
+
+- [ ] `api-cli run module/loki1/set-insights --data '{"active":true,"base_url":"https://insights.gs.nethserver.net/logs"}'`
+- [ ] Confirm a bundle lands: `/logs/systems` in the operator UI.
+
+Note the asymmetry — crowdsec takes the server root and appends the full
+documented path, loki takes a base that already includes `/logs`. Both work.
+Worth making them agree eventually; not worth a release on its own.
+
+### Sizing — cannot be configured
+
+`ns8-core` has no reporter. `cluster/bin/send-sizing-report` does not exist;
+the contract (`docs/specs/2026-09-02-sizing-ingest-contract.md`) is written and
+the server side is live, but nothing sends. `sizingd` will stay idle until
+someone writes it.
+
+- [ ] Write the `ns8-core` cluster reporter (leader-only, three sends a day,
+      byte-identical restatements of a complete UTC day).
+
+## 2. The one test never proven on hardware
+
+Everything else in the runbook passed. The `503`-before-the-first-consensus-pass
+branch was never observed live, because `threatd` had already completed a pass
+by the time the feed was called — it correctly returned a non-blank document
+with `entries: 0`. Covered by its unit test only.
+
+- [ ] Catch it on a genuinely cold start, if the volume is ever rebuilt.
+
+The credential-dependent tests were closed against a local reproduction using
+the real images, the real rendered Traefik config and the real pod topology,
+with the client on `203.0.113.0/24` so the reporter-own-address rule could
+fire. See `.superpowers/sdd/2026-09-09-pipeline-split/deploy-run-report.md`.
+Re-running them against the live host with a real credential is still worth
+doing once, since that path exercises `my.nethesis.it` rather than a stub.
+
+## 3. Follow-ups the final review triaged
+
+Three issues, deliberately not 28. Full list with file:line in
+`.superpowers/sdd/2026-09-09-pipeline-split/deferred-minors.md`.
+
+- [ ] **Platform test coverage.** `ParseTrustedProxies`' error branch and
+      bare-address promotion; `logging.go`/`health.go` untested, including the
+      "the logger never touches Authorization" constraint, which now has two
+      implementations and no coverage; `sqlitex`'s mutex (deleting `Lock`/`Unlock`
+      leaves the suite green); authd's `default` branch, its deliberate absence
+      of `WWW-Authenticate`, and the pepper fallback; `newUIServer("") == nil`
+      for threatd and sizingd, which `cmd/insightsd/main_test.go` calls "a
+      security property, not a convenience".
+- [ ] **Doc-comment sweep.** Stale `internal/ui` / `internal/store` references at
+      `analyzer.go:32`, `api/threat/api.go:28`, `api/sizing/api.go:30`,
+      `store/sizing/store.go:385`, `ui/chrome/chrome_test.go:47`,
+      `store/threat/ui.go:10-12`; `queue.go:54-57` claiming immutability where
+      the real property is call ordering.
+- [ ] **Deploy tooling.** GHA cache unscoped across the matrix (four jobs
+      overwrite each other's `mode=max` export); `After=` without `Wants=` on the
+      four units, so if authd fails at boot every `/v1` request 500s on a valid
+      credential; `render.sh` writing straight into the directory Traefik
+      watches; the duplicated `runPassLoop`/env helpers in `cmd/threatd` and
+      `cmd/sizingd`.
+
+## 4. Known operational sharp edges
+
+- [ ] **authd down is indistinguishable from a backend fault.** Verified on the
+      box: requests return a Traefik-generated `500`. `Wants=authd.service` on
+      the three pipelines would make systemd say so.
+- [ ] **The authd negative cache is unbounded.** `platform/auth/cache.go:47`
+      never evicts, and stale entries are kept deliberately for the outage
+      fallback — so every distinct wrong credential is a permanent entry. The
+      Traefik rate limit added in `f7eb44c` damps the arrival rate; a cap or LRU
+      is the durable fix. The box has 1.7 GiB and no swap.
+- [ ] **Cap journald.** Five containers, Traefik `accessLog: {}`, one
+      `slog.Info("request")` per request per binary, and `LOG_LEVEL=debug` set
+      for the test deploy. Nothing sets `SystemMaxUse=`.
+- [ ] **Lower `LOG_LEVEL` for production.** It is `debug` on all four units so
+      that the untrusted-proxy-versus-no-credential distinction is visible while
+      the deployment is new.
+- [ ] **Back up the volumes.** Three fresh databases means nothing to lose now
+      and everything to lose later.
+
+## 5. Not started, from the original plan
+
+- [ ] Task 1's tooling: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`,
+      `scripts/check-license-headers.sh` — which must learn the two new comment
+      forms and the vendored-file exemption under
+      `internal/ui/chrome/static/`.
+- [ ] `golang-migrate` in place of `CREATE TABLE IF NOT EXISTS`, now three times
+      over.
+- [ ] Distributed locking: both the blocklist consensus pass and the sizing
+      cohort pass are single-instance only.
