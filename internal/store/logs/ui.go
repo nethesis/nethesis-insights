@@ -7,7 +7,11 @@
 //
 // None of these take s.db's write mutex: that mutex serializes writers only,
 // and the existing read paths (KnownTemplates, Baselines, queryFindings)
-// already follow that precedent.
+// already follow that precedent. Every unbounded-by-default list here is
+// bounded (see clampLimit; ListBaselines is the one deliberate exception,
+// documented at its own definition), and none of them ever returns a raw
+// sample -- this is the read-side half of the rule that samples live only in
+// the bundle in flight and are never persisted.
 package logs
 
 import (
