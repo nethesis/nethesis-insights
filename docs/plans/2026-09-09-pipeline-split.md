@@ -9,7 +9,7 @@ independently deployed services behind one Traefik proxy, each owning its own SQ
 file, with authentication moved to a shared caching forward-auth service.
 
 **Architecture:** One repository, one `go.mod`, four binaries — `authd`, `insightsd`,
-`threatd`, `sizingd`. Traefik terminates `insights.nethesis.it`, strips a per-pipeline
+`threatd`, `sizingd`. Traefik terminates a deploy-configured host, strips a per-pipeline
 path prefix, calls `authd` as a `forwardAuth` middleware for the client APIs, and
 BasicAuths the operator UIs. Shared code lives in `internal/platform`
 (`auth`, `httpx`, `sqlitex`) and `internal/ui/chrome`; everything else is grouped under
@@ -101,8 +101,16 @@ be re-litigated during execution.
 
 ## URL map
 
-Traefik serves one host, `insights.nethesis.it`, and strips the prefix before proxying,
-so every handler registers the unprefixed path.
+Traefik serves one host and strips the prefix before proxying, so every handler
+registers the unprefixed path.
+
+**The host is a deploy-time input, never a committed constant.** It is set once as
+`INSIGHTS_HOST` in `/etc/insights/deploy.env`, which is not in this repository:
+`insights.gs.nethserver.net` on the dev machine, `insights.nethesis.it` in production.
+The same artifacts deploy to both with nothing changed but that file. Nothing in the
+application is host-dependent — the Go code never learns its own hostname, every link
+`chrome` emits is path-relative, and the UI's cross-site check compares `Origin` against
+`r.Host` as the request arrives — so `INSIGHTS_HOST` reaches Traefik only.
 
 | Public path | Middleware | Backend | Registered route |
 |---|---|---|---|
@@ -154,7 +162,16 @@ Each pipeline publishes to loopback; Traefik runs with host networking, so every
 
 **New variables**
 
+- `INSIGHTS_HOST` — the served hostname, e.g. `insights.gs.nethserver.net` or
+  `insights.nethesis.it`. **Read by no binary.** It lives in `/etc/insights/deploy.env` and is
+  consumed only when rendering Traefik's dynamic configuration, which is what keeps the
+  application host-agnostic.
 - `TRUSTED_PROXY_CIDRS` — comma-separated, default `127.0.0.0/8`. All four binaries.
+  **The default alone is wrong for a rootful-podman deployment**: a `PublishPort` DNAT is
+  masqueraded on the reply path, so the container sees the bridge gateway rather than the
+  loopback address. Pin the subnet in `insights.network` and name the gateway here
+  (`127.0.0.0/8,10.89.0.1/32`). Verify against a real request before believing either value —
+  see the runbook.
 - `UI_BASE_PATH` — e.g. `/blocklist`, default empty. The three pipelines.
 - `AUTH_LISTEN_ADDR` — default `:9590`. authd only.
 
@@ -1784,10 +1801,14 @@ git commit -m "docs(api): document the prefixed per-service paths"
 
 ### Task 9: Container image, quadlets and Traefik
 
+The target machine was surveyed read-only on 2026-09-09 and the findings — including two
+that contradict this task as originally written — are in
+`docs/runbooks/2026-09-09-insights-test-deploy.md`. Read it before starting.
+
 **Files:**
 - Modify: `Containerfile`
 - Create: `deploy/quadlet/{insights.network,authd.container,insightsd.container,threatd.container,sizingd.container,traefik.container}`
-- Create: `deploy/traefik/{traefik.yaml,dynamic.yaml}`
+- Create: `deploy/traefik/{traefik.yaml,dynamic.yaml.tmpl}`
 - Modify: `.github/workflows/image.yml`
 - Modify: `deploy.md`
 
@@ -1798,6 +1819,9 @@ ARG SERVICE=insightsd
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w" -o /out/service ./cmd/${SERVICE}
 ```
+
+**Build in CI, not on the node.** The target has 1.7 GiB of RAM and no swap, so a Go
+build there is an OOM risk; the node pulls finished images.
 
 The runtime stage copies `/out/service` to `/usr/local/bin/service` and drops the
 `ENV LISTEN_ADDR`/`DB_PATH` defaults and the fixed `EXPOSE`/`VOLUME`/`HEALTHCHECK` — those
@@ -1821,10 +1845,16 @@ After=authd.service
 [Container]
 Image=localhost/insights-threatd:latest
 ContainerName=threatd
-# Loopback only: Traefik runs with host networking, so every RemoteAddr this
-# process sees is 127.0.0.1, which is what TRUSTED_PROXY_CIDRS below trusts.
-# Nothing off the host can reach the container directly, which matters
-# because the credential on a /v1 request is validated by the proxy, not here.
+# Published to loopback only, so nothing off the host reaches this container
+# directly -- which matters because the credential on a /v1 request is
+# validated by the proxy, not here.
+#
+# The address this process actually SEES is not 127.0.0.1. Under rootful
+# podman a PublishPort DNAT is masqueraded on the reply path, so RemoteAddr is
+# the bridge gateway. TRUSTED_PROXY_CIDRS must therefore name that gateway,
+# and insights.network must pin the subnet so the address is stable across
+# recreation. Get this wrong and every /v1 request 401s with a valid
+# credential, which reads as an auth bug rather than a networking one.
 PublishPort=127.0.0.1:9605:9595
 PublishPort=127.0.0.1:9606:9596
 Volume=insights-threat.volume:/var/lib/threat
@@ -1832,7 +1862,7 @@ Environment=LISTEN_ADDR=:9595
 Environment=UI_LISTEN_ADDR=:9596
 Environment=UI_BASE_PATH=/blocklist
 Environment=DB_PATH=/var/lib/threat/threat.db
-Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32
 EnvironmentFile=/etc/insights/threatd.env
 HealthCmd=wget -qO- http://127.0.0.1:9595/healthz || exit 1
 HealthInterval=30s
@@ -1849,7 +1879,23 @@ WantedBy=multi-user.target
 `ADMIN_API_KEY` lives in `/etc/insights/threatd.env`, mode 0600, never in the unit.
 Likewise `LLM_API_KEY` for insightsd and `AUTH_PEPPER` for authd.
 
-- [ ] **Step 3: Write the Traefik dynamic configuration**
+- [ ] **Step 3: Write the Traefik dynamic configuration as a template**
+
+The committed artifact is `dynamic.yaml.tmpl`; the rendered `dynamic.yaml` is produced at
+deploy time and is reproducible from `INSIGHTS_HOST` alone:
+
+```bash
+set -a; . /etc/insights/deploy.env; set +a
+envsubst '$INSIGHTS_HOST' < deploy/traefik/dynamic.yaml.tmpl > /etc/traefik/dynamic.yaml
+```
+
+Naming the variable in `envsubst`'s argument matters: unquoted, it would also expand
+Traefik's own `${…}` syntax. `INSIGHTS_HOST` drives the six `Host()` matchers and the ACME
+certificate domain, and nothing else — if a second consumer appears, it reads the same
+variable rather than repeating the literal.
+
+A wrong or unset `INSIGHTS_HOST` fails recognisably: Traefik matches no router and every
+request 404s, which looks nothing like a misconfigured backend.
 
 ```yaml
 #
@@ -1883,32 +1929,32 @@ http:
     # prefix, and getting the order backwards would put operator BasicAuth on
     # the ingest path, or the fleet's system credentials on the operator UI.
     logs-api:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/logs/v1/`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs/v1/`)"
       priority: 200
       middlewares: [system-auth, strip-logs]
       service: logs-api
     logs-ui:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/logs`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
       priority: 100
       middlewares: [operator-auth, strip-logs]
       service: logs-ui
     blocklist-api:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/blocklist/v1/`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
       priority: 200
       middlewares: [system-auth, strip-blocklist]
       service: blocklist-api
     blocklist-ui:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/blocklist`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
       priority: 100
       middlewares: [operator-auth, strip-blocklist]
       service: blocklist-ui
     sizing-api:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/sizing/v1/`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
       priority: 200
       middlewares: [system-auth, strip-sizing]
       service: sizing-api
     sizing-ui:
-      rule: "Host(`insights.nethesis.it`) && PathPrefix(`/sizing`)"
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"
       priority: 100
       middlewares: [operator-auth, strip-sizing]
       service: sizing-ui
@@ -1968,16 +2014,23 @@ push.
 - [ ] **Step 5: Verify the deployment by hand**
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user start authd insightsd threatd sizingd traefik
+# Rootful system units, not --user: rootless is not viable on the target
+# (subuid/subgid map an unprivileged account only), and the quadlets live in
+# /etc/containers/systemd.
+systemctl daemon-reload
+systemctl start authd insightsd threatd sizingd traefik
 
-curl -sS -o /dev/null -w '%{http_code}\n' https://insights.nethesis.it/blocklist/v1/feed
+# Before anything else, confirm what address the pipelines actually see. If
+# this is not inside TRUSTED_PROXY_CIDRS, every /v1 request 401s.
+journalctl -u threatd -n 50 | grep remote_addr | head
+
+curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/v1/feed
 # 401 without a credential
 
-curl -sS -u "$SYSTEM_ID:$TOKEN" https://insights.nethesis.it/blocklist/v1/feed | head -c 200
+curl -sS -u "$SYSTEM_ID:$TOKEN" https://${INSIGHTS_HOST}/blocklist/v1/feed | head -c 200
 # 503 before the first consensus pass, a snapshot after it -- never a blank 200
 
-curl -sS -o /dev/null -w '%{http_code}\n' https://insights.nethesis.it/blocklist/
+curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/
 # 401 without operator credentials
 ```
 
