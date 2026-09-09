@@ -87,7 +87,7 @@ entire feed.</small></p>
 <td class="mono">{{if .ExpiresAt}}{{fmtOptTime .ExpiresAt}}{{else}}permanent{{end}}</td>
 {{if $.CanWrite}}
 <td>
-<form method="post" action="/blocklist/allowlist/delete">
+<form method="post" action="{{$.Base}}/blocklist/allowlist/delete">
 <input type="hidden" name="cidr" value="{{.CIDR}}">
 <button type="submit" class="secondary">Delete</button>
 </form>
@@ -102,7 +102,7 @@ entire feed.</small></p>
 </figure>
 
 {{if .CanWrite}}
-<form method="post" action="/blocklist/allowlist">
+<form method="post" action="{{$.Base}}/blocklist/allowlist">
 <fieldset role="group">
 <input type="text" name="cidr" placeholder="CIDR or bare address" required>
 <input type="text" name="reason" placeholder="reason">

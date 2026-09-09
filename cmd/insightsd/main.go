@@ -33,6 +33,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui"
+	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
 // defaultAuthValidateURL is Nethesis's own subscription/auth endpoint. It
@@ -407,7 +408,7 @@ func main() {
 	if authPepperSupplied {
 		authPepperState = "set"
 	}
-	cfgItems := []ui.ConfigItem{
+	cfgItems := []chrome.ConfigItem{
 		{Name: "LISTEN_ADDR", Value: listenAddr},
 		{Name: "UI_LISTEN_ADDR", Value: uiListenAddr},
 		{Name: "DB_PATH", Value: dbPath},
@@ -463,7 +464,7 @@ func main() {
 	uiServer := newUIServer(uiListenAddr, s, q, snapshot, ui.Info{
 		StartedAt: startedAt,
 		Workers:   queueWorkers,
-		Build:     ui.BuildInfo(),
+		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
 	}, s, adminAPIKey)
 

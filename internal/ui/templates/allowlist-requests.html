@@ -27,14 +27,14 @@ below. Ranked by distinct systems, then by how recently one asked.</small></p>
 </td>
 {{if $.CanWrite}}
 <td>
-<form method="post" action="/allowlist-requests/approve">
+<form method="post" action="{{$.Base}}/allowlist-requests/approve">
 <input type="hidden" name="cidr" value="{{.CIDR}}">
 <fieldset role="group">
 <input type="text" name="note" placeholder="note (optional)">
 <button type="submit">Approve</button>
 </fieldset>
 </form>
-<form method="post" action="/allowlist-requests/reject">
+<form method="post" action="{{$.Base}}/allowlist-requests/reject">
 <input type="hidden" name="cidr" value="{{.CIDR}}">
 <fieldset role="group">
 <input type="text" name="note" placeholder="note (optional)">

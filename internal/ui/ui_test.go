@@ -16,6 +16,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/store"
+	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
 // fakeReader is an in-package stand-in for the eight-method Reader slice of
@@ -232,7 +233,7 @@ func testInfo() Info {
 		StartedAt: 1700000000000,
 		Workers:   4,
 		Build:     "test-build",
-		Config: []ConfigItem{
+		Config: []chrome.ConfigItem{
 			{Name: "LLM_API_KEY", Value: "set"},
 			{Name: "AUTH_PEPPER", Value: "set"},
 			{Name: "DB_PATH", Value: "/tmp/insights.db"},
@@ -425,15 +426,20 @@ func max(a, b int) int {
 // TestNoJavaScript is the guard that keeps the zero-JS constraint from
 // eroding later: every embedded template and asset, and every rendered
 // page, must be free of <script, javascript: and on<event>= constructs.
+//
+// layout.html and static/ now live in chrome's own embed.FS (see
+// internal/ui/chrome), so this package's raw-walk half covers only its own
+// page templates; chrome's assets are exercised here through the served
+// HTTP paths instead, exactly like every other page.
 func TestNoJavaScript(t *testing.T) {
-	err := fs.WalkDir(assets, ".", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(pageAssets, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		b, err := fs.ReadFile(assets, path)
+		b, err := fs.ReadFile(pageAssets, path)
 		if err != nil {
 			return err
 		}
@@ -453,6 +459,8 @@ func TestNoJavaScript(t *testing.T) {
 	assertNoJS(t, "rendered /static/style.css", rec.Body.Bytes())
 	rec = get(t, h, "/static/pico.min.css")
 	assertNoJS(t, "rendered /static/pico.min.css", rec.Body.Bytes())
+	rec = get(t, h, "/static/pico.LICENSE")
+	assertNoJS(t, "rendered /static/pico.LICENSE", rec.Body.Bytes())
 }
 
 // TestSecretRedaction asserts this package cannot leak a secret value even
@@ -466,7 +474,7 @@ func TestSecretRedaction(t *testing.T) {
 		StartedAt: 1700000000000,
 		Workers:   2,
 		Build:     "test-build",
-		Config: []ConfigItem{
+		Config: []chrome.ConfigItem{
 			{Name: "LLM_API_KEY", Value: "set"},
 			{Name: "AUTH_PEPPER", Value: "set (ephemeral)"},
 		},

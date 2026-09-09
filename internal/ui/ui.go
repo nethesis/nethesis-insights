@@ -30,27 +30,28 @@
 package ui
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
 	"embed"
-	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/threat"
+	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
-//go:embed templates static
-var assets embed.FS
+// pageAssets embeds this dashboard's own content templates -- layout.html
+// and static/ live in chrome's embed.FS instead, since chrome owns the
+// shared chrome (see internal/ui/chrome).
+//
+//go:embed templates
+var pageAssets embed.FS
 
 // Reader is the read-only slice of store.Store the UI needs. *store.SQLiteStore
 // satisfies it.
@@ -125,21 +126,16 @@ type Feed interface {
 	ETag() string
 }
 
-// ConfigItem is one row of the status page's configuration table. The
-// caller (cmd/insightsd) builds these explicitly, field by field, from its
-// own env config -- this package never reads os.Environ() and never sees a
-// raw secret. LLM_API_KEY / AUTH_PEPPER arrive as "set" / "unset" already.
-type ConfigItem struct {
-	Name  string
-	Value string
-}
-
-// Info is the static half of the status page, built once by the caller.
+// Info is the static half of the status page, built once by the caller. It
+// carries Workers, which chrome.Info deliberately does not: queue depth is
+// insightsd's alone and does not belong in the shared chrome package. This
+// package converts it to a chrome.Info (dropping Workers) when it builds the
+// chrome.Base, and keeps Workers itself for its own status page data.
 type Info struct {
 	StartedAt int64 // unix millis
 	Workers   int
-	Build     string       // from runtime/debug.ReadBuildInfo; "unknown" if absent
-	Config    []ConfigItem // explicit list; secrets ALREADY reduced to set/unset by the caller
+	Build     string              // from runtime/debug.ReadBuildInfo; "unknown" if absent
+	Config    []chrome.ConfigItem // explicit list; secrets ALREADY reduced to set/unset by the caller
 }
 
 // Bounds on unbounded-by-default queries. /analyses is the only page that
@@ -161,79 +157,50 @@ const (
 	sizingIngestLimit  = 200
 )
 
-type navPage struct {
-	Key, Path, Label string
-}
-
-// navGroup is a section of the nav bar. A group with no Label renders as a
-// plain top-level link (there is exactly one such page, Status); a labeled
-// group renders as a Pico <details class="dropdown"> menu, so the 12 pages
-// this dashboard has grown to don't all sit in one flat row.
-type navGroup struct {
-	Label string
-	Pages []navPage
-}
-
-var navGroups = []navGroup{
-	{"", []navPage{{"status", "/", "Status"}}},
-	{"Logs Pipeline", []navPage{
-		{"systems", "/systems", "Systems"},
-		{"findings", "/findings", "Findings"},
-		{"analyses", "/analyses", "Analyses"},
-		{"gate", "/gate", "Gate"},
-		{"cost", "/cost", "Cost"},
-		{"templates", "/templates", "Templates"},
-		{"baselines", "/baselines", "Baselines"},
+// navGroups is this dashboard's nav bar structure, handed to chrome.New as
+// chrome.Config.Nav. There is exactly one unlabeled group (Status), which
+// chrome renders as a plain top-level link rather than a dropdown.
+var navGroups = []chrome.NavGroup{
+	{Label: "", Pages: []chrome.NavPage{{Key: "status", Path: "/", Label: "Status"}}},
+	{Label: "Logs Pipeline", Pages: []chrome.NavPage{
+		{Key: "systems", Path: "/systems", Label: "Systems"},
+		{Key: "findings", Path: "/findings", Label: "Findings"},
+		{Key: "analyses", Path: "/analyses", Label: "Analyses"},
+		{Key: "gate", Path: "/gate", Label: "Gate"},
+		{Key: "cost", Path: "/cost", Label: "Cost"},
+		{Key: "templates", Path: "/templates", Label: "Templates"},
+		{Key: "baselines", Path: "/baselines", Label: "Baselines"},
 	}},
-	{"Blocklist Pipeline", []navPage{
-		{"threat-systems", "/threat-systems", "Systems"},
-		{"blocklist", "/blocklist", "Blocklist"},
-		{"threat-events", "/threat-events", "Threat events"},
-		{"threat-stats", "/threat-stats", "Threat stats"},
-		{"allowlist-requests", "/allowlist-requests", "Allowlist requests"},
+	{Label: "Blocklist Pipeline", Pages: []chrome.NavPage{
+		{Key: "threat-systems", Path: "/threat-systems", Label: "Systems"},
+		{Key: "blocklist", Path: "/blocklist", Label: "Blocklist"},
+		{Key: "threat-events", Path: "/threat-events", Label: "Threat events"},
+		{Key: "threat-stats", Path: "/threat-stats", Label: "Threat stats"},
+		{Key: "allowlist-requests", Path: "/allowlist-requests", Label: "Allowlist requests"},
 	}},
-	{"Sizing Pipeline", []navPage{
-		{"sizing", "/sizing", "Nodes"},
-		{"cohorts", "/cohorts", "Recommendations"},
+	{Label: "Sizing Pipeline", Pages: []chrome.NavPage{
+		{Key: "sizing", Path: "/sizing", Label: "Nodes"},
+		{Key: "cohorts", Path: "/cohorts", Label: "Recommendations"},
 	}},
 }
 
-type navItem struct {
-	Path, Label string
-	Active      bool
-}
-
-// navGroupData is one rendered nav section. Active is set when one of Items
-// is the current page, so layout.html can keep that dropdown open by
-// default -- the current section stays visible without a click.
-type navGroupData struct {
-	Label  string
-	Items  []navItem
-	Active bool
-}
-
-// pageData is embedded (anonymously) in every page's template data, so
-// layout.html's nav/refresh/footer chrome renders the same way regardless
-// of which page is on screen.
-type pageData struct {
-	Nav        []navGroupData
-	Refresh    int
-	RefreshOff string
-	Refresh10  string
-	Refresh30  string
-	Build      string
-	Uptime     string
+// pages lists the content templates, each combined with chrome's layout
+// into its own *template.Template -- see chrome.ParseTemplates.
+var pages = []string{
+	"status.html", "systems.html", "findings.html", "analyses.html",
+	"gate.html", "cost.html", "templates.html", "baselines.html",
+	"blocklist.html", "threat-systems.html", "threat-events.html", "threat-stats.html",
+	"allowlist-requests.html",
+	"sizing.html", "cohorts.html",
 }
 
 type server struct {
-	reader   Reader
-	rt       Runtime
-	feed     Feed
-	info     Info
-	writer   Writer
-	adminKey string
-	tmpl     map[string]*template.Template
-	static   http.Handler
+	chrome *chrome.Base
+	reader Reader
+	rt     Runtime
+	feed   Feed
+	info   Info
+	writer Writer
 }
 
 // NewServer builds the operator UI handler. rt and feed may be nil.
@@ -242,24 +209,41 @@ type server struct {
 // consulted and every writable route answers 405 exactly like any other
 // non-GET request -- an operator who has not set ADMIN_API_KEY gets the
 // plain read-only dashboard, with no write form reachable at all.
+//
+// This dashboard is not deployed behind Traefik's path-prefix split (it is
+// its own listener, meant to be bound to loopback), so it always passes an
+// empty BasePath to chrome.
 func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey string) http.Handler {
-	staticFS, err := fs.Sub(assets, "static")
+	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
-		// static/ directory -- a build-time programming error, not a
+		// templates/ directory -- a build-time programming error, not a
 		// runtime condition.
-		panic("ui: static assets: " + err.Error())
+		panic("ui: page templates: " + err.Error())
+	}
+
+	base, err := chrome.New(chrome.Config{
+		AdminKey: adminKey,
+		Info: chrome.Info{
+			StartedAt: info.StartedAt,
+			Build:     info.Build,
+			Config:    info.Config,
+		},
+		Nav:       navGroups,
+		Pages:     pages,
+		Templates: pageTemplates,
+	})
+	if err != nil {
+		panic("ui: parsing templates: " + err.Error())
 	}
 
 	srv := &server{
-		reader:   r,
-		rt:       rt,
-		feed:     feed,
-		info:     info,
-		writer:   w,
-		adminKey: adminKey,
-		tmpl:     parseTemplates(),
-		static:   http.FileServer(http.FS(staticFS)),
+		chrome: base,
+		reader: r,
+		rt:     rt,
+		feed:   feed,
+		info:   info,
+		writer: w,
 	}
 
 	mux := http.NewServeMux()
@@ -269,30 +253,17 @@ func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey st
 	// "enforce it centrally, once".
 	mux.HandleFunc("/", srv.route)
 
-	return &loggingHandler{next: mux}
+	return httpx.Logging(mux)
 }
 
-// pages lists the content templates, each combined with layout.html into
-// its own *template.Template so that every page's {{define "content"}}
-// block lives in an isolated namespace -- html/template errors on a
-// duplicate block name within one parsed set, and every page legitimately
-// defines a block named "content".
-var pages = []string{
-	"status.html", "systems.html", "findings.html", "analyses.html",
-	"gate.html", "cost.html", "templates.html", "baselines.html",
-	"blocklist.html", "threat-systems.html", "threat-events.html", "threat-stats.html",
-	"allowlist-requests.html",
-	"sizing.html", "cohorts.html",
-}
-
-func parseTemplates() map[string]*template.Template {
-	out := make(map[string]*template.Template, len(pages))
-	for _, p := range pages {
-		out[p] = template.Must(
-			template.New("layout.html").Funcs(funcMap).ParseFS(assets, "templates/layout.html", "templates/"+p),
-		)
-	}
-	return out
+// canWrite reports whether the write forms should render, and whether a
+// write route is reachable at all. It is false whenever ADMIN_API_KEY was
+// not configured -- the plan requires that case to leave the UI with "no
+// write forms at all", not forms that render and then always 401. chrome's
+// CanWrite only knows about the admin key; this package additionally
+// requires a store Writer to have been wired in.
+func (s *server) canWrite() bool {
+	return s.writer != nil && s.chrome.CanWrite()
 }
 
 // writableRoutes is the small, explicit, enumerated set of paths that also
@@ -316,14 +287,14 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		// routes also answers POST, and every one of those authenticates
 		// before doing anything -- see the package doc comment. Anything
 		// else, including a write route reached without ADMIN_API_KEY
-		// configured (s.writer/s.adminKey unset), is still a plain 405: this
-		// is what makes "no key configured" mean "no write forms reachable
-		// at all", not "reachable but always unauthorized".
-		if s.writer == nil || s.adminKey == "" || !writableRoutes[r.URL.Path] {
+		// configured (s.writer unset or chrome.CanWrite false), is still a
+		// plain 405: this is what makes "no key configured" mean "no write
+		// forms reachable at all", not "reachable but always unauthorized".
+		if !s.canWrite() || !writableRoutes[r.URL.Path] {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		actor, ok := s.authenticateWrite(w, r)
+		actor, ok := s.chrome.AuthenticateWrite(w, r)
 		if !ok {
 			return
 		}
@@ -340,8 +311,7 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/static/") {
-		http.StripPrefix("/static/", s.static).ServeHTTP(w, r)
+	if s.chrome.ServeStatic(w, r) {
 		return
 	}
 
@@ -385,168 +355,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// authenticateWrite checks HTTP Basic against ADMIN_API_KEY and returns the
-// sanitized username as the actor to record with the write. The browser
-// prompts for these credentials natively -- this costs no JavaScript, no
-// cookie and no session state, exactly as the plan requires.
-// sameOriginWrite reports whether a write request plausibly came from this
-// UI's own pages rather than from another site.
-//
-// This matters more here than the usual CSRF case. The write routes
-// authenticate with HTTP Basic, and a browser that has been given Basic
-// credentials once **replays them automatically on every later request to
-// the same origin** -- including a form POST triggered by an unrelated page
-// the operator happens to visit afterwards. Without this check, any site
-// could auto-submit a form at 127.0.0.1:9596 and add an attacker's address to
-// the fleet allowlist, silently and permanently. That is precisely the harm
-// the "no automatic promotion" decision exists to prevent, so it must not be
-// reachable through the browser either.
-//
-// Two headers, both sent by browsers and neither forgeable by a cross-site
-// page:
-//
-//   - Sec-Fetch-Site must be same-origin (or "none" for a direct address-bar
-//     action). A cross-site form POST arrives as "cross-site".
-//   - Origin, when present, must name this host.
-//
-// A request carrying neither header is allowed: that is a non-browser client
-// (curl, a script), which has no ambient credential to be abused in the first
-// place -- CSRF is a browser problem, and refusing curl would only break the
-// legitimate scripted path without closing anything.
-func sameOriginWrite(r *http.Request) bool {
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		return false
-	}
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	return u.Host == r.Host
-}
-
-func (s *server) authenticateWrite(w http.ResponseWriter, r *http.Request) (string, bool) {
-	// Checked before the credential: a cross-site request must be refused
-	// whether or not the browser attached a valid cached one, and answering
-	// 401 here would prompt the operator for a password on a forged form.
-	if !sameOriginWrite(r) {
-		slog.Warn("ui: refused a cross-site write",
-			"path", r.URL.Path,
-			"origin", r.Header.Get("Origin"),
-			"sec_fetch_site", r.Header.Get("Sec-Fetch-Site"),
-			"remote_addr", r.RemoteAddr)
-		http.Error(w, "cross-site writes are refused", http.StatusForbidden)
-		return "", false
-	}
-
-	username, password, ok := r.BasicAuth()
-	if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(s.adminKey)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Basic realm="insightsd admin"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", false
-	}
-	actor := threat.CleanText(username, model.MaxAdminActorLen)
-	if actor == "" {
-		http.Error(w, "a non-empty username is required as the actor", http.StatusBadRequest)
-		return "", false
-	}
-	return actor, true
-}
-
-func (s *server) render(w http.ResponseWriter, page string, data any) {
-	var buf bytes.Buffer
-	if err := s.tmpl[page].ExecuteTemplate(&buf, "layout.html", data); err != nil {
-		slog.Error("ui: render failed", "page", page, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = buf.WriteTo(w)
-}
-
-func (s *server) storeError(w http.ResponseWriter, page string, err error) {
-	slog.Error("ui: store query failed", "page", page, "error", err)
-	http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
-}
-
-// newPageData builds the chrome shared by every page: nav with the active
-// entry underlined, the meta-refresh value, and the three refresh links
-// (off/10s/30s) that preserve the rest of the current query string.
-func (s *server) newPageData(r *http.Request, active string) pageData {
-	nav := make([]navGroupData, len(navGroups))
-	for i, g := range navGroups {
-		items := make([]navItem, len(g.Pages))
-		var groupActive bool
-		for j, p := range g.Pages {
-			isActive := p.Key == active
-			items[j] = navItem{Path: p.Path, Label: p.Label, Active: isActive}
-			groupActive = groupActive || isActive
-		}
-		nav[i] = navGroupData{Label: g.Label, Items: items, Active: groupActive}
-	}
-	off, r10, r30 := refreshLinks(r)
-	return pageData{
-		Nav:        nav,
-		Refresh:    parseRefresh(r),
-		RefreshOff: off,
-		Refresh10:  r10,
-		Refresh30:  r30,
-		Build:      s.info.Build,
-		Uptime:     FmtAgo(s.info.StartedAt),
-	}
-}
-
-// parseRefresh returns the positive integer from ?refresh=N, or 0 for a
-// missing, zero, negative or non-numeric value. The raw string is never
-// returned or rendered -- only this validated int reaches the template,
-// which is what keeps an invalid value from ever being reflected into the
-// page.
-func parseRefresh(r *http.Request) int {
-	v := r.URL.Query().Get("refresh")
-	if v == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return n
-}
-
-// refreshLinks builds the three nav "auto-refresh" links against the
-// current path and query string, with only the refresh parameter changed --
-// every other filter (system, status, severity, limit, ...) survives.
-func refreshLinks(r *http.Request) (off, r10, r30 string) {
-	base := r.URL.Path
-	q := r.URL.Query()
-	q.Del("refresh")
-	withQuery := func(v url.Values) string {
-		if len(v) == 0 {
-			return base
-		}
-		return base + "?" + v.Encode()
-	}
-	off = withQuery(q)
-	q10 := cloneValues(q)
-	q10.Set("refresh", "10")
-	r10 = withQuery(q10)
-	q30 := cloneValues(q)
-	q30.Set("refresh", "30")
-	r30 = withQuery(q30)
-	return off, r10, r30
-}
-
-func cloneValues(v url.Values) url.Values {
-	out := make(url.Values, len(v))
-	for k, vals := range v {
-		out[k] = append([]string(nil), vals...)
-	}
-	return out
-}
-
 // sanitizeSeverity validates a ?severity= value against model's allowlist.
 // An unknown value is ignored (treated as "no filter") rather than passed
 // through to the store or reflected back into the selected <option>.
@@ -564,23 +372,6 @@ func sanitizeStatus(v string) string {
 		return v
 	}
 	return ""
-}
-
-// clampLimit parses ?limit=, falling back to def on anything invalid, and
-// never exceeding max. This is the one user-facing limit knob (/analyses);
-// every other page uses a fixed internal bound.
-func clampLimit(v string, def, max int) int {
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return def
-	}
-	if n > max {
-		return max
-	}
-	return n
 }
 
 // --- handlers ---
@@ -610,24 +401,24 @@ func (s *server) feedState() feedState {
 }
 
 type statusPageData struct {
-	pageData
+	chrome.PageData
 	Counts     store.Counts
 	HasQueue   bool
 	QueueDepth int
 	QueueCap   int
 	Workers    int
 	Feed       feedState
-	Config     []ConfigItem
+	Config     []chrome.ConfigItem
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	counts, err := s.reader.Counts(r.Context())
 	if err != nil {
-		s.storeError(w, "status", err)
+		s.chrome.StoreError(w, "status", err)
 		return
 	}
 	data := statusPageData{
-		pageData: s.newPageData(r, "status"),
+		PageData: s.chrome.PageData(r, "status"),
 		Counts:   counts,
 		HasQueue: s.rt != nil,
 		Workers:  s.info.Workers,
@@ -638,28 +429,28 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		data.QueueDepth = s.rt.Depth()
 		data.QueueCap = s.rt.Cap()
 	}
-	s.render(w, "status.html", data)
+	s.chrome.Render(w, "status.html", data)
 }
 
 type systemsPageData struct {
-	pageData
+	chrome.PageData
 	Systems []store.SystemRow
 }
 
 func (s *server) handleSystems(w http.ResponseWriter, r *http.Request) {
 	systems, err := s.reader.ListSystems(r.Context())
 	if err != nil {
-		s.storeError(w, "systems", err)
+		s.chrome.StoreError(w, "systems", err)
 		return
 	}
-	s.render(w, "systems.html", systemsPageData{
-		pageData: s.newPageData(r, "systems"),
+	s.chrome.Render(w, "systems.html", systemsPageData{
+		PageData: s.chrome.PageData(r, "systems"),
 		Systems:  systems,
 	})
 }
 
 type findingsPageData struct {
-	pageData
+	chrome.PageData
 	Findings   []model.Finding
 	System     string
 	Status     string
@@ -679,11 +470,11 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 
 	findings, err := s.reader.ListAllFindings(r.Context(), systemID, status, severity, id, sort, findingsLimit)
 	if err != nil {
-		s.storeError(w, "findings", err)
+		s.chrome.StoreError(w, "findings", err)
 		return
 	}
-	s.render(w, "findings.html", findingsPageData{
-		pageData:   s.newPageData(r, "findings"),
+	s.chrome.Render(w, "findings.html", findingsPageData{
+		PageData:   s.chrome.PageData(r, "findings"),
 		Findings:   findings,
 		System:     systemID,
 		Status:     status,
@@ -705,7 +496,7 @@ func sanitizeFindingsSort(v string) string {
 }
 
 type analysesPageData struct {
-	pageData
+	chrome.PageData
 	Analyses []store.AnalysisRow
 	System   string
 	Limit    int
@@ -714,15 +505,15 @@ type analysesPageData struct {
 func (s *server) handleAnalyses(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	systemID := q.Get("system")
-	limit := clampLimit(q.Get("limit"), analysesDefaultLim, analysesMaxLimit)
+	limit := chrome.ClampLimit(q.Get("limit"), analysesDefaultLim, analysesMaxLimit)
 
 	analyses, err := s.reader.ListAnalyses(r.Context(), systemID, limit)
 	if err != nil {
-		s.storeError(w, "analyses", err)
+		s.chrome.StoreError(w, "analyses", err)
 		return
 	}
-	s.render(w, "analyses.html", analysesPageData{
-		pageData: s.newPageData(r, "analyses"),
+	s.chrome.Render(w, "analyses.html", analysesPageData{
+		PageData: s.chrome.PageData(r, "analyses"),
 		Analyses: analyses,
 		System:   systemID,
 		Limit:    limit,
@@ -811,7 +602,7 @@ func summarizeGate(rows []store.GateRow) gateSummary {
 }
 
 type gatePageData struct {
-	pageData
+	chrome.PageData
 	Rows    []store.GateRow
 	Summary gateSummary
 	Range   string
@@ -823,11 +614,11 @@ func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.reader.GateRollup(r.Context(), since)
 	if err != nil {
-		s.storeError(w, "gate", err)
+		s.chrome.StoreError(w, "gate", err)
 		return
 	}
-	s.render(w, "gate.html", gatePageData{
-		pageData: s.newPageData(r, "gate"),
+	s.chrome.Render(w, "gate.html", gatePageData{
+		PageData: s.chrome.PageData(r, "gate"),
 		Rows:     rows,
 		Summary:  summarizeGate(rows),
 		Range:    rangeKey,
@@ -836,7 +627,7 @@ func (s *server) handleGate(w http.ResponseWriter, r *http.Request) {
 }
 
 type costPageData struct {
-	pageData
+	chrome.PageData
 	Days                 []costDayGroup
 	GrandTotalCostMicros int64
 }
@@ -854,7 +645,7 @@ type costDayGroup struct {
 func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.reader.CostRollup(r.Context())
 	if err != nil {
-		s.storeError(w, "cost", err)
+		s.chrome.StoreError(w, "cost", err)
 		return
 	}
 	var days []costDayGroup
@@ -868,15 +659,15 @@ func (s *server) handleCost(w http.ResponseWriter, r *http.Request) {
 		g.TotalCostMicros += row.CostMicros
 		grandTotal += row.CostMicros
 	}
-	s.render(w, "cost.html", costPageData{
-		pageData:             s.newPageData(r, "cost"),
+	s.chrome.Render(w, "cost.html", costPageData{
+		PageData:             s.chrome.PageData(r, "cost"),
 		Days:                 days,
 		GrandTotalCostMicros: grandTotal,
 	})
 }
 
 type templatesPageData struct {
-	pageData
+	chrome.PageData
 	Templates []store.TemplateRow
 	System    string
 }
@@ -885,18 +676,18 @@ func (s *server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	systemID := r.URL.Query().Get("system")
 	templates, err := s.reader.ListTemplates(r.Context(), systemID, templatesLimit)
 	if err != nil {
-		s.storeError(w, "templates", err)
+		s.chrome.StoreError(w, "templates", err)
 		return
 	}
-	s.render(w, "templates.html", templatesPageData{
-		pageData:  s.newPageData(r, "templates"),
+	s.chrome.Render(w, "templates.html", templatesPageData{
+		PageData:  s.chrome.PageData(r, "templates"),
 		Templates: templates,
 		System:    systemID,
 	})
 }
 
 type baselinesPageData struct {
-	pageData
+	chrome.PageData
 	Baselines []store.BaselineRow
 	System    string
 }
@@ -905,11 +696,11 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	systemID := r.URL.Query().Get("system")
 	baselines, err := s.reader.ListBaselines(r.Context(), systemID)
 	if err != nil {
-		s.storeError(w, "baselines", err)
+		s.chrome.StoreError(w, "baselines", err)
 		return
 	}
-	s.render(w, "baselines.html", baselinesPageData{
-		pageData:  s.newPageData(r, "baselines"),
+	s.chrome.Render(w, "baselines.html", baselinesPageData{
+		PageData:  s.chrome.PageData(r, "baselines"),
 		Baselines: baselines,
 		System:    systemID,
 	})
@@ -918,7 +709,7 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 // --- Threat Shield pages ---
 
 type threatSystemsPageData struct {
-	pageData
+	chrome.PageData
 	Systems []store.ThreatSystemRow
 }
 
@@ -928,17 +719,17 @@ type threatSystemsPageData struct {
 func (s *server) handleThreatSystems(w http.ResponseWriter, r *http.Request) {
 	systems, err := s.reader.ListThreatSystems(r.Context())
 	if err != nil {
-		s.storeError(w, "threat-systems", err)
+		s.chrome.StoreError(w, "threat-systems", err)
 		return
 	}
-	s.render(w, "threat-systems.html", threatSystemsPageData{
-		pageData: s.newPageData(r, "threat-systems"),
+	s.chrome.Render(w, "threat-systems.html", threatSystemsPageData{
+		PageData: s.chrome.PageData(r, "threat-systems"),
 		Systems:  systems,
 	})
 }
 
 type blocklistPageData struct {
-	pageData
+	chrome.PageData
 	Feed      feedState
 	Entries   []store.BlocklistRow
 	Allowlist []store.AllowlistRow
@@ -952,16 +743,16 @@ type blocklistPageData struct {
 func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.reader.ListBlocklistEntries(r.Context(), blocklistLimit)
 	if err != nil {
-		s.storeError(w, "blocklist", err)
+		s.chrome.StoreError(w, "blocklist", err)
 		return
 	}
 	allowlist, err := s.reader.ListThreatAllowlist(r.Context())
 	if err != nil {
-		s.storeError(w, "blocklist", err)
+		s.chrome.StoreError(w, "blocklist", err)
 		return
 	}
-	s.render(w, "blocklist.html", blocklistPageData{
-		pageData:  s.newPageData(r, "blocklist"),
+	s.chrome.Render(w, "blocklist.html", blocklistPageData{
+		PageData:  s.chrome.PageData(r, "blocklist"),
 		Feed:      s.feedState(),
 		Entries:   entries,
 		Allowlist: allowlist,
@@ -970,16 +761,8 @@ func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// canWrite reports whether the write forms should render at all. It is
-// false whenever ADMIN_API_KEY was not configured -- the plan requires that
-// case to leave the UI with "no write forms at all", not forms that render
-// and then always 401.
-func (s *server) canWrite() bool {
-	return s.writer != nil && s.adminKey != ""
-}
-
 type threatEventsPageData struct {
-	pageData
+	chrome.PageData
 	Events []store.ThreatEventRow
 	System string
 	IP     string
@@ -993,15 +776,15 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 	// nothing is a clearer answer than silently ignoring what was typed. It is
 	// a bind parameter either way.
 	ip := q.Get("ip")
-	limit := clampLimit(q.Get("limit"), threatEventsDefLim, threatEventsMaxLim)
+	limit := chrome.ClampLimit(q.Get("limit"), threatEventsDefLim, threatEventsMaxLim)
 
 	events, err := s.reader.ListThreatEvents(r.Context(), systemID, ip, limit)
 	if err != nil {
-		s.storeError(w, "threat-events", err)
+		s.chrome.StoreError(w, "threat-events", err)
 		return
 	}
-	s.render(w, "threat-events.html", threatEventsPageData{
-		pageData: s.newPageData(r, "threat-events"),
+	s.chrome.Render(w, "threat-events.html", threatEventsPageData{
+		PageData: s.chrome.PageData(r, "threat-events"),
 		Events:   events,
 		System:   systemID,
 		IP:       ip,
@@ -1010,7 +793,7 @@ func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 type threatStatsPageData struct {
-	pageData
+	chrome.PageData
 	Daily  []threatDayGroup
 	Ingest []store.ThreatIngestRow
 }
@@ -1029,7 +812,7 @@ type threatDayGroup struct {
 func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
 	dailyRows, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
 	if err != nil {
-		s.storeError(w, "threat-stats", err)
+		s.chrome.StoreError(w, "threat-stats", err)
 		return
 	}
 	var daily []threatDayGroup
@@ -1043,11 +826,11 @@ func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
 	}
 	ingest, err := s.reader.ThreatIngestStats(r.Context(), threatStatsLimit)
 	if err != nil {
-		s.storeError(w, "threat-stats", err)
+		s.chrome.StoreError(w, "threat-stats", err)
 		return
 	}
-	s.render(w, "threat-stats.html", threatStatsPageData{
-		pageData: s.newPageData(r, "threat-stats"),
+	s.chrome.Render(w, "threat-stats.html", threatStatsPageData{
+		PageData: s.chrome.PageData(r, "threat-stats"),
 		Daily:    daily,
 		Ingest:   ingest,
 	})
@@ -1060,7 +843,7 @@ func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
 const allowlistRequestsLimit = 200
 
 type allowlistRequestsPageData struct {
-	pageData
+	chrome.PageData
 	Requests []store.AllowlistRequestRow
 	CanWrite bool
 }
@@ -1072,11 +855,11 @@ type allowlistRequestsPageData struct {
 func (s *server) handleAllowlistRequests(w http.ResponseWriter, r *http.Request) {
 	requests, err := s.reader.PendingAllowlistRequests(r.Context(), allowlistRequestsLimit)
 	if err != nil {
-		s.storeError(w, "allowlist-requests", err)
+		s.chrome.StoreError(w, "allowlist-requests", err)
 		return
 	}
-	s.render(w, "allowlist-requests.html", allowlistRequestsPageData{
-		pageData: s.newPageData(r, "allowlist-requests"),
+	s.chrome.Render(w, "allowlist-requests.html", allowlistRequestsPageData{
+		PageData: s.chrome.PageData(r, "allowlist-requests"),
 		Requests: requests,
 		CanWrite: s.canWrite(),
 	})
@@ -1105,13 +888,13 @@ func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, acto
 	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
 		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
 	}); err != nil {
-		s.storeError(w, "blocklist", err)
+		s.chrome.StoreError(w, "blocklist", err)
 		return
 	}
 	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.upsert", actor, reason, now); err != nil {
 		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
 	}
-	http.Redirect(w, r, "/blocklist", http.StatusSeeOther)
+	http.Redirect(w, r, s.chrome.Link("/blocklist"), http.StatusSeeOther)
 }
 
 func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
@@ -1129,7 +912,7 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 
 	existed, err := s.writer.DeleteThreatAllowlistEntry(r.Context(), cidr)
 	if err != nil {
-		s.storeError(w, "blocklist", err)
+		s.chrome.StoreError(w, "blocklist", err)
 		return
 	}
 	if !existed {
@@ -1140,7 +923,7 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.delete", actor, "", now); err != nil {
 		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
 	}
-	http.Redirect(w, r, "/blocklist", http.StatusSeeOther)
+	http.Redirect(w, r, s.chrome.Link("/blocklist"), http.StatusSeeOther)
 }
 
 // handleApproveRequest is the only path this package offers from a client
@@ -1167,7 +950,7 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
 		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
 	}); err != nil {
-		s.storeError(w, "allowlist-requests", err)
+		s.chrome.StoreError(w, "allowlist-requests", err)
 		return
 	}
 	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewApproved, actor, note, now); err != nil {
@@ -1181,7 +964,7 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
 		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
-	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
+	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
 }
 
 // handleRejectRequest creates no allowlist entry -- there is nothing here
@@ -1205,7 +988,7 @@ func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, act
 	now := time.Now().UnixMilli()
 
 	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewRejected, actor, note, now); err != nil {
-		s.storeError(w, "allowlist-requests", err)
+		s.chrome.StoreError(w, "allowlist-requests", err)
 		return
 	}
 	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.reject", actor, note, now); err != nil {
@@ -1214,55 +997,13 @@ func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, act
 	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
 		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
-	http.Redirect(w, r, "/allowlist-requests", http.StatusSeeOther)
-}
-
-// --- logging ---
-//
-// Copied from internal/api rather than exported from it: the plan is
-// explicit that internal/ui must not couple to internal/api.
-
-// loggingHandler logs method, path, status and duration for every request.
-// The UI is unauthenticated, so there is no Authorization header to worry
-// about withholding here -- unlike api.loggingHandler, which this mirrors.
-type loggingHandler struct {
-	next http.Handler
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (r *statusRecorder) WriteHeader(code int) {
-	r.status = code
-	r.ResponseWriter.WriteHeader(code)
-}
-
-func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	slog.Debug("ui request received",
-		"method", r.Method,
-		"path", r.URL.Path,
-		"query", r.URL.RawQuery,
-		"remote_addr", r.RemoteAddr,
-	)
-
-	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	h.next.ServeHTTP(rec, r)
-
-	slog.Info("ui request",
-		"method", r.Method,
-		"path", r.URL.Path,
-		"status", rec.status,
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
+	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
 }
 
 // --- Fleet sizing pages ---
 
 type sizingPageData struct {
-	pageData
+	chrome.PageData
 	Counts     store.SizingCounts
 	Nodes      []store.SizingNodeUIRow
 	Modules    []store.SizingModuleUIRow
@@ -1285,27 +1026,27 @@ func (s *server) handleSizing(w http.ResponseWriter, r *http.Request) {
 
 	counts, err := s.reader.SizingCounts(r.Context())
 	if err != nil {
-		s.storeError(w, "sizing", err)
+		s.chrome.StoreError(w, "sizing", err)
 		return
 	}
 	nodes, err := s.reader.ListSizingNodes(r.Context(), systemID, sizingNodesLimit)
 	if err != nil {
-		s.storeError(w, "sizing", err)
+		s.chrome.StoreError(w, "sizing", err)
 		return
 	}
 	modules, err := s.reader.ListSizingModules(r.Context(), systemID, sizingModulesLimit)
 	if err != nil {
-		s.storeError(w, "sizing", err)
+		s.chrome.StoreError(w, "sizing", err)
 		return
 	}
 	ingest, err := s.reader.SizingIngestStats(r.Context(), sizingIngestLimit)
 	if err != nil {
-		s.storeError(w, "sizing", err)
+		s.chrome.StoreError(w, "sizing", err)
 		return
 	}
 
-	s.render(w, "sizing.html", sizingPageData{
-		pageData:   s.newPageData(r, "sizing"),
+	s.chrome.Render(w, "sizing.html", sizingPageData{
+		PageData:   s.chrome.PageData(r, "sizing"),
 		Counts:     counts,
 		Nodes:      nodes,
 		Modules:    modules,
@@ -1324,7 +1065,7 @@ type cohortGroup struct {
 }
 
 type cohortsPageData struct {
-	pageData
+	chrome.PageData
 	Groups []cohortGroup
 	Floors struct {
 		DistinctSystems int
@@ -1353,7 +1094,7 @@ type cohortsPageData struct {
 func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 	cohorts, err := s.reader.ListSizingCohorts(r.Context(), "", sizingCohortsLimit)
 	if err != nil {
-		s.storeError(w, "cohorts", err)
+		s.chrome.StoreError(w, "cohorts", err)
 		return
 	}
 
@@ -1372,7 +1113,7 @@ func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := cohortsPageData{
-		pageData:      s.newPageData(r, "cohorts"),
+		PageData:      s.chrome.PageData(r, "cohorts"),
 		Groups:        groups,
 		CensorRAMUtil: sizing.CensorRAMUtil,
 		Empty:         len(cohorts) == 0,
@@ -1384,5 +1125,5 @@ func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
 		data.Floors.DistinctSystems = cohorts[0].MinDistinctSystems
 		data.Floors.Nodes = cohorts[0].MinNodes
 	}
-	s.render(w, "cohorts.html", data)
+	s.chrome.Render(w, "cohorts.html", data)
 }
