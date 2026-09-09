@@ -12,6 +12,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -61,6 +63,18 @@ func setOrUnset(v string) string {
 	return "unset"
 }
 
+// randomPepper returns a fresh 32-byte hex key. It exits on a rand.Reader
+// failure, matching this project's other os.Exit(1)-on-startup-error style
+// -- a broken entropy source is not a condition to run degraded under.
+func randomPepper() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		slog.Error("failed to generate a random AUTH_PEPPER", "error", err)
+		os.Exit(1)
+	}
+	return hex.EncodeToString(b)
+}
+
 func main() {
 	setupLogging(getenv("LOG_LEVEL", "info"))
 
@@ -68,6 +82,17 @@ func main() {
 	validateURL := getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
 	pepper := getenv("AUTH_PEPPER", "")
 	timeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
+
+	if pepper == "" {
+		// A pepper is only defense in depth -- the cache it keys never
+		// leaves memory -- so an unset AUTH_PEPPER gets a random one for
+		// this process's lifetime rather than refusing to start. But it
+		// must never default to empty: with an empty HMAC key the cache
+		// key is computable offline by anyone, and after the pipeline
+		// split this process holds the whole fleet's credential cache.
+		pepper = randomPepper()
+		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
+	}
 
 	fa := auth.New(validateURL, pepper, timeout, time.Now)
 	fa.PositiveTTL = getenvDuration("AUTH_CACHE_TTL", 5*time.Minute)

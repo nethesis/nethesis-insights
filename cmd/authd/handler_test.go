@@ -86,7 +86,15 @@ func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
 
 	h.ServeHTTP(w, r)
 
-	if body := w.Body.String(); strings.Contains(body, "hunter2") {
+	// The likeliest form of this leak is not the literal secret but the
+	// base64-encoded Authorization value landing in a diagnostic message,
+	// so check for both.
+	encoded := strings.TrimPrefix(r.Header.Get("Authorization"), "Basic ")
+	body := w.Body.String()
+	if strings.Contains(body, "hunter2") {
 		t.Errorf("response body leaked the secret: %q", body)
+	}
+	if strings.Contains(body, encoded) {
+		t.Errorf("response body leaked the encoded credential: %q", body)
 	}
 }

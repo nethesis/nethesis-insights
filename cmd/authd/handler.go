@@ -35,12 +35,18 @@ func newHandler(v validator) http.Handler {
 			return
 		}
 
-		systemID, err := v.Validate(r.Context(), header)
+		_, err := v.Validate(r.Context(), header)
 		switch {
 		case err == nil:
 			w.WriteHeader(http.StatusOK)
 		case errors.Is(err, auth.ErrInvalidCredentials):
-			slog.Info("authd: rejected", "system_id", systemID, "remote_addr", r.RemoteAddr)
+			// err, not a system_id: every ErrInvalidCredentials path in
+			// internal/platform/auth returns "" as the first value, so
+			// logging system_id here would read as an empty id on every
+			// rejection. err carries the actual reason and never the
+			// secret -- every format string in that package interpolates
+			// only the system id and the auth scheme.
+			slog.Info("authd: rejected", "err", err, "remote_addr", r.RemoteAddr)
 			unauthorized(w)
 		case errors.Is(err, auth.ErrUnavailable):
 			// Fail closed, but distinctly: the edge retries a 503 and gives
