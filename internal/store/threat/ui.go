@@ -134,8 +134,8 @@ type ThreatSystemRow struct {
 
 // ListThreatSystems aggregates per system_id across both Threat Shield
 // tables. threat_ingest_daily is the driving table -- RecordIngestCounters
-// (internal/api/threat.go) writes one row there for every POST
-// /v1/threat-events regardless of outcome, so it is the complete set of
+// (internal/api/threat/threat.go) writes one row there for every POST
+// /v1/events regardless of outcome, so it is the complete set of
 // systems that have ever reported, including ones whose every event was
 // dropped or duplicate and therefore never made it into threat_events.
 func (s *Store) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error) {

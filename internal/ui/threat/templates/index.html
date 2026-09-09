@@ -13,7 +13,7 @@ expires when nobody has reported it for the TTL.</small></p>
 {{if not .Feed.Present}}
 <p>n/a &mdash; the threat pipeline is not wired into this process.</p>
 {{else if not .Feed.Ready}}
-<p>Not generated yet &mdash; <code>GET /v1/blocklist</code> answers <code>503</code>
+<p>Not generated yet &mdash; <code>GET /v1/feed</code> answers <code>503</code>
 until the first successful consensus pass. An empty body would mean
 &ldquo;no threats&rdquo; to every client that imports it.</p>
 {{else}}
