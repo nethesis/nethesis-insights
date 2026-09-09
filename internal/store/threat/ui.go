@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package threat
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 // ListBlocklistEntries returns the promoted entries including expired ones
 // not yet swept, newest listing first -- the operator wants to see what just
 // happened, whereas the feed wants a stable order.
-func (s *SQLiteStore) ListBlocklistEntries(ctx context.Context, limit int) ([]BlocklistRow, error) {
+func (s *Store) ListBlocklistEntries(ctx context.Context, limit int) ([]BlocklistRow, error) {
 	return s.queryBlocklist(ctx, `
 		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
 		       distinct_systems, scenarios, listing_reason
@@ -30,7 +30,7 @@ func (s *SQLiteStore) ListBlocklistEntries(ctx context.Context, limit int) ([]Bl
 
 // ListThreatEvents returns recent sanitized events, optionally filtered by
 // system and by attacker address -- the "who reported this IP" question.
-func (s *SQLiteStore) ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error) {
+func (s *Store) ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, system_id, attacker_ip, scenario, observed_at, hit_count, metadata
 		FROM threat_events
@@ -63,7 +63,7 @@ func (s *SQLiteStore) ListThreatEvents(ctx context.Context, systemID, attackerIP
 }
 
 // ThreatDailyStats returns the day/scenario rollup, newest day first.
-func (s *SQLiteStore) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error) {
+func (s *Store) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT day, scenario, distinct_ips, total_hits
 		FROM threat_daily_stats
@@ -88,7 +88,7 @@ func (s *SQLiteStore) ThreatDailyStats(ctx context.Context, limit int) ([]Threat
 
 // ThreatIngestStats returns the per-day, per-system ingest accounting --
 // what each node contributed and, more usefully, what was dropped and why.
-func (s *SQLiteStore) ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error) {
+func (s *Store) ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT day, system_id, accepted, duplicates,
 		       dropped_type, dropped_scope, dropped_origin, dropped_bad_ip,
@@ -138,7 +138,7 @@ type ThreatSystemRow struct {
 // /v1/threat-events regardless of outcome, so it is the complete set of
 // systems that have ever reported, including ones whose every event was
 // dropped or duplicate and therefore never made it into threat_events.
-func (s *SQLiteStore) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error) {
+func (s *Store) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		WITH ingest AS (
 			SELECT system_id,
@@ -191,7 +191,7 @@ func (s *SQLiteStore) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow,
 // ListThreatAllowlist returns every allowlist entry, expired ones included:
 // "this used to be excluded and no longer is" is a question the operator page
 // has to be able to answer.
-func (s *SQLiteStore) ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error) {
+func (s *Store) ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error) {
 	return s.queryAllowlist(ctx, `
 		SELECT cidr, reason, created_by, created_at, expires_at
 		FROM threat_allowlist

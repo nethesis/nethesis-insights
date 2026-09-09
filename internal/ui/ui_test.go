@@ -19,9 +19,9 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
-// fakeReader is an in-package stand-in for the eight-method Reader slice of
-// store.Store. It never touches a database, so this package's tests never
-// wait on Agent A's store implementation.
+// fakeReader is an in-package stand-in for the Reader slice of store.Store.
+// It never touches a database, so this package's tests never wait on a real
+// store implementation.
 type fakeReader struct {
 	counts    store.Counts
 	systems   []store.SystemRow
@@ -32,14 +32,6 @@ type fakeReader struct {
 	findings  []model.Finding
 	templates []store.TemplateRow
 	baselines []store.BaselineRow
-
-	blocklist        []store.BlocklistRow
-	threatEvents     []store.ThreatEventRow
-	threatDaily      []store.ThreatDailyRow
-	threatIngest     []store.ThreatIngestRow
-	threatSystems    []store.ThreatSystemRow
-	allowlist        []store.AllowlistRow
-	allowlistRequest []store.AllowlistRequestRow
 
 	sizingCounts  store.SizingCounts
 	sizingNodes   []store.SizingNodeUIRow
@@ -207,25 +199,12 @@ func seededReader() *fakeReader {
 	}
 }
 
+// newTestServer builds the read-only server. The log pipeline has no write
+// routes, so there is no writer/admin-key variant to build here (contrast
+// internal/ui/threat's newWriteTestServer).
 func newTestServer(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	return newTestServerWithFeed(t, r, rt, nil)
-}
-
-// newTestServerWithFeed builds a read-only server: no writer, no admin key.
-// Every existing (pre-allowlist-management) test relies on writes being
-// unreachable, which is also the off-by-default behavior this helper is
-// meant to exercise. Use newWriteTestServer for the write-route tests.
-func newTestServerWithFeed(t *testing.T, r Reader, rt Runtime, feed Feed) http.Handler {
-	t.Helper()
-	return NewServer(r, rt, feed, testInfo(), nil, "")
-}
-
-// newWriteTestServer builds a server with the write routes enabled against
-// w, authenticated with adminKey.
-func newWriteTestServer(t *testing.T, r Reader, rt Runtime, feed Feed, w Writer, adminKey string) http.Handler {
-	t.Helper()
-	return NewServer(r, rt, feed, testInfo(), w, adminKey)
+	return NewServer(r, rt, testInfo())
 }
 
 func testInfo() Info {
@@ -261,10 +240,6 @@ var routes = []struct {
 	{"/cost", "<h1>Cost</h1>"},
 	{"/templates", "<h1>Templates</h1>"},
 	{"/baselines", "<h1>Baselines</h1>"},
-	{"/blocklist", "<h1>Blocklist</h1>"},
-	{"/threat-events", "<h1>Threat events</h1>"},
-	{"/threat-stats", "<h1>Threat stats</h1>"},
-	{"/allowlist-requests", "<h1>Allowlist requests</h1>"},
 }
 
 func TestRoutesOK(t *testing.T) {
@@ -475,7 +450,7 @@ func TestNoJavaScript(t *testing.T) {
 func TestSecretRedaction(t *testing.T) {
 	const decoySecret = "sk-live-do-not-leak-1234567890"
 
-	h := NewServer(seededReader(), fakeRuntime{}, nil, Info{
+	h := NewServer(seededReader(), fakeRuntime{}, Info{
 		StartedAt: 1700000000000,
 		Workers:   2,
 		Build:     "test-build",
@@ -483,7 +458,7 @@ func TestSecretRedaction(t *testing.T) {
 			{Name: "LLM_API_KEY", Value: "set"},
 			{Name: "AUTH_PEPPER", Value: "set (ephemeral)"},
 		},
-	}, nil, "")
+	})
 
 	rec := get(t, h, "/")
 	body := rec.Body.String()

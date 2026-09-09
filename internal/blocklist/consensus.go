@@ -11,19 +11,19 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
 
-// Reader is the slice of store.Store consensus needs. Declared here, like
-// ui.Reader, so this package is testable with a fake and the layering stays a
-// DAG. *store.SQLiteStore satisfies it.
+// Reader is the slice of threatstore.Store consensus needs. Declared here,
+// like ui.Reader, so this package is testable with a fake and the layering
+// stays a DAG. *threatstore.Store satisfies it.
 type Reader interface {
-	ConsensusCandidates(ctx context.Context, since int64) ([]store.ThreatCandidateRow, error)
-	ThreatAllowlist(ctx context.Context, now int64) ([]store.AllowlistRow, error)
-	UpsertBlocklistEntries(ctx context.Context, rows []store.BlocklistRow) error
+	ConsensusCandidates(ctx context.Context, since int64) ([]threatstore.ThreatCandidateRow, error)
+	ThreatAllowlist(ctx context.Context, now int64) ([]threatstore.AllowlistRow, error)
+	UpsertBlocklistEntries(ctx context.Context, rows []threatstore.BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
-	ListBlocklist(ctx context.Context, now int64, limit int) ([]store.BlocklistRow, error)
+	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
 	RollupThreatDailyStats(ctx context.Context) error
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
 }
@@ -138,7 +138,7 @@ func (r *Runner) allowlist(ctx context.Context, now int64) (threat.Allowlist, er
 
 // promote folds candidate triples per address and returns the entries
 // clearing the rule.
-func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist, now int64) []store.BlocklistRow {
+func (r *Runner) promote(rows []threatstore.ThreatCandidateRow, allow threat.Allowlist, now int64) []threatstore.BlocklistRow {
 	folded := map[netip.Addr]*candidate{}
 	for _, row := range rows {
 		addr, err := netip.ParseAddr(row.AttackerIP)
@@ -159,7 +159,7 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 		}
 	}
 
-	out := make([]store.BlocklistRow, 0, len(folded))
+	out := make([]threatstore.BlocklistRow, 0, len(folded))
 	for addr, c := range folded {
 		// Applied at promotion rather than at read, so adding an allowlist
 		// entry retroactively unlists the address on this pass instead of
@@ -171,7 +171,7 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 			continue
 		}
 		scenarios := keys(c.scenarios)
-		out = append(out, store.BlocklistRow{
+		out = append(out, threatstore.BlocklistRow{
 			AttackerIP: addr.String(),
 			// Ignored by the upsert when the row already exists: a refresh is
 			// not a new listing.
@@ -180,7 +180,7 @@ func (r *Runner) promote(rows []store.ThreatCandidateRow, allow threat.Allowlist
 			ExpiresAt:       c.lastSeen + r.cfg.TTL.Milliseconds(),
 			DistinctSystems: len(c.systems),
 			Scenarios:       scenarios,
-			Reason: store.ListingReason{
+			Reason: threatstore.ListingReason{
 				Systems:       len(c.systems),
 				Hits:          c.hits,
 				Scenarios:     scenarios,

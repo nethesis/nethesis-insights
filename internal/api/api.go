@@ -83,7 +83,6 @@ type server struct {
 	queue  Publisher
 	store  store.Store
 	auth   Authenticator
-	threat ThreatConfig
 	sizing SizingConfig
 	mux    *http.ServeMux
 
@@ -97,29 +96,20 @@ type server struct {
 
 // NewServer builds the ingest and read API.
 //
-// tc wires the Threat Shield endpoints and sc the fleet-sizing endpoint. Each
-// is a separate pipeline sharing only this listener and the Authenticator, and
-// each zero value leaves its routes unregistered. excludeModules and
-// excludeServices name modules and syslog identifiers stripped from every
-// incoming bundle; nil keeps all of them.
-func NewServer(q Publisher, s store.Store, auth Authenticator, tc ThreatConfig, sc SizingConfig, excludeModules, excludeServices map[string]bool) http.Handler {
-	if tc.Now == nil {
-		tc.Now = func() int64 { return time.Now().UnixMilli() }
-	}
+// sc wires the fleet-sizing endpoint, a separate pipeline sharing only this
+// listener and the Authenticator; its zero value leaves the route
+// unregistered. excludeModules and excludeServices name modules and syslog
+// identifiers stripped from every incoming bundle; nil keeps all of them.
+func NewServer(q Publisher, s store.Store, auth Authenticator, sc SizingConfig, excludeModules, excludeServices map[string]bool) http.Handler {
 	if sc.Now == nil {
 		sc.Now = func() int64 { return time.Now().UnixMilli() }
 	}
-	srv := &server{queue: q, store: s, auth: auth, threat: tc, sizing: sc,
+	srv := &server{queue: q, store: s, auth: auth, sizing: sc,
 		excludeModules: excludeModules, excludeServices: excludeServices}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
-	if tc.enabled() {
-		mux.HandleFunc("/v1/threat-events", srv.handleThreatEvents)
-		mux.HandleFunc("/v1/blocklist", srv.handleBlocklist)
-		mux.HandleFunc("/v1/allowlist-requests", srv.handleAllowlistRequest)
-	}
 	if sc.enabled() {
 		mux.HandleFunc("/v1/sizing-reports", srv.handleSizingReports)
 	}

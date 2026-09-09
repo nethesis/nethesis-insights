@@ -17,32 +17,22 @@
 //   - Secrets never render: Info.Config arrives already redacted by the
 //     caller, and this package never reads the environment.
 //
-// A small, explicit, enumerated set of routes also answers POST: adding and
-// removing a threat_allowlist entry, and approving/rejecting a client's
-// allowlist request. Every one of those authenticates with HTTP Basic
-// against ADMIN_API_KEY before doing anything, and is registered at all only
-// when a key was configured -- with none set, this package behaves exactly
-// like the read-only dashboard it used to be. See writableRoutes and
-// route() for the one place this rule is enforced. The Basic username
-// becomes the actor recorded with the write and in the audit trail; this is
-// not a security control (anyone holding the key can claim any name), only
-// a readable trail.
+// insightsd's own dashboard has no write routes: the log pipeline has
+// nothing to approve or reject, unlike Threat Shield's allowlist (see
+// internal/ui/threat).
 package ui
 
 import (
 	"context"
 	"embed"
 	"io/fs"
-	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
-	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
@@ -65,15 +55,7 @@ type Reader interface {
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error)
 
-	// Threat Shield.
-	ListBlocklistEntries(ctx context.Context, limit int) ([]store.BlocklistRow, error)
-	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]store.ThreatEventRow, error)
-	ThreatDailyStats(ctx context.Context, limit int) ([]store.ThreatDailyRow, error)
-	ThreatIngestStats(ctx context.Context, limit int) ([]store.ThreatIngestRow, error)
-	ListThreatSystems(ctx context.Context) ([]store.ThreatSystemRow, error)
-	ListThreatAllowlist(ctx context.Context) ([]store.AllowlistRow, error)
-
-	// Fleet sizing -- the third pipeline's two pages. These rows carry
+	// Fleet sizing -- the second pipeline's two pages. These rows carry
 	// per-customer commercial data (mailbox and PBX user counts, product
 	// mix), so the loopback-bind advice that applies to every page here
 	// applies to them too, recorded explicitly rather than inherited by
@@ -83,27 +65,6 @@ type Reader interface {
 	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]store.SizingCohortRow, error)
 	SizingIngestStats(ctx context.Context, limit int) ([]store.SizingIngestRow, error)
 	SizingCounts(ctx context.Context) (store.SizingCounts, error)
-
-	// PendingAllowlistRequests backs the /allowlist-requests review queue.
-	// This is a read: the queue is visible to anyone who can reach this
-	// listener, exactly like every other page here, and it carries no more
-	// than a ranked list of CIDRs someone asked about. Only acting on an
-	// entry (approve/reject) requires the admin key.
-	PendingAllowlistRequests(ctx context.Context, limit int) ([]store.AllowlistRequestRow, error)
-}
-
-// Writer is the slice of store.Store the UI's write routes need: adding or
-// removing a threat_allowlist entry, and turning a request into an approval
-// or a rejection. It is wired in, and its routes are registered, only when
-// ADMIN_API_KEY is set -- see NewServer and writableRoutes.
-//
-// *store.SQLiteStore satisfies it, exactly like Reader.
-type Writer interface {
-	UpsertThreatAllowlistEntry(ctx context.Context, e store.AllowlistRow) error
-	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
-	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
-	DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error)
-	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -112,18 +73,6 @@ type Writer interface {
 type Runtime interface {
 	Depth() int
 	Cap() int
-}
-
-// Feed reports the state of the rendered blocklist snapshot.
-// *blocklist.Snapshot satisfies it. Like Runtime it may be nil -- tests, and
-// a deployment with the threat pipeline off -- in which case the pages render
-// "n/a" rather than panicking. Only the snapshot's *state* crosses this
-// boundary, never its body: the UI does not serve the feed.
-type Feed interface {
-	Ready() bool
-	Entries() int
-	GeneratedAt() int64
-	ETag() string
 }
 
 // Info is the static half of the status page, built once by the caller. It
@@ -171,13 +120,6 @@ var navGroups = []chrome.NavGroup{
 		{Key: "templates", Path: "/templates", Label: "Templates"},
 		{Key: "baselines", Path: "/baselines", Label: "Baselines"},
 	}},
-	{Label: "Blocklist Pipeline", Pages: []chrome.NavPage{
-		{Key: "threat-systems", Path: "/threat-systems", Label: "Systems"},
-		{Key: "blocklist", Path: "/blocklist", Label: "Blocklist"},
-		{Key: "threat-events", Path: "/threat-events", Label: "Threat events"},
-		{Key: "threat-stats", Path: "/threat-stats", Label: "Threat stats"},
-		{Key: "allowlist-requests", Path: "/allowlist-requests", Label: "Allowlist requests"},
-	}},
 	{Label: "Sizing Pipeline", Pages: []chrome.NavPage{
 		{Key: "sizing", Path: "/sizing", Label: "Nodes"},
 		{Key: "cohorts", Path: "/cohorts", Label: "Recommendations"},
@@ -189,8 +131,6 @@ var navGroups = []chrome.NavGroup{
 var pages = []string{
 	"status.html", "systems.html", "findings.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html",
-	"blocklist.html", "threat-systems.html", "threat-events.html", "threat-stats.html",
-	"allowlist-requests.html",
 	"sizing.html", "cohorts.html",
 }
 
@@ -198,22 +138,16 @@ type server struct {
 	chrome *chrome.Base
 	reader Reader
 	rt     Runtime
-	feed   Feed
 	info   Info
-	writer Writer
 }
 
-// NewServer builds the operator UI handler. rt and feed may be nil.
-//
-// w and adminKey wire the write half: if adminKey is empty, w is never
-// consulted and every writable route answers 405 exactly like any other
-// non-GET request -- an operator who has not set ADMIN_API_KEY gets the
-// plain read-only dashboard, with no write form reachable at all.
+// NewServer builds the operator UI handler. rt may be nil.
 //
 // This dashboard is not deployed behind Traefik's path-prefix split (it is
 // its own listener, meant to be bound to loopback), so it always passes an
-// empty BasePath to chrome.
-func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey string) http.Handler {
+// empty BasePath to chrome. It has no write routes: the log pipeline has
+// nothing to approve or reject.
+func NewServer(r Reader, rt Runtime, info Info) http.Handler {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -223,7 +157,6 @@ func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey st
 	}
 
 	base, err := chrome.New(chrome.Config{
-		AdminKey: adminKey,
 		Info: chrome.Info{
 			StartedAt: info.StartedAt,
 			Build:     info.Build,
@@ -241,73 +174,23 @@ func NewServer(r Reader, rt Runtime, feed Feed, info Info, w Writer, adminKey st
 		chrome: base,
 		reader: r,
 		rt:     rt,
-		feed:   feed,
 		info:   info,
-		writer: w,
 	}
 
 	mux := http.NewServeMux()
 	// Every path, including unknown ones, is dispatched centrally through
-	// route() so the GET-only rule (and its small, explicit write exception)
-	// and the 404 fallback are enforced in exactly one place, per the plan's
-	// "enforce it centrally, once".
+	// route() so the GET-only rule and the 404 fallback are enforced in
+	// exactly one place.
 	mux.HandleFunc("/", srv.route)
 
 	return httpx.Logging(mux)
 }
 
-// canWrite reports whether the write forms should render, and whether a
-// write route is reachable at all. It is false whenever ADMIN_API_KEY was
-// not configured -- the plan requires that case to leave the UI with "no
-// write forms at all", not forms that render and then always 401. chrome's
-// CanWrite only knows about the admin key; this package additionally
-// requires a store Writer to have been wired in.
-func (s *server) canWrite() bool {
-	return s.writer != nil && s.chrome.CanWrite()
-}
-
-// writableRoutes is the small, explicit, enumerated set of paths that also
-// answer POST. It lives here, next to the GET-only check it modifies, so
-// "which routes can write" stays answerable by reading this one function --
-// see the plan's decision 2. Every route not in this set still 405s on
-// anything but GET, exactly as before that plan.
-//
-// The CIDR itself never travels in these paths: it is always a form field,
-// mirroring the admin API's rule that it never travels in a path segment.
-var writableRoutes = map[string]bool{
-	"/blocklist/allowlist":        true, // add or update an entry
-	"/blocklist/allowlist/delete": true, // remove an entry
-	"/allowlist-requests/approve": true,
-	"/allowlist-requests/reject":  true,
-}
-
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		// Every route answers GET. A small, explicit, enumerated set of
-		// routes also answers POST, and every one of those authenticates
-		// before doing anything -- see the package doc comment. Anything
-		// else, including a write route reached without ADMIN_API_KEY
-		// configured (s.writer unset or chrome.CanWrite false), is still a
-		// plain 405: this is what makes "no key configured" mean "no write
-		// forms reachable at all", not "reachable but always unauthorized".
-		if !s.canWrite() || !writableRoutes[r.URL.Path] {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		actor, ok := s.chrome.AuthenticateWrite(w, r)
-		if !ok {
-			return
-		}
-		switch r.URL.Path {
-		case "/blocklist/allowlist":
-			s.handleAddAllowlist(w, r, actor)
-		case "/blocklist/allowlist/delete":
-			s.handleDeleteAllowlist(w, r, actor)
-		case "/allowlist-requests/approve":
-			s.handleApproveRequest(w, r, actor)
-		case "/allowlist-requests/reject":
-			s.handleRejectRequest(w, r, actor)
-		}
+		// Every route here answers GET only: the log pipeline has no write
+		// routes (see the package doc comment).
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -332,16 +215,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplates(w, r)
 	case "/baselines":
 		s.handleBaselines(w, r)
-	case "/threat-systems":
-		s.handleThreatSystems(w, r)
-	case "/blocklist":
-		s.handleBlocklist(w, r)
-	case "/threat-events":
-		s.handleThreatEvents(w, r)
-	case "/threat-stats":
-		s.handleThreatStats(w, r)
-	case "/allowlist-requests":
-		s.handleAllowlistRequests(w, r)
 	case "/sizing":
 		s.handleSizing(w, r)
 	case "/cohorts":
@@ -379,27 +252,6 @@ func sanitizeStatus(v string) string {
 // feedState is the snapshot half of the status and blocklist pages. It is a
 // value rather than the Feed itself so a nil feed renders as "off" instead of
 // panicking in the template.
-type feedState struct {
-	Present     bool
-	Ready       bool
-	Entries     int
-	GeneratedAt int64
-	ETag        string
-}
-
-func (s *server) feedState() feedState {
-	if s.feed == nil {
-		return feedState{}
-	}
-	return feedState{
-		Present:     true,
-		Ready:       s.feed.Ready(),
-		Entries:     s.feed.Entries(),
-		GeneratedAt: s.feed.GeneratedAt(),
-		ETag:        s.feed.ETag(),
-	}
-}
-
 type statusPageData struct {
 	chrome.PageData
 	Counts     store.Counts
@@ -407,7 +259,6 @@ type statusPageData struct {
 	QueueDepth int
 	QueueCap   int
 	Workers    int
-	Feed       feedState
 	Config     []chrome.ConfigItem
 }
 
@@ -422,7 +273,6 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Counts:   counts,
 		HasQueue: s.rt != nil,
 		Workers:  s.info.Workers,
-		Feed:     s.feedState(),
 		Config:   s.info.Config,
 	}
 	if s.rt != nil {
@@ -704,300 +554,6 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		Baselines: baselines,
 		System:    systemID,
 	})
-}
-
-// --- Threat Shield pages ---
-
-type threatSystemsPageData struct {
-	chrome.PageData
-	Systems []store.ThreatSystemRow
-}
-
-// handleThreatSystems is the blocklist pipeline's counterpart to
-// handleSystems: one row per system that has ever reported threat events,
-// including a system whose every report was dropped or duplicate.
-func (s *server) handleThreatSystems(w http.ResponseWriter, r *http.Request) {
-	systems, err := s.reader.ListThreatSystems(r.Context())
-	if err != nil {
-		s.chrome.StoreError(w, "threat-systems", err)
-		return
-	}
-	s.chrome.Render(w, "threat-systems.html", threatSystemsPageData{
-		PageData: s.chrome.PageData(r, "threat-systems"),
-		Systems:  systems,
-	})
-}
-
-type blocklistPageData struct {
-	chrome.PageData
-	Feed      feedState
-	Entries   []store.BlocklistRow
-	Allowlist []store.AllowlistRow
-	Now       int64
-	CanWrite  bool
-}
-
-// handleBlocklist shows what the fleet currently agrees on, plus the
-// allowlist exclusion. "Why is this IP listed" and "why is this IP never
-// listed" are both operator questions, and both are answered on one page.
-func (s *server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.reader.ListBlocklistEntries(r.Context(), blocklistLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "blocklist", err)
-		return
-	}
-	allowlist, err := s.reader.ListThreatAllowlist(r.Context())
-	if err != nil {
-		s.chrome.StoreError(w, "blocklist", err)
-		return
-	}
-	s.chrome.Render(w, "blocklist.html", blocklistPageData{
-		PageData:  s.chrome.PageData(r, "blocklist"),
-		Feed:      s.feedState(),
-		Entries:   entries,
-		Allowlist: allowlist,
-		Now:       time.Now().UnixMilli(),
-		CanWrite:  s.canWrite(),
-	})
-}
-
-type threatEventsPageData struct {
-	chrome.PageData
-	Events []store.ThreatEventRow
-	System string
-	IP     string
-	Limit  int
-}
-
-func (s *server) handleThreatEvents(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	systemID := q.Get("system")
-	// Not validated as an address on purpose: an unmatched filter returning
-	// nothing is a clearer answer than silently ignoring what was typed. It is
-	// a bind parameter either way.
-	ip := q.Get("ip")
-	limit := chrome.ClampLimit(q.Get("limit"), threatEventsDefLim, threatEventsMaxLim)
-
-	events, err := s.reader.ListThreatEvents(r.Context(), systemID, ip, limit)
-	if err != nil {
-		s.chrome.StoreError(w, "threat-events", err)
-		return
-	}
-	s.chrome.Render(w, "threat-events.html", threatEventsPageData{
-		PageData: s.chrome.PageData(r, "threat-events"),
-		Events:   events,
-		System:   systemID,
-		IP:       ip,
-		Limit:    limit,
-	})
-}
-
-type threatStatsPageData struct {
-	chrome.PageData
-	Daily  []threatDayGroup
-	Ingest []store.ThreatIngestRow
-}
-
-// threatDayGroup folds ThreatDailyStats' per-day-per-scenario rows into one
-// group per day, plus that day's total hits across every scenario -- the
-// same pattern as costDayGroup. TotalHits is additive so it sums cleanly;
-// DistinctIPs is deliberately not summed here, since the same address can
-// appear under more than one scenario and a naive sum would overcount it.
-type threatDayGroup struct {
-	Day       string
-	Rows      []store.ThreatDailyRow
-	TotalHits int64
-}
-
-func (s *server) handleThreatStats(w http.ResponseWriter, r *http.Request) {
-	dailyRows, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "threat-stats", err)
-		return
-	}
-	var daily []threatDayGroup
-	for _, row := range dailyRows {
-		if len(daily) == 0 || daily[len(daily)-1].Day != row.Day {
-			daily = append(daily, threatDayGroup{Day: row.Day})
-		}
-		g := &daily[len(daily)-1]
-		g.Rows = append(g.Rows, row)
-		g.TotalHits += row.TotalHits
-	}
-	ingest, err := s.reader.ThreatIngestStats(r.Context(), threatStatsLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "threat-stats", err)
-		return
-	}
-	s.chrome.Render(w, "threat-stats.html", threatStatsPageData{
-		PageData: s.chrome.PageData(r, "threat-stats"),
-		Daily:    daily,
-		Ingest:   ingest,
-	})
-}
-
-// --- Allowlist requests: the review queue, and its write half ---
-
-// allowlistRequestsLimit bounds the queue the same way every other
-// unauthenticated list here is bounded.
-const allowlistRequestsLimit = 200
-
-type allowlistRequestsPageData struct {
-	chrome.PageData
-	Requests []store.AllowlistRequestRow
-	CanWrite bool
-}
-
-// handleAllowlistRequests shows the pending review queue. It is a GET, and
-// therefore unauthenticated like every other page: the queue is a ranked
-// list of CIDRs someone asked about, and only acting on one (approve/reject)
-// requires the admin key.
-func (s *server) handleAllowlistRequests(w http.ResponseWriter, r *http.Request) {
-	requests, err := s.reader.PendingAllowlistRequests(r.Context(), allowlistRequestsLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "allowlist-requests", err)
-		return
-	}
-	s.chrome.Render(w, "allowlist-requests.html", allowlistRequestsPageData{
-		PageData: s.chrome.PageData(r, "allowlist-requests"),
-		Requests: requests,
-		CanWrite: s.canWrite(),
-	})
-}
-
-// handleAddAllowlist and handleDeleteAllowlist are POST form handlers
-// (writableRoutes), reached only after HTTP Basic authentication. Both
-// redirect back to /blocklist rather than answering JSON: this is a human
-// submitting a form, and the useful response is the updated page, not a
-// status code.
-
-func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	force := r.FormValue("force") != ""
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), force)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	reason := threat.CleanText(r.FormValue("reason"), model.MaxAllowlistReasonLen)
-	now := time.Now().UnixMilli()
-
-	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
-		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
-	}); err != nil {
-		s.chrome.StoreError(w, "blocklist", err)
-		return
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.upsert", actor, reason, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	http.Redirect(w, r, s.chrome.Link("/blocklist"), http.StatusSeeOther)
-}
-
-func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	// force=true: breadth guards adding an exemption, not removing one --
-	// the caller must be able to remove whatever is actually stored.
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), true)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	existed, err := s.writer.DeleteThreatAllowlistEntry(r.Context(), cidr)
-	if err != nil {
-		s.chrome.StoreError(w, "blocklist", err)
-		return
-	}
-	if !existed {
-		http.Error(w, "no such allowlist entry", http.StatusNotFound)
-		return
-	}
-	now := time.Now().UnixMilli()
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.delete", actor, "", now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	http.Redirect(w, r, s.chrome.Link("/blocklist"), http.StatusSeeOther)
-}
-
-// handleApproveRequest is the only path this package offers from a client
-// request to a live allowlist entry, and it only ever runs because an
-// authenticated human submitted this form -- see the "no automatic
-// promotion" rule in CLAUDE.md.
-func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, actor string) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), false)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
-	reason := note
-	if reason == "" {
-		reason = "approved via operator UI"
-	}
-	now := time.Now().UnixMilli()
-
-	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), store.AllowlistRow{
-		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
-	}); err != nil {
-		s.chrome.StoreError(w, "allowlist-requests", err)
-		return
-	}
-	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewApproved, actor, note, now); err != nil {
-		slog.Error("ui: record allowlist review failed", "cidr", cidr, "error", err)
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.approve", actor, note, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	// Retire the handled request, last: see store.DeleteAllowlistRequests
-	// for why the queue is emptied only after the decision is durable.
-	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
-		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
-	}
-	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
-}
-
-// handleRejectRequest creates no allowlist entry -- there is nothing here
-// that could auto-promote anything.
-func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, actor string) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	raw := strings.TrimSpace(r.FormValue("cidr"))
-	if raw == "" {
-		http.Error(w, "cidr is required", http.StatusBadRequest)
-		return
-	}
-	cidr, _, err := threat.ParseAllowlistEntry(raw, true) // no entry is created; breadth is irrelevant
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
-	now := time.Now().UnixMilli()
-
-	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, store.AllowlistReviewRejected, actor, note, now); err != nil {
-		s.chrome.StoreError(w, "allowlist-requests", err)
-		return
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.reject", actor, note, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
-		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
-	}
-	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
 }
 
 // --- Fleet sizing pages ---

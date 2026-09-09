@@ -57,7 +57,7 @@ func (f *fakeSizingStore) RecordSizingIngest(_ context.Context, day int64, syste
 func sizingServer(st SizingStore) http.Handler {
 	return NewServer(&fakePublisher{}, nil,
 		StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{}, SizingConfig{
+		SizingConfig{
 			Store: st,
 			Now:   func() int64 { return sizingNow },
 		}, nil, nil)
@@ -168,7 +168,7 @@ func TestSizingIngestRejectsNonPost(t *testing.T) {
 func TestSizingRouteAbsentWhenUnconfigured(t *testing.T) {
 	h := NewServer(&fakePublisher{}, nil,
 		StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{}, SizingConfig{}, nil, nil)
+		SizingConfig{}, nil, nil)
 	rec := postSizing(t, h, validReport("2026-09-01"), true)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

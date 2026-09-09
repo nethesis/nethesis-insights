@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
 // Rule is the promotion rule in force, rendered into the feed header so a
@@ -56,7 +56,7 @@ func NewSnapshot() *Snapshot { return &Snapshot{} }
 // Generate renders rows into a new snapshot and swaps it in. rows beyond
 // maxEntries are dropped: a feed that outgrows its consumers' memory is worse
 // than a truncated one, and the cap is deterministic because the order is.
-func (s *Snapshot) Generate(rows []store.BlocklistRow, rule Rule, maxEntries int, now int64) error {
+func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, maxEntries int, now int64) error {
 	addrs := make([]netip.Addr, 0, len(rows))
 	for _, r := range rows {
 		a, err := netip.ParseAddr(r.AttackerIP)

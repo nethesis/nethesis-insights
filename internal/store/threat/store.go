@@ -1,7 +1,12 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+// Package threat is Threat Shield's storage: ingest, consensus inputs, the
+// promoted blocklist, the allowlist and its client-facing review queue, and
+// the rollups that outlive the raw events. It is threatd's only store
+// package -- a separate SQLite file from the logs and sizing pipelines,
+// sharing nothing with them but the sqlitex runtime settings.
+package threat
 
 import (
 	"context"
@@ -11,12 +16,201 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/sqlitex"
 	"github.com/oklog/ulid/v2"
 )
 
-// Threat Shield storage: ingest, consensus inputs, the promoted blocklist and
-// the rollups that outlive the raw events. Write methods take the same mutex
-// as the rest of the store; read methods do not.
+// Store is Threat Shield's SQLite-backed store: ingest, consensus inputs, the
+// promoted blocklist, allowlist management and the operator UI's reads.
+// Write methods take the shared write mutex (sqlitex.DB.Lock/Unlock); read
+// methods do not.
+type Store struct {
+	db *sqlitex.DB
+}
+
+// Open opens the Threat Shield database at path with the project's standard
+// SQLite runtime settings (WAL, busy_timeout, a single connection plus the
+// write mutex) -- see internal/platform/sqlitex.
+func Open(path string) (*Store, error) {
+	db, err := sqlitex.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("threat: open: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// Init creates Threat Shield's tables if they do not already exist: the raw
+// event stream, the promoted blocklist, the hand-maintained allowlist, the
+// daily rollups that outlive the raw events, ingest accounting, and the
+// client-facing allowlist request queue with its review and audit trails.
+func (s *Store) Init(ctx context.Context) error {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	stmts := []string{
+		// attacker_ip is always a normalized netip.Addr.String(), which is
+		// what lets a portable TEXT column behave like Postgres INET: text
+		// equality is address identity.
+		`CREATE TABLE IF NOT EXISTS threat_events (
+			id TEXT PRIMARY KEY,
+			system_id TEXT,
+			attacker_ip TEXT,
+			scenario TEXT,
+			observed_at INTEGER,
+			hit_count INTEGER,
+			metadata TEXT
+		)`,
+		// Redelivery idempotency: a reporter that retries a batch must not be
+		// able to inflate hit_count and manufacture its own consensus.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_events_dedup
+			ON threat_events(system_id, attacker_ip, scenario, observed_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_events_ip ON threat_events(attacker_ip, observed_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_events_observed ON threat_events(observed_at)`,
+		`CREATE TABLE IF NOT EXISTS threat_blocklist (
+			attacker_ip TEXT PRIMARY KEY,
+			first_listed_at INTEGER,
+			last_seen_at INTEGER,
+			expires_at INTEGER,
+			distinct_systems INTEGER,
+			scenarios TEXT,
+			listing_reason TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_threat_blocklist_expires ON threat_blocklist(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS threat_allowlist (
+			cidr TEXT PRIMARY KEY,
+			reason TEXT,
+			created_by TEXT,
+			created_at INTEGER,
+			expires_at INTEGER
+		)`,
+		// Rolled up before the raw events are pruned, so the long-term trend
+		// asset survives the retention window at a few rows per day.
+		`CREATE TABLE IF NOT EXISTS threat_daily_stats (
+			day TEXT,
+			scenario TEXT,
+			distinct_ips INTEGER,
+			total_hits INTEGER,
+			PRIMARY KEY (day, scenario)
+		)`,
+		// Ingest accounting. Without it, "this node contributes nothing and
+		// here is which rule is dropping it" is answerable only from logs.
+		`CREATE TABLE IF NOT EXISTS threat_ingest_daily (
+			day TEXT,
+			system_id TEXT,
+			accepted INTEGER,
+			duplicates INTEGER,
+			dropped_type INTEGER,
+			dropped_scope INTEGER,
+			dropped_origin INTEGER,
+			dropped_bad_ip INTEGER,
+			dropped_private_ip INTEGER,
+			dropped_time INTEGER,
+			truncated INTEGER,
+			PRIMARY KEY (day, system_id)
+		)`,
+
+		// --- Allowlist management ---
+		//
+		// threat_allowlist itself (above) is unchanged. These three tables add
+		// a client-facing request queue and its audit trail on top of it, with
+		// no path from a request to a live entry that does not pass through an
+		// explicit admin decision -- see the "no automatic promotion" rule in
+		// CLAUDE.md.
+		//
+		// Requests are append-only per (cidr, system_id): a rejection or an
+		// approval never deletes them, so "who asked, and when" survives the
+		// decision. The counter that ranks the review queue is
+		// COUNT(DISTINCT system_id) over this table, mirroring the blocklist's
+		// own distinct-systems rule.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_requests (
+			cidr TEXT,
+			system_id TEXT,
+			reason TEXT,
+			created_at INTEGER,
+			PRIMARY KEY (cidr, system_id)
+		)`,
+		// The latest decision for a cidr, and nothing more: state is
+		// "approved" or "rejected". It does not gate the pending queue --
+		// handling a request deletes the threat_allowlist_requests rows that
+		// raised it, so a later ask for the same cidr is reviewed on its own
+		// merits instead of being silently swallowed by an old decision.
+		// Re-reviewing an already-decided cidr overwrites the row rather than
+		// erroring, since an admin may reject and then reconsider.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_reviews (
+			cidr TEXT PRIMARY KEY,
+			state TEXT,
+			decided_by TEXT,
+			decided_at INTEGER,
+			note TEXT
+		)`,
+		// Append-only, and deliberately never updated or deleted: DELETE on
+		// threat_allowlist removes the very row that would otherwise hold the
+		// trail, so without this table "who removed the exemption that let
+		// this through" is unanswerable -- which is the question that gets
+		// asked.
+		`CREATE TABLE IF NOT EXISTS threat_allowlist_audit (
+			id TEXT PRIMARY KEY,
+			cidr TEXT,
+			action TEXT,
+			actor TEXT,
+			at INTEGER,
+			detail TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_allowlist_audit_at ON threat_allowlist_audit(at)`,
+	}
+
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("threat: init: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// defaultListLimit is applied whenever a caller passes limit <= 0. This data
+// is served to an unauthenticated UI, so "no limit" is never an option.
+const defaultListLimit = 200
+
+// clampLimit applies defaultListLimit whenever the caller passed a
+// non-positive value.
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return defaultListLimit
+	}
+	return limit
+}
+
+const dayMillis = 86400000
+
+// Counts is per-table row counts, for the status page.
+type Counts struct {
+	Events, BlocklistEntries, AllowlistEntries, PendingRequests int
+}
+
+// Counts reports per-table row counts. PendingRequests counts distinct CIDRs
+// with an outstanding client request -- the review queue's size -- not the
+// number of request rows, which can be many per CIDR.
+func (s *Store) Counts(ctx context.Context) (Counts, error) {
+	var c Counts
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threat_events`).Scan(&c.Events); err != nil {
+		return Counts{}, fmt.Errorf("threat: count events: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threat_blocklist`).Scan(&c.BlocklistEntries); err != nil {
+		return Counts{}, fmt.Errorf("threat: count blocklist entries: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threat_allowlist`).Scan(&c.AllowlistEntries); err != nil {
+		return Counts{}, fmt.Errorf("threat: count allowlist entries: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(DISTINCT cidr) FROM threat_allowlist_requests`).Scan(&c.PendingRequests); err != nil {
+		return Counts{}, fmt.Errorf("threat: count pending requests: %w", err)
+	}
+	return c, nil
+}
 
 // ThreatEventRow is one stored threat_events row.
 type ThreatEventRow struct {
@@ -104,13 +298,13 @@ func DayString(ms int64) string {
 // retries cannot inflate hit_count, and therefore cannot manufacture its own
 // contribution to consensus. Duplicates are counted, not hidden -- an edge
 // retrying constantly is worth seeing in the operator UI.
-func (s *SQLiteStore) InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (int, int, error) {
+func (s *Store) InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (int, int, error) {
 	if len(ev) == 0 {
 		return 0, 0, nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -151,9 +345,9 @@ func (s *SQLiteStore) InsertThreatEvents(ctx context.Context, systemID string, e
 
 // RecordIngestCounters accumulates one request's outcome into the day's row
 // for that system.
-func (s *SQLiteStore) RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_ingest_daily (day, system_id, accepted, duplicates,
@@ -182,7 +376,7 @@ func (s *SQLiteStore) RecordIngestCounters(ctx context.Context, day, systemID st
 // ConsensusCandidates returns every (attacker_ip, scenario, system_id) triple
 // observed since the given instant. See ThreatCandidateRow for why the
 // grouping goes down to system_id.
-func (s *SQLiteStore) ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error) {
+func (s *Store) ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT attacker_ip, scenario, system_id, SUM(hit_count), MAX(observed_at)
 		FROM threat_events
@@ -209,7 +403,7 @@ func (s *SQLiteStore) ConsensusCandidates(ctx context.Context, since int64) ([]T
 // ThreatAllowlist returns the non-expired allowlist entries. The allowlist is
 // applied at promotion, not at read, so adding an entry retroactively unlists
 // the address on the next consensus pass.
-func (s *SQLiteStore) ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error) {
+func (s *Store) ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error) {
 	return s.queryAllowlist(ctx, `
 		SELECT cidr, reason, created_by, created_at, expires_at
 		FROM threat_allowlist
@@ -224,9 +418,9 @@ func (s *SQLiteStore) ThreatAllowlist(ctx context.Context, now int64) ([]Allowli
 // server no admin auth plane, so entries are added out of band. The method
 // exists so that "out of band" means a small supported call rather than
 // hand-written SQL against a live database.
-func (s *SQLiteStore) UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	var expires any
 	if e.ExpiresAt != nil {
@@ -247,9 +441,9 @@ func (s *SQLiteStore) UpsertThreatAllowlistEntry(ctx context.Context, e Allowlis
 }
 
 // DeleteThreatAllowlistEntry removes one entry, reporting whether it existed.
-func (s *SQLiteStore) DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_allowlist WHERE cidr = ?`, cidr)
 	if err != nil {
@@ -262,7 +456,7 @@ func (s *SQLiteStore) DeleteThreatAllowlistEntry(ctx context.Context, cidr strin
 	return n > 0, nil
 }
 
-func (s *SQLiteStore) queryAllowlist(ctx context.Context, query string, args ...any) ([]AllowlistRow, error) {
+func (s *Store) queryAllowlist(ctx context.Context, query string, args ...any) ([]AllowlistRow, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: threat allowlist: %w", err)
@@ -295,13 +489,13 @@ func (s *SQLiteStore) queryAllowlist(ctx context.Context, query string, args ...
 //
 // first_listed_at is never touched on update: it records when the fleet first
 // agreed about this address, and a refresh is not a new listing.
-func (s *SQLiteStore) UpsertBlocklistEntries(ctx context.Context, entries []BlocklistRow) error {
+func (s *Store) UpsertBlocklistEntries(ctx context.Context, entries []BlocklistRow) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -343,9 +537,9 @@ func (s *SQLiteStore) UpsertBlocklistEntries(ctx context.Context, entries []Bloc
 
 // ExpireBlocklist removes entries whose TTL has run out. A short TTL is what
 // stops rented and NAT addresses lingering after reassignment (design D5).
-func (s *SQLiteStore) ExpireBlocklist(ctx context.Context, now int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) ExpireBlocklist(ctx context.Context, now int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_blocklist WHERE expires_at <= ?`, now)
 	if err != nil {
@@ -360,7 +554,7 @@ func (s *SQLiteStore) ExpireBlocklist(ctx context.Context, now int64) (int, erro
 
 // ListBlocklist returns the live entries that make up the feed, oldest
 // listing first so the served order is stable across regenerations.
-func (s *SQLiteStore) ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error) {
+func (s *Store) ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error) {
 	return s.queryBlocklist(ctx, `
 		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
 		       distinct_systems, scenarios, listing_reason
@@ -371,7 +565,7 @@ func (s *SQLiteStore) ListBlocklist(ctx context.Context, now int64, limit int) (
 	`, now, clampLimit(limit))
 }
 
-func (s *SQLiteStore) queryBlocklist(ctx context.Context, query string, args ...any) ([]BlocklistRow, error) {
+func (s *Store) queryBlocklist(ctx context.Context, query string, args ...any) ([]BlocklistRow, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list blocklist: %w", err)
@@ -408,7 +602,7 @@ func (s *SQLiteStore) queryBlocklist(ctx context.Context, query string, args ...
 // missed pass, converges on the right answer instead of double counting. The
 // day bucket is integer division on the millis column with the label
 // formatted in Go: SQLite and Postgres share no date function.
-func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
+func (s *Store) RollupThreatDailyStats(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT observed_at / ?, scenario, COUNT(DISTINCT attacker_ip), SUM(hit_count)
 		FROM threat_events
@@ -443,8 +637,8 @@ func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -473,9 +667,9 @@ func (s *SQLiteStore) RollupThreatDailyStats(ctx context.Context) error {
 
 // PruneThreatEvents drops raw events past the retention window. It must run
 // after RollupThreatDailyStats, or the day being dropped loses its history.
-func (s *SQLiteStore) PruneThreatEvents(ctx context.Context, olderThan int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) PruneThreatEvents(ctx context.Context, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_events WHERE observed_at < ?`, olderThan)
 	if err != nil {

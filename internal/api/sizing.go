@@ -96,7 +96,7 @@ func (s *server) handleSizingReports(w http.ResponseWriter, r *http.Request) {
 	}
 	// system_id is optional -- the credential already identifies the reporter
 	// -- but a mismatch is a broken reporter, not something to silently
-	// override. Same rule as handleBundles and handleThreatEvents.
+	// override. Same rule as handleBundles.
 	if report.SystemID != "" && report.SystemID != authenticatedSystemID {
 		reject(w, r, http.StatusForbidden, "system_id does not match authenticated system",
 			"report_system_id", report.SystemID, "authenticated_system_id", authenticatedSystemID)

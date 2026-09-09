@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package api
+package threat
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
 
@@ -24,16 +25,18 @@ const maxAllowlistRequestSize = 8 << 10 // 8 KiB
 // counter returned here ranks the admin's review queue and does nothing
 // else -- there is no path anywhere in this codebase from a client request,
 // however many systems make it, to a live threat_allowlist entry. Only an
-// explicit admin approval (internal/admin) creates one. See the "no
-// automatic promotion" decision in docs/plans/2026-08-28-allowlist-management.md.
+// explicit admin approval (internal/ui/threat's write routes) creates one.
+// See the "no automatic promotion" decision in
+// docs/plans/2026-08-28-allowlist-management.md.
 func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	authenticatedSystemID, ok := s.authenticate(w, r)
-	if !ok {
+	authenticatedSystemID, err := httpx.SystemID(r, s.trusted)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -57,11 +60,11 @@ func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) 
 	// in this pipeline), rendered escaped by the operator UI, never trusted.
 	reason := threat.CleanText(body.Reason, model.MaxAllowlistReasonLen)
 
-	now := s.threat.Now()
+	now := s.cfg.Now()
 	requests, err := s.store.UpsertAllowlistRequest(r.Context(), cidr, authenticatedSystemID, reason, now)
 	if err != nil {
 		slog.Error("upsert allowlist request failed", "system_id", authenticatedSystemID, "cidr", cidr, "error", err)
-		writeJSONError(w, http.StatusServiceUnavailable, "temporarily unavailable")
+		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
 

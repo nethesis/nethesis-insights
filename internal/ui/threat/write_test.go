@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package ui
+package threat
 
 import (
 	"context"
@@ -11,13 +11,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
 // fakeWriter records the writes the UI asked for, so each test can assert on
 // the actor that was attributed as well as on the effect.
 type fakeWriter struct {
-	upserted []store.AllowlistRow
+	upserted []threatstore.AllowlistRow
 	deleted  []string
 	reviews  []review
 	reqDels  []string // CIDRs passed to DeleteAllowlistRequests, in order
@@ -29,7 +29,7 @@ type review struct{ cidr, state, decidedBy, note string }
 
 type auditCall struct{ cidr, action, actor, detail string }
 
-func (f *fakeWriter) UpsertThreatAllowlistEntry(_ context.Context, e store.AllowlistRow) error {
+func (f *fakeWriter) UpsertThreatAllowlistEntry(_ context.Context, e threatstore.AllowlistRow) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -99,7 +99,7 @@ var writePaths = []string{
 // exist as writes at all.
 func TestWriteRoutesAreNotReachableWithoutAnAdminKey(t *testing.T) {
 	w := &fakeWriter{}
-	h := newTestServerWithFeed(t, threatReader(), nil, nil) // no writer, no key
+	h := newTestServerWithFeed(t, threatReader(), nil) // no writer, no key
 
 	for _, p := range writePaths {
 		rec := do(h, writeReq(p, url.Values{"cidr": {"203.0.113.0/24"}}))
@@ -114,7 +114,7 @@ func TestWriteRoutesAreNotReachableWithoutAnAdminKey(t *testing.T) {
 
 func TestWriteRoutesRequireTheAdminKey(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	t.Run("no credential", func(t *testing.T) {
 		rec := do(h, writeReq("/blocklist/allowlist", url.Values{"cidr": {"203.0.113.0/24"}}))
@@ -143,7 +143,7 @@ func TestWriteRoutesRequireTheAdminKey(t *testing.T) {
 // separate actor field.
 func TestWriteRecordsTheBasicUsernameAsTheActor(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	req := writeReq("/blocklist/allowlist", url.Values{
 		"cidr":   {"203.0.113.0/24"},
@@ -171,7 +171,7 @@ func TestWriteRecordsTheBasicUsernameAsTheActor(t *testing.T) {
 // is the one thing the actor exists to prevent.
 func TestWriteRejectsAnEmptyActor(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	req := writeReq("/blocklist/allowlist", url.Values{"cidr": {"203.0.113.0/24"}})
 	req.SetBasicAuth("", testAdminKey)
@@ -210,7 +210,7 @@ func TestWriteRefusesCrossSiteRequests(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &fakeWriter{}
-			h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+			h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 			req := httptest.NewRequest(http.MethodPost, "/blocklist/allowlist",
 				strings.NewReader(url.Values{"cidr": {"203.0.113.0/24"}}.Encode()))
@@ -252,7 +252,7 @@ func TestWriteRefusesCrossSiteRequests(t *testing.T) {
 // a 401 that would prompt the operator for a password on somebody else's form.
 func TestCrossSiteWriteIsRefusedBeforeTheCredentialIsChecked(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	req := httptest.NewRequest(http.MethodPost, "/blocklist/allowlist",
 		strings.NewReader(url.Values{"cidr": {"203.0.113.0/24"}}.Encode()))
@@ -279,7 +279,7 @@ func TestApproveAndRejectRecordTheReviewAndAudit(t *testing.T) {
 	} {
 		t.Run(tc.wantState, func(t *testing.T) {
 			w := &fakeWriter{}
-			h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+			h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 			req := writeReq(tc.path, url.Values{"cidr": {"203.0.113.0/24"}, "note": {"looks fine"}})
 			req.SetBasicAuth("bob", testAdminKey)
@@ -313,7 +313,7 @@ func TestApproveAndRejectRecordTheReviewAndAudit(t *testing.T) {
 // Rejecting must never create one.
 func TestRejectingARequestNeverCreatesAnAllowlistEntry(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	req := writeReq("/allowlist-requests/reject", url.Values{"cidr": {"203.0.113.0/24"}})
 	req.SetBasicAuth("bob", testAdminKey)
@@ -327,7 +327,7 @@ func TestRejectingARequestNeverCreatesAnAllowlistEntry(t *testing.T) {
 // Turning writes on must not change the read surface at all: every page still
 // answers GET with no credential whatsoever.
 func TestEnablingWritesLeavesEveryGETUnauthenticated(t *testing.T) {
-	h := newWriteTestServer(t, threatReader(), nil, nil, &fakeWriter{}, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, &fakeWriter{}, testAdminKey)
 
 	for _, rt := range routes {
 		rec := get(t, h, rt.path)
@@ -340,7 +340,7 @@ func TestEnablingWritesLeavesEveryGETUnauthenticated(t *testing.T) {
 // A GET to a write-only path is still a 404 from the read dispatcher, not a
 // half-open write surface.
 func TestGetOnAWriteOnlyPathIsNotFound(t *testing.T) {
-	h := newWriteTestServer(t, threatReader(), nil, nil, &fakeWriter{}, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, &fakeWriter{}, testAdminKey)
 
 	for _, p := range writePaths {
 		if rec := get(t, h, p); rec.Code != http.StatusNotFound {
@@ -353,7 +353,7 @@ func TestGetOnAWriteOnlyPathIsNotFound(t *testing.T) {
 // 0.0.0.0/0 on the allowlist silently disables the entire feed.
 func TestWriteEnforcesThePrefixGuardrail(t *testing.T) {
 	w := &fakeWriter{}
-	h := newWriteTestServer(t, threatReader(), nil, nil, w, testAdminKey)
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
 	req := writeReq("/blocklist/allowlist", url.Values{"cidr": {"0.0.0.0/0"}})
 	req.SetBasicAuth("alice", testAdminKey)

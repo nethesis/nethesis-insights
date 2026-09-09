@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package threat
 
 import (
 	"context"
@@ -55,9 +55,9 @@ type AllowlistAuditRow struct {
 // stays a count of systems and never of requests. A request for an already
 // -allowlisted CIDR is accepted the same way -- it is a successful no-op,
 // since the entry is already in effect.
-func (s *SQLiteStore) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_requests (cidr, system_id, reason, created_at)
@@ -90,7 +90,7 @@ func (s *SQLiteStore) UpsertAllowlistRequest(ctx context.Context, cidr, systemID
 // CIDR rejected once on thin evidence could never be raised again however
 // many systems went on to report it. What was asked and how it was decided
 // lives in the audit trail, which is append-only.
-func (s *SQLiteStore) PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error) {
+func (s *Store) PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.cidr, r.reason, r.system_id, r.created_at
 		FROM threat_allowlist_requests r
@@ -180,9 +180,9 @@ func sortAllowlistRequests(rows []AllowlistRequestRow) {
 // ON CONFLICT DO UPDATE rather than erroring on a repeat: an admin may
 // reject a request and later reconsider, and the review row always
 // reflects the latest decision.
-func (s *SQLiteStore) UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_reviews (cidr, state, decided_by, decided_at, note)
@@ -214,9 +214,9 @@ func (s *SQLiteStore) UpsertAllowlistReview(ctx context.Context, cidr, state, de
 //
 // A CIDR with no requests is a successful no-op returning 0: an admin may
 // legitimately approve or reject an address nobody asked about.
-func (s *SQLiteStore) DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_allowlist_requests WHERE cidr = ?`, cidr)
 	if err != nil {
@@ -233,9 +233,9 @@ func (s *SQLiteStore) DeleteAllowlistRequests(ctx context.Context, cidr string) 
 // an INSERT only -- there is no update or delete method for this table by
 // design, because the whole point of the table is to survive the DELETE
 // that removes the threat_allowlist row it is describing.
-func (s *SQLiteStore) AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_audit (id, cidr, action, actor, at, detail)
@@ -248,7 +248,7 @@ func (s *SQLiteStore) AppendAllowlistAudit(ctx context.Context, cidr, action, ac
 }
 
 // ListAllowlistAudit returns the audit trail, newest first.
-func (s *SQLiteStore) ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error) {
+func (s *Store) ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, cidr, action, actor, at, detail
 		FROM threat_allowlist_audit

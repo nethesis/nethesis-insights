@@ -42,7 +42,6 @@ const dayMillis = 86400000
 // Counts is per-table row counts, for the status page.
 type Counts struct {
 	Systems, Templates, Baselines, Findings, Analyses int
-	ThreatEvents, BlocklistEntries                    int
 }
 
 // SystemRow is one system plus the cross-table aggregates the operator UI's
@@ -164,12 +163,6 @@ func (s *SQLiteStore) Counts(ctx context.Context) (Counts, error) {
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM analyses`).Scan(&c.Analyses); err != nil {
 		return Counts{}, fmt.Errorf("store: count analyses: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threat_events`).Scan(&c.ThreatEvents); err != nil {
-		return Counts{}, fmt.Errorf("store: count threat events: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threat_blocklist`).Scan(&c.BlocklistEntries); err != nil {
-		return Counts{}, fmt.Errorf("store: count blocklist entries: %w", err)
 	}
 	return c, nil
 }

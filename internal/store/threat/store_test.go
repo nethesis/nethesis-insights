@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package threat
 
 import (
 	"context"
@@ -451,17 +451,38 @@ func TestCountsIncludeThreatTables(t *testing.T) {
 	_ = s.UpsertBlocklistEntries(ctx, []BlocklistRow{
 		{AttackerIP: "203.0.113.7", FirstListedAt: 1, LastSeenAt: 1, ExpiresAt: 5000, DistinctSystems: 3},
 	})
+	if err := s.UpsertThreatAllowlistEntry(ctx, AllowlistRow{CIDR: "198.51.100.0/24", CreatedBy: "ops", CreatedAt: 1}); err != nil {
+		t.Fatalf("UpsertThreatAllowlistEntry: %v", err)
+	}
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-a", "please", 1000); err != nil {
+		t.Fatalf("UpsertAllowlistRequest: %v", err)
+	}
 
 	c, err := s.Counts(ctx)
 	if err != nil {
 		t.Fatalf("Counts: %v", err)
 	}
-	if c.ThreatEvents != 1 || c.BlocklistEntries != 1 {
+	if c.Events != 1 || c.BlocklistEntries != 1 || c.AllowlistEntries != 1 || c.PendingRequests != 1 {
 		t.Fatalf("counts: got %+v", c)
 	}
 }
 
-func mustExec(t *testing.T, s *SQLiteStore, query string) {
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func mustExec(t *testing.T, s *Store, query string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(), query); err != nil {
 		t.Fatalf("exec %q: %v", query, err)

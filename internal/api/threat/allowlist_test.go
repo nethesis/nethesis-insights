@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package api
+package threat
 
 import (
 	"context"
@@ -11,18 +11,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nethesis/nethesis-insights/internal/store"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
 // newAllowlistTestStore builds a real, temp-file SQLite store. The
 // client-facing allowlist-request handler is tested against the real store
-// package (rather than a hand-rolled fake of the whole store.Store
-// interface) for the same reason blocklist and analyzer are: the
-// idempotency and distinct-system counting live in the SQL, not in a mock
-// that would just reimplement it.
-func newAllowlistTestStore(t *testing.T) *store.SQLiteStore {
+// package (rather than a hand-rolled fake of the whole Store interface) for
+// the same reason blocklist and analyzer are: the idempotency and
+// distinct-system counting live in the SQL, not in a mock that would just
+// reimplement it.
+func newAllowlistTestStore(t *testing.T) *threatstore.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := threatstore.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -33,20 +33,17 @@ func newAllowlistTestStore(t *testing.T) *store.SQLiteStore {
 	return s
 }
 
-func allowlistServer(st store.Store) http.Handler {
-	return NewServer(&fakePublisher{}, st,
-		StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		ThreatConfig{
-			Store:        &fakeThreatStore{},
-			Feed:         &fakeFeed{},
-			MaxDecisions: 500,
-			Now:          func() int64 { return threatNow },
-		}, SizingConfig{}, nil, nil)
+func allowlistServer(st Store) http.Handler {
+	return NewServer(st, nil, trustedProxy, Config{
+		MaxDecisions: 500,
+		Now:          func() int64 { return threatNow },
+	})
 }
 
 func postAllowlistRequest(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/allowlist-requests", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
 	if withAuth {
 		req.SetBasicAuth(testSystemID, testSecret)
 	}
@@ -132,6 +129,7 @@ func TestAllowlistRequestRequiresAuthentication(t *testing.T) {
 func TestAllowlistRequestRejectsWrongMethod(t *testing.T) {
 	h := allowlistServer(newAllowlistTestStore(t))
 	req := httptest.NewRequest(http.MethodGet, "/v1/allowlist-requests", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -140,25 +138,11 @@ func TestAllowlistRequestRejectsWrongMethod(t *testing.T) {
 	}
 }
 
-// The route is part of the Threat Shield surface: the zero ThreatConfig
-// leaves it off exactly like /v1/threat-events and /v1/blocklist.
-func TestAllowlistRequestRouteIsAbsentWhenThreatShieldIsUnconfigured(t *testing.T) {
-	h := testServer(&fakePublisher{})
-	req := httptest.NewRequest(http.MethodPost, "/v1/allowlist-requests", strings.NewReader(`{}`))
-	req.SetBasicAuth(testSystemID, testSecret)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status: got %d, want 404", rec.Code)
-	}
-}
-
 // This is the executable form of "no automatic promotion" at the API
 // boundary: however many distinct systems request a CIDR through this
 // endpoint, it must never appear in the live allowlist. The one
-// StaticAuth-authenticated call exercises the real HTTP path; the rest use
-// the store directly to simulate other systems, since StaticAuth only ever
-// accepts a single configured credential.
+// HTTP-authenticated call exercises the real path; the rest use the store
+// directly to simulate other systems.
 func TestAllowlistRequestsNeverAutoPromote(t *testing.T) {
 	st := newAllowlistTestStore(t)
 	h := allowlistServer(st)

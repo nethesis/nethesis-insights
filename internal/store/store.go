@@ -91,42 +91,10 @@ type Store interface {
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error)
 
-	// Threat Shield ingest and consensus (internal/api, internal/blocklist).
-	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)
-	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
-	ConsensusCandidates(ctx context.Context, since int64) ([]ThreatCandidateRow, error)
-	ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error)
-	UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error
-	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
-	UpsertBlocklistEntries(ctx context.Context, rows []BlocklistRow) error
-	ExpireBlocklist(ctx context.Context, now int64) (int, error)
-	ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error)
-	RollupThreatDailyStats(ctx context.Context) error
-	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
-
-	// Threat Shield cross-system reads for the operator UI.
-	ListBlocklistEntries(ctx context.Context, limit int) ([]BlocklistRow, error)
-	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]ThreatEventRow, error)
-	ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error)
-	ThreatIngestStats(ctx context.Context, limit int) ([]ThreatIngestRow, error)
-	ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error)
-	ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
-
-	// Allowlist management: a client-facing request queue (internal/api),
-	// and the admin API / operator UI writes that turn a reviewed request,
-	// or an out-of-band decision, into a threat_allowlist row
-	// (internal/admin, internal/ui). See docs/plans/2026-08-28-allowlist-management.md.
-	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (distinctSystems int, err error)
-	PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error)
-	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
-	DeleteAllowlistRequests(ctx context.Context, cidr string) (removed int, err error)
-	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
-	ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistAuditRow, error)
-
 	// Fleet sizing: ingest (internal/api), the cohort pass (internal/baseline)
-	// and the two operator UI pages. A third pipeline sharing this file, the
-	// listener and the Authenticator with the two above and nothing else --
-	// no LLM call, no gate, no fingerprint, no queue. See
+	// and the two operator UI pages. A second pipeline sharing this file, the
+	// listener and the Authenticator with the logs pipeline above and nothing
+	// else -- no LLM call, no gate, no fingerprint, no queue. See
 	// docs/specs/2026-09-02-sizing-ingest-contract.md.
 	UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []SizingDayRows, now int64) (stored int, err error)
 	RecordSizingIngest(ctx context.Context, day int64, systemID, reporterVersion string, c model.SizingCounters, now int64) error
@@ -257,125 +225,11 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_analyses_system_window ON analyses(system_id, window_start)`,
 
-		// --- Threat Shield ---
-		//
-		// A separate pipeline from everything above: CrowdSec ban decisions in,
-		// fleet-consensus blocklist out, no LLM and no fingerprint anywhere in
-		// it. attacker_ip is always a normalized netip.Addr.String(), which is
-		// what lets a portable TEXT column behave like Postgres INET: text
-		// equality is address identity.
-		`CREATE TABLE IF NOT EXISTS threat_events (
-			id TEXT PRIMARY KEY,
-			system_id TEXT,
-			attacker_ip TEXT,
-			scenario TEXT,
-			observed_at INTEGER,
-			hit_count INTEGER,
-			metadata TEXT
-		)`,
-		// Redelivery idempotency: a reporter that retries a batch must not be
-		// able to inflate hit_count and manufacture its own consensus.
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_events_dedup
-			ON threat_events(system_id, attacker_ip, scenario, observed_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_threat_events_ip ON threat_events(attacker_ip, observed_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_threat_events_observed ON threat_events(observed_at)`,
-		`CREATE TABLE IF NOT EXISTS threat_blocklist (
-			attacker_ip TEXT PRIMARY KEY,
-			first_listed_at INTEGER,
-			last_seen_at INTEGER,
-			expires_at INTEGER,
-			distinct_systems INTEGER,
-			scenarios TEXT,
-			listing_reason TEXT
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_threat_blocklist_expires ON threat_blocklist(expires_at)`,
-		`CREATE TABLE IF NOT EXISTS threat_allowlist (
-			cidr TEXT PRIMARY KEY,
-			reason TEXT,
-			created_by TEXT,
-			created_at INTEGER,
-			expires_at INTEGER
-		)`,
-		// Rolled up before the raw events are pruned, so the long-term trend
-		// asset survives the retention window at a few rows per day.
-		`CREATE TABLE IF NOT EXISTS threat_daily_stats (
-			day TEXT,
-			scenario TEXT,
-			distinct_ips INTEGER,
-			total_hits INTEGER,
-			PRIMARY KEY (day, scenario)
-		)`,
-		// Ingest accounting. Without it, "this node contributes nothing and
-		// here is which rule is dropping it" is answerable only from logs.
-		`CREATE TABLE IF NOT EXISTS threat_ingest_daily (
-			day TEXT,
-			system_id TEXT,
-			accepted INTEGER,
-			duplicates INTEGER,
-			dropped_type INTEGER,
-			dropped_scope INTEGER,
-			dropped_origin INTEGER,
-			dropped_bad_ip INTEGER,
-			dropped_private_ip INTEGER,
-			dropped_time INTEGER,
-			truncated INTEGER,
-			PRIMARY KEY (day, system_id)
-		)`,
-
-		// --- Allowlist management ---
-		//
-		// threat_allowlist itself (above) is unchanged. These three tables add
-		// a client-facing request queue and its audit trail on top of it, with
-		// no path from a request to a live entry that does not pass through an
-		// explicit admin decision -- see the "no automatic promotion" rule in
-		// CLAUDE.md.
-		//
-		// Requests are append-only per (cidr, system_id): a rejection or an
-		// approval never deletes them, so "who asked, and when" survives the
-		// decision. The counter that ranks the review queue is
-		// COUNT(DISTINCT system_id) over this table, mirroring the blocklist's
-		// own distinct-systems rule.
-		`CREATE TABLE IF NOT EXISTS threat_allowlist_requests (
-			cidr TEXT,
-			system_id TEXT,
-			reason TEXT,
-			created_at INTEGER,
-			PRIMARY KEY (cidr, system_id)
-		)`,
-		// The latest decision for a cidr, and nothing more: state is
-		// "approved" or "rejected". It does not gate the pending queue --
-		// handling a request deletes the threat_allowlist_requests rows that
-		// raised it, so a later ask for the same cidr is reviewed on its own
-		// merits instead of being silently swallowed by an old decision.
-		// Re-reviewing an already-decided cidr overwrites the row rather than
-		// erroring, since an admin may reject and then reconsider.
-		`CREATE TABLE IF NOT EXISTS threat_allowlist_reviews (
-			cidr TEXT PRIMARY KEY,
-			state TEXT,
-			decided_by TEXT,
-			decided_at INTEGER,
-			note TEXT
-		)`,
-		// Append-only, and deliberately never updated or deleted: DELETE on
-		// threat_allowlist removes the very row that would otherwise hold the
-		// trail, so without this table "who removed the exemption that let
-		// this through" is unanswerable -- which is the question that gets
-		// asked.
-		`CREATE TABLE IF NOT EXISTS threat_allowlist_audit (
-			id TEXT PRIMARY KEY,
-			cidr TEXT,
-			action TEXT,
-			actor TEXT,
-			at INTEGER,
-			detail TEXT
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_allowlist_audit_at ON threat_allowlist_audit(at)`,
-
 		// --- Fleet sizing ---
 		//
-		// A third pipeline, sharing this file, the listener and the
-		// Authenticator with the two above and nothing else: no LLM call, no
-		// gate, no fingerprint, no queue. The contract is
+		// A second pipeline, sharing this file, the listener and the
+		// Authenticator with the logs pipeline above and nothing else: no LLM
+		// call, no gate, no fingerprint, no queue. The contract is
 		// docs/specs/2026-09-02-sizing-ingest-contract.md.
 		//
 		// Two conventions run through every table here.
