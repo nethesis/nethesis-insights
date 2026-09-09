@@ -99,10 +99,14 @@ hand-written collection needs no coordination with the server at all.
 always accurate in the `202` body; the write itself is queued and happens
 after the response is sent, to bound how many decoded batches can be waiting
 on the single-writer database at once. `stored` and `duplicates` are
-post-write facts and therefore cannot appear here any more — a batch that
-sanitizes to zero events is never even queued, since there is nothing left to
-write and the `dropped` counters already say why. Read them from the operator
-UI's per-system ingest accounting instead.
+post-write facts and therefore cannot appear here any more — read them from
+the operator UI's per-system ingest accounting instead. Only a request with
+**no decisions at all** skips the queue, since there is nothing to write and
+nothing to count. A batch every decision of which is dropped is still
+queued: the per-day counters that make "why is this node contributing
+nothing" answerable from `/systems` instead of from logs are recorded by the
+same queued write, and a reporter whose every event is rejected is exactly
+the case that page exists for.
 
 | status | meaning |
 |---|---|
@@ -123,10 +127,17 @@ reporter under active attack must not lose its whole batch to one bad row.
 
 **Advance the watermark only on `2xx`.** A server outage should produce delayed
 events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, scenario,
-observed_at)` is unique, so a repeated batch cannot inflate anything — which is
-also why a batch dropped from the queue on a crash needs no compensation: the
-reporter re-sends it on its next cycle and the unique index makes that a
-no-op.
+observed_at)` is unique, so a repeated batch cannot inflate anything.
+
+That uniqueness is about *duplicate* delivery, not about recovering a batch
+lost after the `202`: the reporter is alert-driven and advances its watermark
+on every `2xx`, so once this endpoint has answered `202` it will not re-send
+those decisions on its own. A batch dropped from the queue between the `202`
+and the write — a crash, or a handler error — is genuinely lost; there is no
+compensation and no replay. This is judged acceptable only because promotion
+needs three distinct systems observing the same address (spec §7), and an
+attacker active enough to matter keeps triggering fresh alerts and fresh
+batches, each with its own chance to land.
 
 ### Drop rules
 

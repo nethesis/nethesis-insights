@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,11 +189,13 @@ func TestThreatIngestAnswers503WhenTheQueueIsFull(t *testing.T) {
 	}
 }
 
-// A batch every decision of which is dropped by threat.Sanitize has nothing
-// to write, so it must never reach the queue at all -- the drop counters
-// already tell the whole story, and the reporter already has them in the
-// response body.
-func TestThreatIngestWithEveryDecisionDroppedNeverEnqueues(t *testing.T) {
+// A batch every decision of which is dropped by threat.Sanitize still has
+// counters worth recording: RecordIngestCounters (now run by the consumer)
+// is what keeps a reporter whose every event is rejected visible on
+// /systems -- exactly the "why is this node contributing nothing" case that
+// page exists for -- so it must still be enqueued, carrying a nil/empty
+// Events slice InsertThreatEvents no-ops on.
+func TestThreatIngestWithEveryDecisionDroppedStillEnqueuesForCounters(t *testing.T) {
 	st := &fakeThreatStore{}
 	q := &fakeQueue{}
 	rec := postThreat(t, threatServer(st, q, nil),
@@ -208,11 +211,32 @@ func TestThreatIngestWithEveryDecisionDroppedNeverEnqueues(t *testing.T) {
 	if got.Dropped.DroppedPrivateIP != 1 {
 		t.Fatalf("dropped counters: %+v", got.Dropped)
 	}
-	if len(q.published) != 0 {
-		t.Fatalf("a fully-dropped batch was enqueued: %+v", q.published)
+	if len(q.published) != 1 {
+		t.Fatalf("a fully-dropped batch was not enqueued: %+v", q.published)
+	}
+	if len(q.published[0].Events) != 0 {
+		t.Fatalf("a fully-dropped batch enqueued events: %+v", q.published[0].Events)
+	}
+	if q.published[0].Counters.DroppedPrivateIP != 1 {
+		t.Fatalf("enqueued counters: %+v", q.published[0].Counters)
 	}
 	if len(st.events) != 0 {
-		t.Fatalf("a fully-dropped batch reached the store: %+v", st.events)
+		t.Fatalf("a fully-dropped batch reached the store synchronously: %+v", st.events)
+	}
+}
+
+// A report with no decisions at all has nothing to write and nothing to
+// count, so it is the one case that skips the queue entirely.
+func TestThreatIngestWithNoDecisionsNeverEnqueues(t *testing.T) {
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil),
+		reportBody(t, testSystemID), true)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(q.published) != 0 {
+		t.Fatalf("an empty report was enqueued: %+v", q.published)
 	}
 }
 
@@ -377,8 +401,13 @@ func TestThreatIngestDropsTheReportersOwnAddress(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
-	if len(q.published) != 0 {
-		t.Fatalf("the reporter's own address was enqueued: %+v", q.published)
+	// The batch is still enqueued -- for its drop counters, not for an
+	// event -- so /systems can show why this reporter contributed nothing.
+	if len(q.published) != 1 || len(q.published[0].Events) != 0 {
+		t.Fatalf("published work: %+v, want one item with no events", q.published)
+	}
+	if q.published[0].Counters.DroppedPrivateIP != 1 {
+		t.Fatalf("the reporter's own address was not counted as dropped: %+v", q.published[0].Counters)
 	}
 }
 
@@ -458,12 +487,45 @@ func TestConsumerStoresEventsAndRecordsCounters(t *testing.T) {
 	}
 }
 
+// A Work item with no events at all (every decision was dropped) must still
+// record its counters: InsertThreatEvents no-ops on an empty slice, but
+// RecordIngestCounters is what keeps the reporter visible on /systems.
+func TestConsumerRecordsCountersEvenWithNoEvents(t *testing.T) {
+	st := &fakeThreatStore{}
+	consume := NewConsumer(st)
+
+	err := consume(context.Background(), Work{
+		SystemID: testSystemID,
+		Counters: model.ThreatCounters{DroppedPrivateIP: 1},
+		Day:      "2026-08-28",
+	})
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if len(st.events) != 0 {
+		t.Fatalf("stored events for an empty batch: %+v", st.events)
+	}
+	if st.counters.DroppedPrivateIP != 1 {
+		t.Fatalf("recorded counters: %+v", st.counters)
+	}
+	if st.day != "2026-08-28" {
+		t.Fatalf("counter day: got %q", st.day)
+	}
+}
+
 // A store failure on the insert itself is a real failure: nothing was
-// written, so the consumer must report it (ingestq logs it and drops the
-// item -- redelivery on the reporter's next cycle is the recovery path).
+// written, so the consumer must report it. There is no recovery path -- the
+// reporter already has its 202 and will not re-send these decisions on its
+// own -- so returning the error is what lets ingestq log it (with the
+// system_id NewConsumer adds) as the one and only record of the loss.
 func TestConsumerReturnsErrorWhenInsertFails(t *testing.T) {
 	st := &fakeThreatStore{insertErr: errors.New("disk on fire")}
 	consume := NewConsumer(st)
+
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(old)
 
 	err := consume(context.Background(), Work{
 		SystemID: testSystemID,
@@ -471,6 +533,14 @@ func TestConsumerReturnsErrorWhenInsertFails(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("consume: got nil error, want the insert failure")
+	}
+	// The client already has its 202: this log line is the only remaining
+	// trace of whose evidence was just dropped, so it must name the system.
+	if !strings.Contains(logs.String(), "system_id="+testSystemID) {
+		t.Fatalf("log output missing system_id: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "events=1") {
+		t.Fatalf("log output missing event count: %s", logs.String())
 	}
 }
 

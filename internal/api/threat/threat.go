@@ -97,10 +97,16 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		MaxDecisions: s.cfg.MaxDecisions,
 	}, now)
 
-	// A batch every decision of which was dropped has nothing to write, so
-	// there is nothing to queue either -- the drop counters below are
-	// already the whole story, and the reporter already has them.
-	if len(res.Events) > 0 {
+	// An empty report (no decisions at all) has nothing to write and nothing
+	// to count, so there is nothing to queue. Anything else -- even a batch
+	// every decision of which was dropped -- must still be queued: the
+	// per-day ingest counters (RecordIngestCounters, now done by the
+	// consumer) are what makes "why is this node contributing nothing"
+	// answerable from the operator UI's /systems page instead of from logs,
+	// and a reporter whose every event is rejected is exactly the case that
+	// page exists for. InsertThreatEvents no-ops on a nil/empty Events slice,
+	// so this costs no extra store call when there is nothing to insert.
+	if res.Counters != (model.ThreatCounters{}) {
 		work := Work{
 			SystemID: authenticatedSystemID,
 			Events:   res.Events,

@@ -77,30 +77,20 @@ func (q *Queue[T]) Publish(item T) error {
 	}
 }
 
-// Start launches the workers and returns only once every one of them is
-// parked waiting on the channel. That handoff matters at low queue depths: a
-// caller publishing immediately after Start must be able to observe an item
-// being picked straight off the channel rather than sitting in the buffer,
-// which is what lets Cap() stay an honest "how many can wait", not "how many
-// can be in flight at once". Call Stop to drain and wait.
+// Start launches the workers. Call Stop to drain and wait.
 func (q *Queue[T]) Start(workers int) {
 	if workers < 1 {
 		workers = 1
 	}
 	q.workers = workers
-	ready := make(chan struct{})
 	for i := 0; i < workers; i++ {
 		q.wg.Add(1)
 		go func(worker int) {
 			defer q.wg.Done()
-			ready <- struct{}{}
 			for item := range q.ch {
 				q.process(worker, item)
 			}
 		}(i)
-	}
-	for i := 0; i < workers; i++ {
-		<-ready
 	}
 }
 
@@ -134,7 +124,11 @@ func (q *Queue[T]) Stop() {
 // Depth reports how many items are waiting. Exposed for logging and tests.
 func (q *Queue[T]) Depth() int { return len(q.ch) }
 
-// Cap reports the configured buffer size. Exposed for logging and tests.
+// Cap reports the configured buffer size -- how many items can be waiting,
+// not how many can be in flight at once. A busy queue can hold up to
+// Cap()+Workers() items simultaneously accepted: one per worker already
+// received off the channel and being handled, plus up to Cap() still
+// buffered. Exposed for logging and tests.
 func (q *Queue[T]) Cap() int { return cap(q.ch) }
 
 // Workers reports how many worker goroutines Start launched. Exposed for an

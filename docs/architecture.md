@@ -287,38 +287,51 @@ latency.
    address is passed in and excluded. This step stays on the request
    goroutine, synchronous, so the `202`'s `dropped` counters are always
    accurate and the queue only ever holds clean events, never a raw report.
-4. If sanitizing produced at least one event, `api/threat.Work{SystemID,
-   Events, Counters, Day}` is published to the ingest queue
-   (`ingestq.Queue[Work]`); a batch that sanitizes to zero events has nothing
-   to write, so it is never queued at all. Past capacity, `Publish` returns
-   `ingestq.ErrFull` and the handler answers `503` — the batch was never
-   queued, so nothing was lost, and the reporter retries.
+4. Unless the report held **no decisions at all** (nothing to write, nothing
+   to count), `api/threat.Work{SystemID, Events, Counters, Day}` is published
+   to the ingest queue (`ingestq.Queue[Work]`). This includes a batch every
+   decision of which was dropped: `RecordIngestCounters` (step 6) is what
+   keeps that reporter visible on `/systems` at all, and a batch with an empty
+   `Events` slice is a no-op for `InsertThreatEvents`, not a wasted store
+   call. Past capacity, `Publish` returns `ingestq.ErrFull` and the handler
+   answers `503` — the batch was never queued, so nothing was lost, and the
+   reporter retries.
 5. `202` with `accepted` and the full drop accounting (`dropped`). `stored`
    and `duplicates` are **not** in this response: they are post-write facts,
    and the write has not happened yet when this is sent.
 6. Asynchronously, one of the queue's workers calls `api/threat.NewConsumer`'s
    handler: `InsertThreatEvents` stores the batch, then
    `RecordIngestCounters` records the per-day counters (including the
-   `duplicates` count `InsertThreatEvents` returned). A crash between step 5
-   and step 6 loses the batch with no compensation needed — the
-   `(system_id, attacker_ip, scenario, observed_at)` unique index makes the
-   reporter's next-cycle redelivery a no-op.
+   `duplicates` count `InsertThreatEvents` returned).
+
+**A crash (or a store error) between step 5 and step 6 loses the batch, with
+no compensation.** The `(system_id, attacker_ip, scenario, observed_at)`
+unique index makes a *duplicate* delivery harmless — it says nothing about
+recovering a dropped one — and the reporter is alert-driven and already
+advanced its watermark on the `202`, so it will not re-send those decisions on
+its own. This is judged acceptable only because promotion needs three
+distinct systems observing the same address, and an attacker active enough to
+matter keeps triggering fresh alerts and fresh batches. Because the client
+already has its `202`, `NewConsumer`'s log line on an insert failure is the
+only remaining record of the loss, which is why it names `system_id` and the
+event count rather than just the bare error.
 
 **Fail-closed on authentication, fail-open on content.** An insert failure in
-step 6 is logged and the item is dropped by the queue (`ingestq` recovers a
-failing or panicking handler so one bad batch cannot take a worker, and every
-batch queued behind it, down); a `RecordIngestCounters` failure is logged and
-never fails the work item, because the evidence is already stored and the
-counters are an operator convenience. Neither can reach the client any more —
-the `202` was already sent in step 5.
+step 6 is logged (with the batch's identity, per above) and the item is
+dropped by the queue (`ingestq` recovers a failing or panicking handler so one
+bad batch cannot take a worker, and every batch queued behind it, down); a
+`RecordIngestCounters` failure is logged and never fails the work item,
+because the evidence is already stored and the counters are an operator
+convenience. Neither can reach the client any more — the `202` was already
+sent in step 5.
 
 `internal/platform/ingestq` is deliberately not `internal/queue`: the log
 pipeline's queue carries a `(system_id, window_start)` in-flight claim that
 makes bundle redelivery idempotent while an LLM call is still running, which
-threat events neither have (no LLM call) nor need (the unique index already
-makes redelivery a no-op). `ingestq` is the generic half — bounded channel,
-`ErrFull`, a fixed worker pool, `Depth`/`Cap` for the status page — with no
-window claim at all.
+threat events neither have (no LLM call) nor need — there is no equivalent
+recovery for a threat-events batch lost after its `202`, by design (see
+above). `ingestq` is the generic half — bounded channel, `ErrFull`, a fixed
+worker pool, `Depth`/`Cap` for the status page — with no window claim at all.
 
 **The reporter's source address is `httpx.ClientIP`, not bare `r.RemoteAddr`** —
 this reverses the prototype's rule. Behind Traefik, `RemoteAddr` is always the

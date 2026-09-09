@@ -60,14 +60,24 @@ type Publisher interface {
 // parameter -- so cmd/threatd builds the consumer from the same Store before
 // either the server or the queue exists.
 //
-// A crash between Publish returning 202 and this running loses the batch
-// with no compensation needed: the (system_id, attacker_ip, scenario,
-// observed_at) unique index makes redelivery a no-op, and reporters re-send
-// on their next cycle.
+// A crash (or a store error) between Publish returning 202 and this running
+// loses the batch, genuinely and without compensation: the reporter is
+// alert-driven and already advanced its watermark on the 202, so it will not
+// re-send those decisions on its own. The (system_id, attacker_ip, scenario,
+// observed_at) unique index only makes a *duplicate* delivery harmless; it
+// does not recover a dropped one. This is judged acceptable because
+// promotion needs three distinct systems observing the same address, and an
+// attacker active enough to matter keeps triggering fresh alerts and fresh
+// batches. Because this is the only place such a loss is ever recorded --
+// the client already has its 202 -- a failure here logs system_id and the
+// event count, not just the bare error, so an operator can at least tell
+// whose evidence went missing.
 func NewConsumer(st Store) func(context.Context, Work) error {
 	return func(ctx context.Context, w Work) error {
 		_, duplicates, err := st.InsertThreatEvents(ctx, w.SystemID, w.Events)
 		if err != nil {
+			slog.Error("insert threat events failed, batch lost",
+				"system_id", w.SystemID, "events", len(w.Events), "error", err)
 			return err
 		}
 

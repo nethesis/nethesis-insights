@@ -100,12 +100,19 @@ Threat Shield rules that are as load-bearing as the gate's:
   retry, instead of the process growing until it dies. `stored` and
   `duplicates` are consequently gone from the `202` body — they are
   post-write facts and cannot survive an asynchronous ingest — leaving
-  `accepted` and `dropped`. A batch dropped from the queue on a crash needs no
-  compensation: `(system_id, attacker_ip, scenario, observed_at)` is unique,
-  so the reporter's next-cycle redelivery is a no-op. This is a different
-  queue type from the log pipeline's `internal/queue` — no window claim, no
-  idempotency logic, because threat events don't need it and rewriting
-  working code for symmetry buys nothing.
+  `accepted` and `dropped`. Only a report with **no decisions at all** skips
+  the queue; a batch every decision of which was dropped is still queued,
+  because `RecordIngestCounters` (now run by the consumer) is what keeps that
+  reporter visible on `/systems`, and `InsertThreatEvents` no-ops on an empty
+  `Events` slice. A batch dropped from the queue on a crash or a store error
+  is **lost, with no compensation**: the `(system_id, attacker_ip, scenario,
+  observed_at)` unique index only makes a *duplicate* delivery harmless, and
+  the reporter is alert-driven and already advanced its watermark on the
+  `202`, so it will not re-send on its own — acceptable only because
+  promotion needs three distinct systems and a live attacker keeps
+  re-alerting. This is a different queue type from the log pipeline's
+  `internal/queue` — no window claim, no idempotency logic, because threat
+  events don't need it and rewriting working code for symmetry buys nothing.
 - **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.

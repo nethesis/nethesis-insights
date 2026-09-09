@@ -14,17 +14,35 @@ import (
 // The bound is the point: past capacity Publish must fail immediately rather
 // than block, so a burst sheds load at the edge instead of growing the
 // server until it dies.
+//
+// Publishing item 0 and then waiting on started -- signaled from inside the
+// handler, so it only fires once the worker has actually pulled item 0 off
+// the channel -- is what makes the rest of this test deterministic. Start
+// returning is not that signal: it only proves the worker goroutines exist,
+// not that one of them has reached its first channel receive, so publishing
+// all three items immediately after Start raced item 0 against items 1 and 2
+// for a buffer slot and failed the vast majority of the time under
+// GOMAXPROCS>1 (see the fix for this test in the task-11 follow-up report).
 func TestPublishRefusesWhenFull(t *testing.T) {
+	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	q := New(2, time.Second, func(ctx context.Context, n int) error {
+		if n == 0 {
+			started <- struct{}{}
+		}
 		<-release
 		return nil
 	})
 	q.Start(1)
 	defer func() { close(release); q.Stop() }()
 
-	// One item is claimed by the worker and blocks; two more fill the buffer.
-	for i := 0; i < 3; i++ {
+	if err := q.Publish(0); err != nil {
+		t.Fatalf("Publish(0) = %v, want nil", err)
+	}
+	<-started // item 0 is now claimed by the worker and blocking on release.
+
+	// Two more fill the buffer.
+	for i := 1; i < 3; i++ {
 		if err := q.Publish(i); err != nil {
 			t.Fatalf("Publish(%d) = %v, want nil", i, err)
 		}
