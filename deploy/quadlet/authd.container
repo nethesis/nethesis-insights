@@ -29,6 +29,11 @@ HealthStartPeriod=5s
 
 [Service]
 Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

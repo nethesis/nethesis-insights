@@ -5,8 +5,10 @@ package chrome
 
 import (
 	"io/fs"
+	"net/http/httptest"
 	"regexp"
 	"testing"
+	"testing/fstest"
 )
 
 var (
@@ -70,5 +72,36 @@ func TestNoJavaScript(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walking embedded assets: %v", err)
+	}
+}
+
+// TestRenderSecurityHeaders is fix B of the whole-branch review: since the
+// split put the three dashboards behind one Traefik origin, sameOriginWrite
+// alone can no longer stop a forged cross-site write if an HTML-injection
+// bug ever lands on any page of any dashboard. These headers make that
+// enforced rather than merely currently-true, and Cache-Control keeps the
+// fleet-wide findings, attacker addresses and per-customer data these pages
+// now serve over the internet out of the operator's browser cache.
+func TestRenderSecurityHeaders(t *testing.T) {
+	tmplFS := fstest.MapFS{
+		"status.html": &fstest.MapFile{Data: []byte(`{{define "content"}}ok{{end}}`)},
+	}
+	b, err := New(Config{
+		Name:      "testd",
+		Pages:     []string{"status.html"},
+		Templates: tmplFS,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	b.Render(w, "status.html", PageData{})
+
+	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'self'; script-src 'none'; form-action 'self'" {
+		t.Errorf("Content-Security-Policy = %q", got)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 }

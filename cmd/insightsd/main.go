@@ -283,8 +283,9 @@ func main() {
 	})
 
 	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: handler,
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// The status page's configuration table, built here field by field and

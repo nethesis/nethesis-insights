@@ -36,6 +36,7 @@ func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) 
 
 	authenticatedSystemID, err := httpx.SystemID(r, s.trusted)
 	if err != nil {
+		slog.Debug("unauthorized", "error", err, "remote_addr", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}

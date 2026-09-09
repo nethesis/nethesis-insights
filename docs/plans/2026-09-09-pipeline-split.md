@@ -185,7 +185,9 @@ survives someone later moving a container out of the pod.
   `insights.nethesis.it`. **Read by no binary.** It lives in `/etc/insights/deploy.env` and is
   consumed only when rendering Traefik's dynamic configuration, which is what keeps the
   application host-agnostic.
-- `TRUSTED_PROXY_CIDRS` — comma-separated, default `127.0.0.0/8`. All four binaries.
+- `TRUSTED_PROXY_CIDRS` — comma-separated, default `127.0.0.0/8`. The three pipelines
+  (`insightsd`, `threatd`, `sizingd`), never `authd`: it gates nothing on the caller's
+  address, so it has nothing to trust a proxy for.
   The default is correct **because** the containers share a pod: Traefik's connection to a
   backend never leaves the namespace, so no DNAT and no masquerade occur and the source really
   is `127.0.0.1`. Published-port plumbing was the thing that made this false — under rootful

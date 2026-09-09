@@ -3,9 +3,13 @@
 
 // Package chrome holds everything the three operator dashboards --
 // insightsd's, threatd's and sizingd's -- share: the page layout and
-// stylesheet, the timestamp/byte/percent formatters in view.go, the GET-only
-// route discipline with its small enumerated write exception, and
-// base-path-aware link building.
+// stylesheet, the timestamp/byte/percent formatters in view.go, write-route
+// authentication and its cross-site-write refusal (AuthenticateWrite,
+// sameOriginWrite), and base-path-aware link building. The GET-only route
+// discipline with its small enumerated write exception is each dashboard's
+// own -- see route() and writableRoutes in internal/ui/threat -- because the
+// enumeration has to stay next to the routes it is enumerating, not move
+// into this shared package.
 //
 // Traefik serves all three behind one host, giving each pipeline a path
 // prefix (/logs, /blocklist, /sizing) and stripping it before proxying.
@@ -320,6 +324,18 @@ func ClampLimit(v string, def, max int) int {
 
 // Render executes page's parsed template set against data and writes the
 // result, or a 500 on a template error.
+//
+// The three dashboards used to be three ports, hence three browser origins.
+// Behind Traefik they are one origin, so sameOriginWrite alone no longer
+// stops a forged cross-site write: an HTML-injection bug on any page of any
+// dashboard could otherwise script a POST to another pipeline's write routes
+// with the operator's automatically-replayed Basic credentials. Today that is
+// theoretical -- html/template escapes throughout and nothing here emits
+// template.HTML or a <script> tag -- but these headers make it enforced
+// rather than merely currently-true. Cache-Control matters on its own: these
+// pages now serve fleet-wide findings, attacker IP addresses and
+// per-customer commercial data over the internet into an operator's browser
+// cache.
 func (b *Base) Render(w http.ResponseWriter, page string, data any) {
 	var buf bytes.Buffer
 	if err := b.tmpl[page].ExecuteTemplate(&buf, "layout.html", data); err != nil {
@@ -328,6 +344,8 @@ func (b *Base) Render(w http.ResponseWriter, page string, data any) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; form-action 'self'")
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = buf.WriteTo(w)
 }
 

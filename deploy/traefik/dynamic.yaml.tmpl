@@ -16,6 +16,24 @@
 # backend.
 http:
   middlewares:
+    # Sized for ~2700 nodes on this host with no firewall of any kind, once
+    # authd becomes the single pre-auth entry point for all three pipelines.
+    # Traefik's rateLimit buckets per source IP by default, and legitimate
+    # per-node traffic is far under this: bundles post every 15 minutes
+    # (~0.001 req/s), sizing reports post three times a day, and threat
+    # events are batched into one POST per report rather than one per event.
+    # average: 5req/s with burst: 10 gives ~1000x headroom over that steady
+    # rate while still capping a single misbehaving or compromised node (a
+    # retry loop, a scripted flood) well short of being able to threaten
+    # authd's cache or a backend's single SQLite writer. It is deliberately
+    # per-source rather than a global cap: a global limit would let one loud
+    # client starve the other 2699 nodes, which is worse than the DoS this
+    # exists to bound.
+    rate-limit:
+      rateLimit:
+        average: 5
+        period: 1s
+        burst: 10
     system-auth:
       forwardAuth:
         address: "http://127.0.0.1:9590/auth"
@@ -50,7 +68,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs/v1/`)"
       entryPoints: [websecure]
       priority: 200
-      middlewares: [system-auth, strip-logs]
+      middlewares: [rate-limit, system-auth, strip-logs]
       service: logs-api
     logs-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
@@ -62,7 +80,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
       entryPoints: [websecure]
       priority: 200
-      middlewares: [system-auth, strip-blocklist]
+      middlewares: [rate-limit, system-auth, strip-blocklist]
       service: blocklist-api
     blocklist-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
@@ -74,7 +92,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
       entryPoints: [websecure]
       priority: 200
-      middlewares: [system-auth, strip-sizing]
+      middlewares: [rate-limit, system-auth, strip-sizing]
       service: sizing-api
     sizing-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"

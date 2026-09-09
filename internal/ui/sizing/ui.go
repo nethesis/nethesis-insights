@@ -32,6 +32,11 @@ var pageAssets embed.FS
 
 // Reader is the read-only slice of sizingstore.Store the UI needs.
 // *sizingstore.Store satisfies it.
+//
+// Worth stating explicitly rather than inheriting it by accident: this UI's
+// GET surface is unauthenticated and fleet-wide, and these rows carry
+// per-customer commercial data (mailbox and PBX user counts, product mix).
+// The loopback-bind advice applies to them too.
 type Reader interface {
 	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]sizingstore.SizingNodeUIRow, error)
 	ListSizingModules(ctx context.Context, systemID string, limit int) ([]sizingstore.SizingModuleUIRow, error)

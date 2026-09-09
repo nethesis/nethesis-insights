@@ -95,6 +95,7 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 
 	authenticatedSystemID, err := httpx.SystemID(r, s.trusted)
 	if err != nil {
+		slog.Debug("unauthorized", "error", err, "remote_addr", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -185,6 +186,7 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 
 	authenticatedSystemID, err := httpx.SystemID(r, s.trusted)
 	if err != nil {
+		slog.Debug("unauthorized", "error", err, "remote_addr", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}

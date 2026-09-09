@@ -752,6 +752,8 @@ The operator htpasswd. Per Decision 5 the **password is the `ADMIN_API_KEY` valu
 the **username is the audit actor**, so one line per operator, all sharing the password:
 
 ```bash
+install -d -m 755 /etc/traefik
+
 ADMIN_API_KEY=$(sed -n 's/^ADMIN_API_KEY=//p' /etc/insights/threatd.env)
 
 # with httpd-tools:
@@ -955,6 +957,7 @@ MYIP=$(curl -s https://ifconfig.me); echo "posting as $MYIP"
 
 curl -sS -u "$CRED" -H 'Content-Type: application/json' \
   -X POST "https://${INSIGHTS_HOST}/blocklist/v1/events" -d '{
+    "schema_version": 1,
     "decisions": [{
       "value": "203.0.113.42", "scope": "Ip", "type": "ban",
       "origin": "crowdsec", "scenario": "crowdsecurity/ssh-bf",
@@ -994,7 +997,7 @@ the entire point of Decision 4. Verify the negative too — post a decision nami
 ```bash
 curl -sS -u "$CRED" -H 'Content-Type: application/json' \
   -X POST "https://${INSIGHTS_HOST}/blocklist/v1/events" \
-  -d "{\"decisions\":[{\"value\":\"$MYIP\",\"scope\":\"Ip\",\"type\":\"ban\",\"origin\":\"crowdsec\",\"scenario\":\"crowdsecurity/ssh-bf\",\"created_at\":\"2026-09-09T12:00:00Z\",\"duration\":\"4h\"}]}"
+  -d "{\"schema_version\":1,\"decisions\":[{\"value\":\"$MYIP\",\"scope\":\"Ip\",\"type\":\"ban\",\"origin\":\"crowdsec\",\"scenario\":\"crowdsecurity/ssh-bf\",\"created_at\":\"2026-09-09T12:00:00Z\",\"duration\":\"4h\"}]}"
 ```
 
 The response counters should show the drop. Then confirm the accepted 203.0.113.42 is
@@ -1120,33 +1123,19 @@ Ordered by how much they would change the deployment.
 10. **`ACME_EMAIL` was invented by this document.** The plan does not name one. Confirm
     the address before the first issuance; Let's Encrypt sends expiry warnings there.
 
-11. **Whether the CI matrix from Task 9 Step 4 has run on `plan/pipeline-split`.** At the
-    time of writing `deploy/` does not exist in the working tree and `image.yml` still
-    builds one image from one `Containerfile` with no `SERVICE` build argument. Path A in
-    §5.2 depends on that task landing first; until it does, only Path B is available.
-
-12. **Rootless was not evaluated as a real option.** `/etc/subuid` maps `rocky` only, and
+11. **Rootless was not evaluated as a real option.** `/etc/subuid` maps `rocky` only, and
     switching the deployment to run as `rocky` would need subuid/subgid for it plus
     lingering plus a way to bind 80/443 (`net.ipv4.ip_unprivileged_port_start` is 1024, so
     that needs a sysctl or a capability). Rootful is the right call for a single-purpose
     box; noted so the question is not reopened without the constraints.
 
-13. **The plan's Task 9 Step 2 example still appends the gateway CIDR.** Its
-    `threatd.container` block reads
-    `Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32`, which is a leftover from
-    the published-port arrangement. The plan's own "Ports and environment" prose is
-    correct and says the default is right *because* the containers share a pod. The unit
-    example is stale on that one line. This runbook uses `127.0.0.0/8` alone (§5.4); the
-    plan should be corrected to match, and it is flagged here rather than edited because
-    the plan is not this document's to change.
-
-14. **`.pod` quadlet support is recorded as a floor, not an observation.** Podman 5.0
+12. **`.pod` quadlet support is recorded as a floor, not an observation.** Podman 5.0
     introduced `.pod` units and the `.container` `Pod=` key; the box's appstream offers
     5.8.2. Nothing was installed, so this was not exercised — §2.2 has the check to run
     after installing. Anything below 5.0 cannot deploy this at all and would need a
     wrapper unit calling `podman pod create`.
 
-15. **Pod-level lifecycle coupling was not exercised.** All five containers now share one
+13. **Pod-level lifecycle coupling was not exercised.** All five containers now share one
     namespace and one infra container, so restarting the pod restarts everything, and a
     pod-level failure takes down `threatd`'s ingest along with the operator UIs. Under
     the previous model the four services failed independently. This is an accepted

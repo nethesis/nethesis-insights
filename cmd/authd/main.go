@@ -54,15 +54,6 @@ func setupLogging(level string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
 }
 
-// setOrUnset reduces a secret to its mere presence. The status log gets
-// this, never the value.
-func setOrUnset(v string) string {
-	if v != "" {
-		return "set"
-	}
-	return "unset"
-}
-
 // randomPepper returns a fresh 32-byte hex key. It exits on a rand.Reader
 // failure, matching this project's other os.Exit(1)-on-startup-error style
 // -- a broken entropy source is not a condition to run degraded under.
@@ -83,6 +74,7 @@ func main() {
 	pepper := getenv("AUTH_PEPPER", "")
 	timeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 
+	pepperSource := "configured"
 	if pepper == "" {
 		// A pepper is only defense in depth -- the cache it keys never
 		// leaves memory -- so an unset AUTH_PEPPER gets a random one for
@@ -91,6 +83,7 @@ func main() {
 		// key is computable offline by anyone, and after the pipeline
 		// split this process holds the whole fleet's credential cache.
 		pepper = randomPepper()
+		pepperSource = "ephemeral"
 		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
 	}
 
@@ -107,7 +100,7 @@ func main() {
 	slog.Info("authd: listening",
 		"addr", listenAddr,
 		"validate_url", validateURL,
-		"pepper", setOrUnset(pepper),
+		"pepper", pepperSource,
 		"positive_ttl", fa.PositiveTTL,
 		"negative_ttl", fa.NegativeTTL)
 

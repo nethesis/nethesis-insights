@@ -1,5 +1,18 @@
 # Rebuilding the rl1 dev machine
 
+> **Superseded by the pipeline split.** This runbook still describes the
+> single `insights` container of the pre-split monolith: one binary serving
+> `POST /v1/threat-events`, `GET /v1/blocklist`, a UI at `/findings`, and an
+> admin plane on `ADMIN_LISTEN_ADDR`. That deployment model no longer exists
+> in this repository: the pipeline split (`docs/plans/2026-09-09-pipeline-split.md`)
+> produces four binaries (`authd`, `insightsd`, `threatd`, `sizingd`) sharing
+> one podman pod behind Traefik, defined in `deploy/quadlet/` and
+> `deploy/traefik/` and walked through end to end in
+> `docs/runbooks/2026-09-09-insights-test-deploy.md`. Use that runbook to
+> rebuild the dev machine; this file is kept for its NS8-cluster provisioning
+> steps (tofu, fresh install, cluster finalization), which are still accurate
+> and are not repeated there.
+
 The dev box `rl1.leader.default.gs.nethserver.net` is provisioned on demand and
 destroyed when idle. This runbook rebuilds it to the exact state development was left
 in: an NS8 cluster running the `insights` container behind a Traefik route, with

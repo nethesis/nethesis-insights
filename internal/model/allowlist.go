@@ -42,23 +42,3 @@ type AllowlistRequestResult struct {
 	Accepted bool `json:"accepted"`
 	Requests int  `json:"requests"`
 }
-
-// AllowlistEntryRequest adds or updates one allowlist entry directly, out of
-// the review queue. Force overrides the over-broad-prefix guardrail
-// (threat.ParseAllowlistEntry) -- required to allowlist anything shorter
-// than a /24 (IPv4) or /48 (IPv6).
-type AllowlistEntryRequest struct {
-	CIDR   string `json:"cidr"`
-	Reason string `json:"reason"`
-	Force  bool   `json:"force,omitempty"`
-}
-
-// AllowlistDecisionRequest is the body of an approve-or-reject decision on a
-// pending allowlist request: the CIDR being decided, an optional note for
-// the audit trail, and (approve only) the same over-broad-prefix override as
-// AllowlistEntryRequest.
-type AllowlistDecisionRequest struct {
-	CIDR  string `json:"cidr"`
-	Note  string `json:"note,omitempty"`
-	Force bool   `json:"force,omitempty"`
-}
