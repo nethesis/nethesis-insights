@@ -29,6 +29,7 @@ type fakeReader struct {
 	threatSystems    []threatstore.ThreatSystemRow
 	allowlist        []threatstore.AllowlistRow
 	allowlistRequest []threatstore.AllowlistRequestRow
+	audit            []threatstore.AllowlistAuditRow
 
 	err error // when set, every method returns this error instead
 }
@@ -95,6 +96,17 @@ func (f *fakeReader) PendingAllowlistRequests(_ context.Context, limit int) ([]t
 	return out, nil
 }
 
+func (f *fakeReader) ListAllowlistAudit(_ context.Context, limit int) ([]threatstore.AllowlistAuditRow, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := f.audit
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // fakeFeed is a fixed snapshot state.
 type fakeFeed struct {
 	ready       bool
@@ -152,6 +164,10 @@ func threatReader() *fakeReader {
 		{CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1700000000000},
 		{CIDR: "198.51.100.0/24", Reason: "temporary", CreatedBy: "ops", CreatedAt: 1700000000000, ExpiresAt: &expires},
 	}
+	r.audit = []threatstore.AllowlistAuditRow{
+		{ID: "01AUDIT0000000000000000001", CIDR: "198.51.100.0/24", Action: "allowlist.delete", Actor: "bob", At: 1700000200000},
+		{ID: "01AUDIT0000000000000000000", CIDR: "203.0.113.0/24", Action: "allowlist.upsert", Actor: "alice", Detail: "partner scanner", At: 1700000000000},
+	}
 	return r
 }
 
@@ -207,6 +223,7 @@ var routes = []struct {
 	{"/events", "<h1>Threat events</h1>"},
 	{"/stats", "<h1>Threat stats</h1>"},
 	{"/allowlist-requests", "<h1>Allowlist requests</h1>"},
+	{"/audit", "<h1>Audit</h1>"},
 	{"/status", "<h1>Status</h1>"},
 }
 
@@ -222,6 +239,38 @@ func TestRoutesOK(t *testing.T) {
 				t.Fatalf("GET %s: body missing marker %q", rt.path, rt.marker)
 			}
 		})
+	}
+}
+
+// The shared chrome layout must identify this dashboard as threatd's own --
+// see chrome.Config.Name, set by this package's NewServer. Without it every
+// pipeline sharing chrome would render whichever binary wrote layout.html,
+// which insightsd's move to its own dashboard would otherwise have made
+// permanent.
+func TestPageIdentifiesAsThreatd(t *testing.T) {
+	h := newTestServerWithFeed(t, threatReader(), nil)
+	body := get(t, h, "/").Body.String()
+
+	if !strings.Contains(body, "<title>threatd operator UI</title>") {
+		t.Fatalf("missing threatd title, got:\n%s", body)
+	}
+	if !strings.Contains(body, "<strong>threatd</strong>") {
+		t.Fatalf("missing threatd nav brand, got:\n%s", body)
+	}
+}
+
+// The footer's write-routes clause must track whether writes are actually
+// reachable: threatd is the one pipeline that has write routes, but only
+// when ADMIN_API_KEY is configured.
+func TestFooterWriteClauseTracksCanWrite(t *testing.T) {
+	readOnly := newTestServerWithFeed(t, threatReader(), nil)
+	if body := get(t, readOnly, "/").Body.String(); strings.Contains(body, "write routes require the admin key") {
+		t.Fatalf("no admin key configured; the footer must not claim writes are available:\n%s", body)
+	}
+
+	writable := newWriteTestServer(t, threatReader(), nil, &fakeWriter{}, testAdminKey)
+	if body := get(t, writable, "/").Body.String(); !strings.Contains(body, "write routes require the admin key") {
+		t.Fatalf("an admin key is configured; the footer should say so:\n%s", body)
 	}
 }
 
@@ -362,12 +411,35 @@ func TestThreatSystemsPageRendersEveryReportingSystem(t *testing.T) {
 	}
 }
 
+// The audit page is the only reader of the trail the write routes append to
+// (add, delete, approve, reject) -- without it the table is write-only, and
+// "who removed the exemption that let this through" is answerable only from
+// hand-written SQL.
+func TestAuditPageRendersTheTrail(t *testing.T) {
+	h := newTestServerWithFeed(t, threatReader(), nil)
+	body := get(t, h, "/audit").Body.String()
+
+	for _, want := range []string{
+		"203.0.113.0/24",
+		"allowlist.upsert",
+		"alice",
+		"partner scanner",
+		"198.51.100.0/24",
+		"allowlist.delete",
+		"bob",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/audit is missing %q", want)
+		}
+	}
+}
+
 // A store failure is a 503, never a half-rendered page.
 func TestThreatPagesReportStoreFailures(t *testing.T) {
 	broken := &fakeReader{err: errStore}
 	h := newTestServerWithFeed(t, broken, fakeFeed{ready: true})
 
-	for _, path := range []string{"/", "/events", "/stats", "/systems"} {
+	for _, path := range []string{"/", "/events", "/stats", "/systems", "/audit"} {
 		rec := get(t, h, path)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: got %d, want 503", path, rec.Code)
@@ -384,6 +456,7 @@ func TestThreatPagesRenderEmpty(t *testing.T) {
 		{"/events", "no threat events"},
 		{"/stats", "no rollup yet"},
 		{"/systems", "no systems have reported yet"},
+		{"/audit", "no audit entries yet"},
 	} {
 		rec := get(t, h, tc.path)
 		if rec.Code != http.StatusOK {

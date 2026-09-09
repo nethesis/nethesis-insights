@@ -257,6 +257,25 @@ func TestRoutesOK(t *testing.T) {
 	}
 }
 
+// The shared chrome layout must identify this dashboard as insightsd's own,
+// not the last binary that happened to render it -- see chrome.Config.Name.
+// The footer's write-routes clause must also be gone entirely: insightsd's
+// dashboard has no write routes at all (see internal/ui's package doc).
+func TestPageIdentifiesAsInsightsd(t *testing.T) {
+	h := newTestServer(t, seededReader(), fakeRuntime{})
+	body := get(t, h, "/").Body.String()
+
+	if !strings.Contains(body, "<title>insightsd operator UI</title>") {
+		t.Fatalf("missing insightsd title, got:\n%s", body)
+	}
+	if !strings.Contains(body, "<strong>insightsd</strong>") {
+		t.Fatalf("missing insightsd nav brand, got:\n%s", body)
+	}
+	if strings.Contains(body, "write routes require the admin key") {
+		t.Fatalf("insightsd has no write routes; the footer must not claim it does:\n%s", body)
+	}
+}
+
 func TestStaticStyleCSS(t *testing.T) {
 	h := newTestServer(t, seededReader(), nil)
 	rec := get(t, h, "/static/style.css")

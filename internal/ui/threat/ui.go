@@ -48,6 +48,13 @@ type Reader interface {
 	// than a ranked list of CIDRs someone asked about. Only acting on an
 	// entry (approve/reject) requires the admin key.
 	PendingAllowlistRequests(ctx context.Context, limit int) ([]threatstore.AllowlistRequestRow, error)
+
+	// ListAllowlistAudit backs the /audit page -- the only reader of the
+	// append-only trail the four write routes below populate. Without a page
+	// reading it, the table would be write-only: CLAUDE.md keeps this trail
+	// specifically because DELETE on threat_allowlist destroys the row that
+	// would otherwise hold "who removed the exemption that let this through".
+	ListAllowlistAudit(ctx context.Context, limit int) ([]threatstore.AllowlistAuditRow, error)
 }
 
 // Writer is the slice of threatstore.Store the UI's write routes need:
@@ -84,10 +91,11 @@ const (
 	threatEventsMaxLim = 500
 	threatStatsLimit   = 200
 	allowlistReqLimit  = 200
+	auditLimit         = 500
 )
 
 // nav is this dashboard's nav bar structure. A single group with no label
-// renders as a flat row, which is right for six pages.
+// renders as a flat row, which is right for seven pages.
 var nav = []chrome.NavGroup{
 	{Pages: []chrome.NavPage{
 		{Key: "index", Path: "/", Label: "Blocklist"},
@@ -95,6 +103,7 @@ var nav = []chrome.NavGroup{
 		{Key: "events", Path: "/events", Label: "Events"},
 		{Key: "stats", Path: "/stats", Label: "Stats"},
 		{Key: "allowlist-requests", Path: "/allowlist-requests", Label: "Allowlist requests"},
+		{Key: "audit", Path: "/audit", Label: "Audit"},
 		{Key: "status", Path: "/status", Label: "Status"},
 	}},
 }
@@ -103,7 +112,7 @@ var nav = []chrome.NavGroup{
 // its own *template.Template -- see chrome.ParseTemplates.
 var pages = []string{
 	"index.html", "systems.html", "events.html", "stats.html",
-	"allowlist-requests.html", "status.html",
+	"allowlist-requests.html", "audit.html", "status.html",
 }
 
 // writableRoutes is the small, explicit, enumerated set of paths that also
@@ -142,6 +151,7 @@ func NewServer(r Reader, feed Feed, w Writer, cfg chrome.Config) (http.Handler, 
 		return nil, err
 	}
 
+	cfg.Name = "threatd"
 	cfg.Nav = nav
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
@@ -211,6 +221,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleStats(w, r)
 	case "/allowlist-requests":
 		s.handleAllowlistRequests(w, r)
+	case "/audit":
+		s.handleAudit(w, r)
 	case "/status":
 		s.handleStatus(w, r)
 	default:
@@ -414,6 +426,28 @@ func (s *server) handleAllowlistRequests(w http.ResponseWriter, r *http.Request)
 		PageData: s.chrome.PageData(r, "allowlist-requests"),
 		Requests: requests,
 		CanWrite: s.canWrite(),
+	})
+}
+
+type auditPageData struct {
+	chrome.PageData
+	Entries []threatstore.AllowlistAuditRow
+}
+
+// handleAudit shows the append-only trail every allowlist write appends to
+// (add, delete, approve, reject) -- the only page in this pipeline that
+// reads it. It is a plain GET, same as the review queue: this table records
+// who did what, not a decision to be made, so there is nothing to
+// authenticate here.
+func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.reader.ListAllowlistAudit(r.Context(), auditLimit)
+	if err != nil {
+		s.chrome.StoreError(w, "audit", err)
+		return
+	}
+	s.chrome.Render(w, "audit.html", auditPageData{
+		PageData: s.chrome.PageData(r, "audit"),
+		Entries:  entries,
 	})
 }
 

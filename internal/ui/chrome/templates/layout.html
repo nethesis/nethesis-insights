@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>insightsd operator UI</title>
+<title>{{.Name}} operator UI</title>
 <link rel="stylesheet" href="{{.Base}}/static/pico.min.css">
 <link rel="stylesheet" href="{{.Base}}/static/style.css">
 {{if gt .Refresh 0}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
@@ -15,7 +15,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <body>
 <header class="container">
 <nav>
-<ul><li><strong>insightsd</strong></li></ul>
+<ul><li><strong>{{.Name}}</strong></li></ul>
 <ul>
 {{range .Nav}}{{if .Label}}<li><details class="dropdown"{{if .Active}} open{{end}}>
 <summary{{if .Active}} class="active"{{end}}>{{.Label}}</summary>
@@ -36,7 +36,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{template "content" .}}
 </main>
 <footer class="container">
-<small>insightsd operator UI &middot; build {{.Build}} &middot; up {{.Uptime}} &middot; reads are unauthenticated and fleet-wide; a small set of write routes require the admin key</small>
+<small>{{.Name}} operator UI &middot; build {{.Build}} &middot; up {{.Uptime}} &middot; reads are unauthenticated and fleet-wide{{if .CanWrite}}; a small set of write routes require the admin key{{end}}</small>
 </footer>
 </body>
 </html>

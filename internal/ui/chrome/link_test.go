@@ -31,6 +31,36 @@ func TestLink(t *testing.T) {
 	}
 }
 
+// PageData.Name is what lets one shared layout.html identify itself
+// correctly across insightsd, threatd and sizingd -- without it every
+// dashboard would render whichever binary's Config.Name happened to be
+// wired in, or a hardcoded one. PageData.CanWrite is what lets the footer's
+// "write routes require the admin key" clause disappear entirely for a
+// dashboard (like insightsd's) that has none, instead of asserting a
+// capability that was removed.
+func TestPageDataCarriesNameAndCanWrite(t *testing.T) {
+	cases := []struct {
+		name     string
+		adminKey string
+		want     bool
+	}{
+		{"threatd", "", false},
+		{"threatd", "secret", true},
+		{"insightsd", "", false},
+	}
+	for _, tc := range cases {
+		b := &Base{name: tc.name, adminKey: tc.adminKey}
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		pd := b.PageData(r, "status")
+		if pd.Name != tc.name {
+			t.Errorf("Name = %q, want %q", pd.Name, tc.name)
+		}
+		if pd.CanWrite != tc.want {
+			t.Errorf("name %q adminKey %q: CanWrite = %v, want %v", tc.name, tc.adminKey, pd.CanWrite, tc.want)
+		}
+	}
+}
+
 // The refresh links rebuild the current URL with one query parameter
 // changed. r.URL.Path is post-strip, so the base has to be re-applied or
 // every refresh link escapes the pipeline's subtree.

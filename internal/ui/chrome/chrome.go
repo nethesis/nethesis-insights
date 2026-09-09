@@ -70,6 +70,12 @@ type NavGroup struct {
 
 // Config configures a Base.
 type Config struct {
+	// Name identifies the binary this dashboard belongs to ("insightsd",
+	// "threatd", "sizingd"), rendered into the page title, the nav brand and
+	// the footer. Every dashboard shares this one layout, so without this
+	// field every deployment's UI would call itself by whichever binary
+	// wrote layout.html -- which is exactly the bug this field fixes.
+	Name string
 	// BasePath is the deployment's path prefix ("", "blocklist",
 	// "/blocklist", ...). See normalizeBase and Link.
 	BasePath string
@@ -100,6 +106,7 @@ type Config struct {
 // Base is the shared chrome: the parsed templates, the static file server,
 // and the base path every emitted URL must carry.
 type Base struct {
+	name     string
 	basePath string
 	adminKey string
 	info     Info
@@ -122,6 +129,7 @@ func New(cfg Config) (*Base, error) {
 		return nil, err
 	}
 	return &Base{
+		name:     cfg.Name,
 		basePath: normalizeBase(cfg.BasePath),
 		adminKey: cfg.AdminKey,
 		info:     cfg.Info,
@@ -201,6 +209,7 @@ type navGroupData struct {
 // layout.html's nav/refresh/footer chrome renders the same way regardless of
 // which page is on screen.
 type PageData struct {
+	Name       string
 	Base       string
 	Nav        []navGroupData
 	Refresh    int
@@ -209,6 +218,7 @@ type PageData struct {
 	Refresh30  string
 	Build      string
 	Uptime     string
+	CanWrite   bool
 }
 
 // PageData builds the chrome shared by every page: nav with the active entry
@@ -229,6 +239,7 @@ func (b *Base) PageData(r *http.Request, active string) PageData {
 	}
 	off, r10, r30 := b.refreshLinks(r)
 	return PageData{
+		Name:       b.name,
 		Base:       b.basePath,
 		Nav:        nav,
 		Refresh:    ParseRefresh(r),
@@ -237,6 +248,7 @@ func (b *Base) PageData(r *http.Request, active string) PageData {
 		Refresh30:  r30,
 		Build:      b.info.Build,
 		Uptime:     FmtAgo(b.info.StartedAt),
+		CanWrite:   b.CanWrite(),
 	}
 }
 

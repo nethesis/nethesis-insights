@@ -157,6 +157,7 @@ func NewServer(r Reader, rt Runtime, info Info) http.Handler {
 	}
 
 	base, err := chrome.New(chrome.Config{
+		Name: "insightsd",
 		Info: chrome.Info{
 			StartedAt: info.StartedAt,
 			Build:     info.Build,
