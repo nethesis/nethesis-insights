@@ -21,7 +21,7 @@ const MaxAllowlistReasonLen = 512
 // never an identity control.
 const MaxAdminActorLen = 128
 
-// AllowlistRequestBody is the POST /v1/allowlist-requests body: a customer
+// AllowlistRequestBody is the POST /blocklist/v1/allowlist-requests body: a customer
 // asking that a CIDR be exempted from blocklist promotion. It is never, by
 // itself, enough to create an allowlist entry -- only an explicit admin
 // approval does that.

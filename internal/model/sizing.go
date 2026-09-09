@@ -27,7 +27,7 @@ import "encoding/json"
 // separately.
 const SizingSchemaVersion = 1
 
-// SizingReport is the POST /v1/sizing-reports body. One report is one
+// SizingReport is the POST /sizing/v1/reports body. One report is one
 // cluster, carrying one or more complete UTC days, each with one entry per
 // node in the cluster.
 //

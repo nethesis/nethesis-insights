@@ -27,7 +27,7 @@ type Decision struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// ThreatReport is the POST /v1/threat-events body. SystemID is optional --
+// ThreatReport is the POST /blocklist/v1/events body. SystemID is optional --
 // the authenticated credential is what identifies the reporter -- but when
 // present it must equal the authenticated system, exactly like Bundle.
 type ThreatReport struct {
