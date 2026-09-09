@@ -2064,6 +2064,299 @@ git commit -m "docs: describe the four-service split"
 
 ---
 
+### Task 11: an ingest queue in front of threatd's writes
+
+Runs **after** Task 10 — the split must be finished first.
+
+**What this is actually for.** The database already has exactly one writer:
+`SetMaxOpenConns(1)` plus the store's write mutex, and `InsertThreatEvents`
+(`internal/store/threat/store.go`) already wraps a whole report in a single
+transaction with `ON CONFLICT … DO NOTHING`. So this task does not introduce
+single-writer semantics; those hold today.
+
+What it introduces is a **bound**. Today a burst of reporters produces one
+blocked goroutine per in-flight request, each holding a decoded, sanitized
+report, all queued on the mutex with no limit and no way to shed load: the
+server degrades by growing until something dies. A bounded channel with a
+fixed consumer count converts that into a queue depth an operator can see and
+a fast 503 the reporter retries — the same trade `internal/queue` already
+makes for bundles, for a different reason.
+
+Dropping a queued batch on a crash is acceptable here and needs no
+compensation: the `(system_id, attacker_ip, scenario, observed_at)` unique
+index makes redelivery a no-op, and reporters re-send on their next cycle.
+
+**Consequence for the wire contract:** `stored` and `duplicates` are
+post-write facts and cannot survive an asynchronous ingest. The 202 keeps
+`accepted` and `dropped` — `dropped` comes from `threat.Sanitize`, which runs
+in the handler, before the enqueue — and loses the other two. Sanitizing
+before enqueueing is what preserves it, and it also keeps the queue holding
+clean events rather than raw reports.
+
+**Where the package goes.** Not under `internal/threat`: that package is pure,
+and a queue has goroutines and a clock. Not `internal/queue` either — that one
+carries the `(system_id, window_start)` in-flight claim that makes bundle
+redelivery idempotent, which threat neither has nor needs. A new
+`internal/platform/ingestq` holds the generic half (bounded channel, `ErrFull`,
+workers, `Depth`/`Cap`), and `internal/queue` is deliberately **not** refactored
+onto it: its window-claim logic is load-bearing and correct, and rewriting it
+for symmetry buys nothing.
+
+**Files:**
+- Create: `internal/platform/ingestq/ingestq.go`, `internal/platform/ingestq/ingestq_test.go`
+- Modify: `internal/api/threat/threat.go`, `internal/api/threat/api.go`, `internal/api/threat/threat_test.go`
+- Modify: `internal/ui/threat/ui.go`, `internal/ui/threat/templates/status.html`
+- Modify: `cmd/threatd/main.go`
+- Modify: `docs/specs/2026-08-07-threat-events-ingest-contract.md`, `docs/api/openapi.yaml`,
+  `docs/api/openapi_test.go`, `docs/architecture.md`, `CLAUDE.md`, `AGENTS.md`
+
+**Interfaces:**
+- Produces:
+  - `type ingestq.Queue[T any] struct{ … }`
+  - `func ingestq.New[T any](size int, timeout time.Duration, h func(context.Context, T) error) *Queue[T]`
+  - `func (q *Queue[T]) Publish(item T) error` returning `ingestq.ErrFull`
+  - `func (q *Queue[T]) Start(workers int)`, `Stop()`, `Depth() int`, `Cap() int`
+  - `Depth`/`Cap` satisfy `internal/ui/chrome`'s `Runtime` interface unchanged
+
+- [ ] **Step 1: Write the failing queue test**
+
+```go
+// Copyright (C) 2026 Nethesis S.r.l.
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package ingestq
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+)
+
+// The bound is the point: past capacity Publish must fail immediately rather
+// than block, so a burst sheds load at the edge instead of growing the
+// server until it dies.
+func TestPublishRefusesWhenFull(t *testing.T) {
+	release := make(chan struct{})
+	q := New(2, time.Second, func(ctx context.Context, n int) error {
+		<-release
+		return nil
+	})
+	q.Start(1)
+	defer func() { close(release); q.Stop() }()
+
+	// One item is claimed by the worker and blocks; two more fill the buffer.
+	for i := 0; i < 3; i++ {
+		if err := q.Publish(i); err != nil {
+			t.Fatalf("Publish(%d) = %v, want nil", i, err)
+		}
+	}
+	waitFor(t, func() bool { return q.Depth() == 2 })
+
+	if err := q.Publish(99); !errors.Is(err, ErrFull) {
+		t.Fatalf("Publish past capacity = %v, want ErrFull", err)
+	}
+}
+
+// Every accepted item must reach the handler exactly once, from any worker.
+func TestEveryPublishedItemIsHandledOnce(t *testing.T) {
+	const items = 200
+
+	var mu sync.Mutex
+	seen := map[int]int{}
+	done := make(chan struct{})
+
+	q := New(items, time.Second, func(ctx context.Context, n int) error {
+		mu.Lock()
+		seen[n]++
+		if len(seen) == items {
+			close(done)
+		}
+		mu.Unlock()
+		return nil
+	})
+	q.Start(4)
+	defer q.Stop()
+
+	for i := 0; i < items; i++ {
+		if err := q.Publish(i); err != nil {
+			t.Fatalf("Publish(%d): %v", i, err)
+		}
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not see every item")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 0; i < items; i++ {
+		if seen[i] != 1 {
+			t.Errorf("item %d handled %d times, want 1", i, seen[i])
+		}
+	}
+}
+
+// Stop must drain what was accepted. An item the server answered 202 for and
+// then dropped at shutdown is worse than one it refused with a 503.
+func TestStopDrainsAcceptedItems(t *testing.T) {
+	var mu sync.Mutex
+	var handled int
+
+	q := New(16, time.Second, func(ctx context.Context, n int) error {
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		handled++
+		mu.Unlock()
+		return nil
+	})
+	q.Start(2)
+
+	for i := 0; i < 16; i++ {
+		if err := q.Publish(i); err != nil {
+			t.Fatalf("Publish(%d): %v", i, err)
+		}
+	}
+	q.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if handled != 16 {
+		t.Errorf("handled %d items after Stop, want 16", handled)
+	}
+}
+
+// A handler that fails or panics must not take the worker down with it:
+// one bad report cannot stop every later report from being stored.
+func TestAFailingHandlerDoesNotKillTheWorker(t *testing.T) {
+	var mu sync.Mutex
+	var handled int
+	done := make(chan struct{})
+
+	q := New(8, time.Second, func(ctx context.Context, n int) error {
+		mu.Lock()
+		handled++
+		if handled == 3 {
+			close(done)
+		}
+		mu.Unlock()
+		switch n {
+		case 0:
+			return errors.New("boom")
+		case 1:
+			panic("worse")
+		}
+		return nil
+	})
+	q.Start(1)
+	defer q.Stop()
+
+	for i := 0; i < 3; i++ {
+		if err := q.Publish(i); err != nil {
+			t.Fatalf("Publish(%d): %v", i, err)
+		}
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker died on a failing handler")
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition not met within the deadline")
+}
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `go test ./internal/platform/ingestq/ -race -v`
+Expected: build failure, `undefined: New`.
+
+- [ ] **Step 3: Implement `ingestq.go`**
+
+Model it on `internal/queue/queue.go`, minus the window claim: a buffered
+channel of `T`, `Publish` doing a non-blocking send with `default: return
+ErrFull`, `Start(workers)` launching that many goroutines over the channel, a
+per-item `context.WithTimeout`, a `recover()` in the worker so a panicking
+handler logs and continues, and `Stop()` closing the channel and waiting on a
+`sync.WaitGroup`. `Depth()` is `len(ch)`, `Cap()` is `cap(ch)`.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `go test ./internal/platform/ingestq/ -race -count=1 -v`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing handler tests**
+
+In `internal/api/threat/threat_test.go`, add three cases: an accepted report
+answers 202 without the store having been written yet; a full queue answers
+503 and stores nothing; a report whose every decision is dropped by
+`threat.Sanitize` still answers 202 with the drop counters and never enqueues.
+Assert the response body carries `accepted` and `dropped` and no longer
+carries `stored` or `duplicates`.
+
+- [ ] **Step 6: Move the write behind the queue**
+
+`handleEvents` keeps everything up to and including `threat.Sanitize`, then
+publishes `threatWork{systemID, events, counters, day}` and answers 202. The
+consumer — a method on the api package's server, wired in `NewServer` — does
+the `InsertThreatEvents` and `RecordIngestCounters` calls the handler used to
+make, with the same error handling: an accounting failure is logged and never
+fails the work item, because the evidence is already stored.
+
+The queue is not optional: `NewServer` takes it, and `cmd/threatd` always
+builds one. A nil queue would be a second, untested ingest path.
+
+- [ ] **Step 7: Run the tests and watch them pass**
+
+Run: `go test ./internal/api/threat/ -race -count=1 -v`
+Expected: PASS.
+
+- [ ] **Step 8: Wire the binary and the status page**
+
+`cmd/threatd/main.go` gains `THREAT_QUEUE_SIZE` (default 256) and
+`THREAT_QUEUE_WORKERS` (default 2), starts the queue before the listener and
+stops it after the HTTP shutdown so accepted work drains. Pass the queue to
+`threatui.NewServer` as its `Runtime`; the threat status page grows the same
+depth/cap/workers row the logs status page has.
+
+- [ ] **Step 9: Update the contract and the docs**
+
+`docs/specs/2026-08-07-threat-events-ingest-contract.md`: the 202 body loses
+`stored` and `duplicates`; add that a 503 means "retry", exactly as for
+bundles. `docs/api/openapi.yaml` and its test follow. In `docs/architecture.md`,
+`CLAUDE.md` and `AGENTS.md`, the Threat Shield rule currently reads "**no LLM
+call, no gate, no fingerprint, no queue**" — the clause "there is no LLM here,
+so no queue" was the reason, and it no longer holds. Replace it with this
+task's reason: the queue bounds concurrency against a single-writer database,
+it does not exist to hide latency. Keep `CLAUDE.md` and `AGENTS.md`
+byte-identical.
+
+- [ ] **Step 10: Verify and commit**
+
+```bash
+go build ./... && go vet ./... && go test ./... -race -count=1
+git add internal/platform/ingestq internal/api/threat internal/ui/threat cmd/threatd \
+        docs/specs/2026-08-07-threat-events-ingest-contract.md docs/api \
+        docs/architecture.md CLAUDE.md AGENTS.md
+git commit -m "feat(threatd): bound ingest with a queue and a consumer"
+```
+
+---
+
 ## Verification
 
 Run at the end of Task 10:
@@ -2108,7 +2401,20 @@ reached.
 4. **Does `internal/llm`'s stub still earn its place** now that `analyzer_test.go` is the
    only caller in a single-pipeline binary? Probably yes — it is what lets the pipeline
    run end to end with nothing running — but worth a look while `cmd/insightsd` is open.
-5. **Should the three UIs share one status page implementation?** They differ in exactly
+5. **Should threatd's consumer coalesce several reports into one transaction?**
+   `InsertThreatEvents` is already one transaction per report, so the queue
+   alone does not reduce the commit count: at an estimated ~9-18 reports/s
+   across 2700 nodes that is ~18-36 transactions/s, which WAL handles
+   comfortably. Coalescing would need a new multi-system store method and is
+   worth doing only against a measurement showing commit latency is the
+   binding constraint. Decide with load data from the deployed stack, not now.
+
+6. **Does sizingd need the same queue?** Its shape is identical but its load
+   is not — three reports per cluster per day against Threat Shield's
+   continuous stream. Left alone deliberately; revisit if the ingest ever
+   blocks.
+
+7. **Should the three UIs share one status page implementation?** They differ in exactly
    two sections (queue, feed) out of five. A shared `chrome.StatusPage` taking optional
    sections would remove the triplication; three small pages are easier to read. Task 7
    is the point where all three exist and the comparison is possible.
