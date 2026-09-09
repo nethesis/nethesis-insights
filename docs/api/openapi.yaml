@@ -38,9 +38,8 @@ info:
     to live on a separate bearer-key-protected admin plane -- has no stable
     contract, and documenting it would invite someone to script against it.
 
-    `/blocklist/v1/allowlist-requests` is **planned, not yet implemented**
-    (see `docs/plans/2026-08-28-allowlist-management.md`); its operation
-    says so in its description.
+    See `docs/plans/2026-08-28-allowlist-management.md` for the allowlist
+    review workflow that `/blocklist/v1/allowlist-requests` feeds.
 servers:
   - url: https://insights.nethesis.it
     description: >-
@@ -479,8 +478,6 @@ paths:
       tags: [threat-shield]
       summary: Request a CIDR be added to the allowlist
       description: |
-        **Planned, not yet implemented** (`docs/plans/2026-08-28-allowlist-management.md`).
-
         A review-queue entry, never a decision procedure: there is no
         automatic promotion to `threat_allowlist` from any number of
         requests. The two consensus rules look symmetric and are not -- a
@@ -1190,7 +1187,7 @@ components:
 
     AllowlistRequestInput:
       type: object
-      description: "Planned. POST /blocklist/v1/allowlist-requests body -- mirrors internal/model.AllowlistRequestBody."
+      description: "POST /blocklist/v1/allowlist-requests body -- mirrors internal/model.AllowlistRequestBody."
       required: [cidr, reason]
       properties:
         cidr:
@@ -1202,7 +1199,7 @@ components:
 
     AllowlistRequestAccepted:
       type: object
-      description: "Planned. POST /blocklist/v1/allowlist-requests response -- mirrors internal/model.AllowlistRequestResult."
+      description: "POST /blocklist/v1/allowlist-requests response -- mirrors internal/model.AllowlistRequestResult."
       required: [accepted, requests]
       properties:
         accepted: { type: boolean }
