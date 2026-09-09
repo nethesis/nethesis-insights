@@ -587,6 +587,7 @@ the wrong evidence.
 | invalid credentials | `401` | do not retry |
 | validator unreachable, no cache hit | `503` | retry with backoff |
 | queue saturated (`QUEUE_SIZE` full) | `503` | retry with backoff |
+| rate limited by the edge proxy | `429` | retry with backoff |
 | duplicate window | `200 {"duplicate": true}` | treat as success |
 
 ### 9.2 Analyzer

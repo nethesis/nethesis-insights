@@ -289,6 +289,7 @@ is asserted by a test.
 | `403` | `system_id` present and not the authenticated system |
 | `405` | method other than `POST` |
 | `413` | body over 8 MiB |
+| `429` | rate limited by the edge proxy |
 | `503` | forward-auth validator unreachable, or the store failed to write |
 
 ## Client rules
@@ -297,9 +298,9 @@ is asserted by a test.
    answers `get-facts` both live on the leader.
 2. **Send the last complete UTC day**, and backfill up to 7 earlier days that
    have not been acknowledged. Never send today.
-3. **Retry on `503` and on a transport error; never on `400`, `403` or `413`.**
-   Redelivery is free by construction, so a delayed report is always better than
-   a lost one.
+3. **Retry on `503`, on `429` and on a transport error; never on `400`, `403`
+   or `413`.** Redelivery is free by construction, so a delayed report is
+   always better than a lost one.
 4. **Stagger.** `OnCalendar=03:00` with `RandomizedDelaySec=2h` — 2700 clusters
    posting at the same instant is the one load pattern this endpoint cannot
    absorb.

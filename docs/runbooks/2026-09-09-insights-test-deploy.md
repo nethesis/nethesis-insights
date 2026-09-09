@@ -582,6 +582,19 @@ published-port model and is wrong here; §4.1 says why at length. Note that the 
 Task 9 Step 2 example still shows the gateway appended (see §7 item 3) — the surrounding
 prose in the plan is right and that one line is stale.
 
+**`Environment=LOG_LEVEL=debug` on all four `authd`/`insightsd`/`threatd`/`sizingd`
+units, for this test deployment specifically.** At the default `info` level,
+`httpx.SystemID`'s two rejected-request sentinels — `ErrUntrustedProxy` (the pod's
+networking is wrong and every valid credential 401s) and `ErrNoCredential` (the client
+simply sent nothing) — are logged, but only at `slog.Debug`, so neither reaches the
+journal and the two failure modes are indistinguishable from outside. That distinction
+is exactly what §4.3's verification step and smoke test 3 depend on being able to read.
+Do this on this box because it is a first deployment of the pod-networking arrangement
+and the failure mode it exposes is silent otherwise; a production deployment should
+lower this to `info` (or omit it, which defaults to `info`) once the pod's `RemoteAddr`
+behaviour is confirmed, since debug logging is otherwise unnecessary verbosity on a
+fleet-facing service.
+
 `threatd.container` in full, the others by analogy:
 
 ```ini

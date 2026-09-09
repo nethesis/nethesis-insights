@@ -115,11 +115,14 @@ the case that page exists for.
 | `401` | invalid credential |
 | `403` | `system_id` does not match the authenticated system |
 | `405` | method other than `POST` |
+| `429` | rate limited by the edge proxy |
 | `503` | validator unreachable, or the ingest queue is at capacity |
 
 **A `503` here means retry**, exactly as for `/logs/v1/bundles`: the batch was
 never queued, so nothing was lost, and the reporter should re-send it (or wait
-for its next cycle) rather than treating it as a permanent failure.
+for its next cycle) rather than treating it as a permanent failure. **A `429`
+means retry with backoff too** — the request never reached the pipeline at
+all, so nothing was lost there either.
 
 **Ingest is fail-closed on authentication and fail-open on content.** A
 malformed decision is dropped and counted; the rest of the batch is stored. A
@@ -218,6 +221,7 @@ Vary: Accept-Encoding
 | `304` | unchanged since the client's `ETag` |
 | `401` | invalid credential |
 | `405` | method other than `GET` or `HEAD` |
+| `429` | rate limited by the edge proxy |
 | `503` | validator unreachable, or no snapshot generated yet |
 
 ### Client rules

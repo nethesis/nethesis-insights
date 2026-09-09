@@ -22,18 +22,30 @@ http:
     # per-node traffic is far under this: bundles post every 15 minutes
     # (~0.001 req/s), sizing reports post three times a day, and threat
     # events are batched into one POST per report rather than one per event.
-    # average: 5req/s with burst: 10 gives ~1000x headroom over that steady
-    # rate while still capping a single misbehaving or compromised node (a
-    # retry loop, a scripted flood) well short of being able to threaten
-    # authd's cache or a backend's single SQLite writer. It is deliberately
-    # per-source rather than a global cap: a global limit would let one loud
-    # client starve the other 2699 nodes, which is worse than the DoS this
-    # exists to bound.
+    # average: 5req/s gives ~1000x headroom over that steady rate while still
+    # capping a single misbehaving or compromised node (a retry loop, a
+    # scripted flood) well short of being able to threaten authd's cache or a
+    # backend's single SQLite writer. It is deliberately per-source rather
+    # than a global cap: a global limit would let one loud client starve the
+    # other 2699 nodes, which is worse than the DoS this exists to bound.
+    #
+    # burst is a different knob and must not be sized off the steady rate:
+    # bundle windows are wall-clock aligned (the design spec's example window
+    # is 08:00:00-08:15:00Z), so every node in a cluster behind one NAT egress
+    # posts within moments of the same quarter hour, and the blocklist feed
+    # poll is on the same 15-minute cadence. Traefik's token-bucket queues a
+    # request only up to maxDelay = period/(2*average), 100ms here, so with
+    # average: 5 the practical behaviour of a low burst is "burst requests
+    # succeed, the rest are rejected outright" rather than smoothly queued --
+    # one ordinary multi-node cluster sharing a public IP already exceeds a
+    # burst of 10. 200 absorbs that synchronised arrival spike; it bounds
+    # instantaneous depth only, so average: 5 still caps a retry loop or a
+    # scripted flood exactly as intended.
     rate-limit:
       rateLimit:
         average: 5
         period: 1s
-        burst: 10
+        burst: 200
     system-auth:
       forwardAuth:
         address: "http://127.0.0.1:9590/auth"
@@ -74,7 +86,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
       entryPoints: [websecure]
       priority: 100
-      middlewares: [operator-auth, strip-logs]
+      middlewares: [rate-limit, operator-auth, strip-logs]
       service: logs-ui
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
@@ -86,7 +98,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
       entryPoints: [websecure]
       priority: 100
-      middlewares: [operator-auth, strip-blocklist]
+      middlewares: [rate-limit, operator-auth, strip-blocklist]
       service: blocklist-ui
     sizing-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
@@ -98,7 +110,7 @@ http:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"
       entryPoints: [websecure]
       priority: 100
-      middlewares: [operator-auth, strip-sizing]
+      middlewares: [rate-limit, operator-auth, strip-sizing]
       service: sizing-ui
 
   services:
