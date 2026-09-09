@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/auth"
 	"github.com/nethesis/nethesis-insights/internal/store"
 )
 

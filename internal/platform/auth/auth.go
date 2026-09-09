@@ -77,7 +77,7 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 // Validate has the same signature as api.Authenticator so it drops into
 // api.NewServer without this package importing api.
 func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, error) {
-	systemID, secret, err := parseBasic(authHeader)
+	systemID, secret, err := ParseBasic(authHeader)
 	if err != nil {
 		return "", err
 	}
@@ -118,9 +118,9 @@ func (a *ForwardAuth) cacheKey(systemID, secret string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// parseBasic extracts system_id/secret from a "Basic ..." Authorization
+// ParseBasic extracts system_id/secret from a "Basic ..." Authorization
 // header without judging them -- that verdict belongs to the validator.
-func parseBasic(authHeader string) (systemID, secret string, err error) {
+func ParseBasic(authHeader string) (systemID, secret string, err error) {
 	const prefix = "Basic "
 	if authHeader == "" {
 		return "", "", fmt.Errorf("%w: no Authorization header", ErrInvalidCredentials)

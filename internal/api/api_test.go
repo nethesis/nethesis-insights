@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nethesis/nethesis-insights/internal/auth"
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/auth"
 )
 
 type fakePublisher struct {
