@@ -25,17 +25,16 @@ NethServer subscription credential was available.
 - [ ] Confirm a real ban reaches the server: it should appear on
       `/blocklist/threat-events` in the operator UI.
 
-### Logs — no code change needed
+### Logs — ready, needs a release
 
-`ns8-loki`'s collector builds `url.rstrip("/") + "/v1/bundles"`, so a base URL
-carrying the prefix is enough.
+`ns8-loki` commit `9050874` moves the collector to `/logs/v1/bundles` and
+leaves `base_url` as the server root, matching `ns8-crowdsec`. Both modules
+read `INSIGHTS_SERVER_URL` and both now take the same value; before this they
+read it to mean different things, one wanting the prefix baked in and one not.
 
-- [ ] `api-cli run module/loki1/set-insights --data '{"active":true,"base_url":"https://insights.gs.nethserver.net/logs"}'`
+- [ ] Release `ns8-loki` and update `loki1` on rl1.
+- [ ] `api-cli run module/loki1/set-insights --data '{"active":true,"base_url":"https://insights.gs.nethserver.net"}'`
 - [ ] Confirm a bundle lands: `/logs/systems` in the operator UI.
-
-Note the asymmetry — crowdsec takes the server root and appends the full
-documented path, loki takes a base that already includes `/logs`. Both work.
-Worth making them agree eventually; not worth a release on its own.
 
 ### Sizing — cannot be configured
 
@@ -46,6 +45,14 @@ someone writes it.
 
 - [ ] Write the `ns8-core` cluster reporter (leader-only, three sends a day,
       byte-identical restatements of a complete UTC day).
+
+Both modules take the bare server root now, so one value configures both:
+
+    INSIGHTS_SERVER_URL=https://insights.gs.nethserver.net
+
+Note for whoever writes the sizing reporter: follow the same rule. The server
+root goes in configuration, the pipeline prefix belongs to the endpoint, and
+`/sizing/v1/reports` is appended by the client.
 
 ## 2. The one test never proven on hardware
 
