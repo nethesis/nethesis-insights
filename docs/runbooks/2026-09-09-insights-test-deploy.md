@@ -254,8 +254,11 @@ Traefik's file provider is watched (`providers.file.watch: true`), so a re-rende
 picked up without a restart — which is also the fastest way to fix a wrong host without
 dropping TLS.
 
-Consider adding `deploy/render.sh` to the repository as the one command that does the
-above, so the rendering is itself an artifact rather than a paragraph in a runbook.
+`deploy/render.sh` is that one command: it sources `/etc/insights/deploy.env`, fails
+loudly if `INSIGHTS_HOST` or `ACME_EMAIL` is unset, and renders both templates with the
+explicit `envsubst` variable list above -- so the rendering is an artifact rather than a
+paragraph an operator retypes, and cannot accidentally run `envsubst` unargumented, which
+would also expand Traefik's own `${...}` syntax into a config that parses and is wrong.
 
 ### 3.3 Everything `INSIGHTS_HOST` must drive
 
@@ -449,15 +452,39 @@ getenforce                                         # still Enforcing
 
 **Path A — pull from CI (recommended on this machine; see the RAM gap in §2.5).**
 
-Task 9 Step 4 gives `image.yml` a matrix over `[authd, insightsd, threatd, sizingd]`,
-pushing `ghcr.io/nethesis/nethesis-insights-<service>`. Once that has run on the branch:
+`image.yml`'s matrix over `[authd, insightsd, threatd, sizingd]` pushes
+`ghcr.io/nethesis/nethesis-insights-<service>`, but its `push:` trigger fires only on
+`main` or a version tag, and `type=raw,value=latest,enable={{is_default_branch}}` means
+**`:latest` is produced only from `main`**. A push to a feature branch does not run the
+workflow at all. So before this branch is merged there is no `:latest` to pull, and the
+naive form of Path A fails with `manifest unknown`.
+
+For a test deploy of an unmerged branch, trigger the workflow by hand and use the branch
+tag it produces instead of `:latest`:
+
+```bash
+gh workflow run image.yml --ref plan/pipeline-split
+gh run watch                                                       # wait for the matrix
+gh run view --log | grep -m1 -o 'nethesis-insights-authd:[a-zA-Z0-9._-]*'
+                                                                    # confirm the tag
+```
+
+`type=ref,event=branch` sanitizes the branch name for use as a Docker tag (`/` becomes
+`-`), so read the actual tag from the run rather than assuming the exact string. Pull it
+and retag it locally as `:latest`, so the quadlets' committed `Image=...:latest` need no
+edit for a test deploy:
 
 ```bash
 for s in authd insightsd threatd sizingd; do
-  podman pull ghcr.io/nethesis/nethesis-insights-$s:latest
+  podman pull ghcr.io/nethesis/nethesis-insights-$s:<branch-tag>
+  podman tag ghcr.io/nethesis/nethesis-insights-$s:<branch-tag> \
+             ghcr.io/nethesis/nethesis-insights-$s:latest
 done
 podman pull docker.io/library/traefik:v3.3
 ```
+
+After this branch merges to `main`, a push to `main` (or a version tag) republishes the
+real `:latest`, and the manual-trigger-plus-retag step above is no longer needed.
 
 `ghcr.io` is reachable from this box (verified: `/v2/` answers 401). A public package
 needs no login; a private one needs `podman login ghcr.io -u <user>` with a PAT carrying
@@ -713,8 +740,13 @@ chmod 600 /etc/insights/*.env
 ```
 
 `sizingd` has no secret of its own; the empty file exists so its
-`EnvironmentFile=` does not fail the unit. Alternatively mark it
-`EnvironmentFile=-/etc/insights/sizingd.env` and omit the file.
+`EnvironmentFile=` does not fail the unit. There is no optional-file form to fall back to
+instead of creating it: quadlet's `Container` `EnvironmentFile=` key takes only an
+absolute-or-relative path (`man 5 podman-systemd.unit`), not systemd's leading-`-`
+optional-file syntax. Verified against podman 5.8.4's quadlet generator: a value of
+`-/etc/insights/sizingd.env` was resolved as a *relative* path next to the unit file
+itself, producing a broken `--env-file` argument rather than an optional absolute one.
+Create the empty file.
 
 The operator htpasswd. Per Decision 5 the **password is the `ADMIN_API_KEY` value** and
 the **username is the audit actor**, so one line per operator, all sharing the password:
@@ -773,7 +805,11 @@ podman pod ps                                        # one pod "insights", 6 con
 podman pod inspect insights --format '{{range .Containers}}{{.Name}} {{end}}'
 # authd insightsd threatd sizingd traefik (+ the -infra one). A missing name
 # means that unit did not join the pod -- check it for a stray Network= line.
-podman ps --format '{{.Names}}\t{{.Status}}'         # five, all healthy
+podman ps --format '{{.Names}}\t{{.Status}}'
+# authd, insightsd, threatd and sizingd healthy; traefik merely Up -- its
+# quadlet carries no HealthCmd (Traefik's own healthcheck needs the ping
+# provider enabled, which this deployment does not turn on), so "Up" is its
+# correct steady state, not a sign something is missing.
 ```
 
 Then confirm the host's port surface, which is the security property of §1:
@@ -793,12 +829,17 @@ before continuing.
 Nothing to prepare. `insights.gs.nethserver.net` already resolves to this machine's
 public address, port 80 is reachable from the internet (refused, not filtered — no cloud
 firewall), and Traefik's HTTP-01 challenge is served from the `web` entrypoint. The
-certificate is issued on the first request to `https://${INSIGHTS_HOST}/`.
+certificate is issued on the first request to a **routed** path, such as
+`https://${INSIGHTS_HOST}/blocklist/v1/feed` -- not to `/`, which no router in
+`dynamic.yaml.tmpl` matches (every rule requires a `PathPrefix()` alongside `Host()`), so
+a request to `/` triggers no router, no issuance, and gets served Traefik's own default
+self-signed certificate instead.
 
 **Check:**
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/     # not a TLS error
+curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/v1/feed
+# 401, not a TLS error -- this is the routed path from smoke test 1 in §6
 openssl s_client -connect ${INSIGHTS_HOST}:443 -servername ${INSIGHTS_HOST} </dev/null 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates
 # subject CN = insights.gs.nethserver.net, issuer = Let's Encrypt

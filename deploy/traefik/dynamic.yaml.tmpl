@@ -40,33 +40,45 @@ http:
     # Priority is explicit on all six: /blocklist/v1/ and /blocklist/ share a
     # prefix, and getting the order backwards would put operator BasicAuth on
     # the ingest path, or the fleet's system credentials on the operator UI.
+    #
+    # entryPoints is pinned to websecure on all six for the same reason:
+    # without it a router also attaches to web (plain :80), and its safety
+    # over cleartext then rests on the web entrypoint's redirect router
+    # happening to carry a higher default priority than this file's explicit
+    # 200/100 -- an undefined ordering. Pinning removes the dependence.
     logs-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs/v1/`)"
+      entryPoints: [websecure]
       priority: 200
       middlewares: [system-auth, strip-logs]
       service: logs-api
     logs-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/logs`)"
+      entryPoints: [websecure]
       priority: 100
       middlewares: [operator-auth, strip-logs]
       service: logs-ui
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
+      entryPoints: [websecure]
       priority: 200
       middlewares: [system-auth, strip-blocklist]
       service: blocklist-api
     blocklist-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
+      entryPoints: [websecure]
       priority: 100
       middlewares: [operator-auth, strip-blocklist]
       service: blocklist-ui
     sizing-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing/v1/`)"
+      entryPoints: [websecure]
       priority: 200
       middlewares: [system-auth, strip-sizing]
       service: sizing-api
     sizing-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/sizing`)"
+      entryPoints: [websecure]
       priority: 100
       middlewares: [operator-auth, strip-sizing]
       service: sizing-ui
