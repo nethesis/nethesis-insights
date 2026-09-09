@@ -33,8 +33,56 @@ type Store interface {
 	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (distinctSystems int, err error)
 }
 
+// Work is one accepted, sanitized threat-events batch queued for storage.
+// handleEvents builds it after threat.Sanitize has already run, so the
+// queue only ever holds clean events -- never a raw report.
+type Work struct {
+	SystemID string
+	Events   []model.ThreatEvent
+	Counters model.ThreatCounters
+	Day      string
+}
+
+// Publisher accepts an accepted batch for asynchronous storage. Ingest
+// answers as soon as Publish returns: the client learns only whether the
+// batch was taken, never whether it landed, because stored/duplicates are
+// post-write facts that cannot survive an asynchronous ingest.
+// *ingestq.Queue[Work] satisfies it.
+type Publisher interface {
+	Publish(w Work) error
+}
+
+// NewConsumer returns the queue's handler: the InsertThreatEvents and
+// RecordIngestCounters calls handleEvents used to make directly, before this
+// task put a queue between them. It is a free function rather than a method
+// on server because the queue's handler must be supplied when the queue is
+// constructed, and the queue itself is what NewServer takes as a
+// parameter -- so cmd/threatd builds the consumer from the same Store before
+// either the server or the queue exists.
+//
+// A crash between Publish returning 202 and this running loses the batch
+// with no compensation needed: the (system_id, attacker_ip, scenario,
+// observed_at) unique index makes redelivery a no-op, and reporters re-send
+// on their next cycle.
+func NewConsumer(st Store) func(context.Context, Work) error {
+	return func(ctx context.Context, w Work) error {
+		_, duplicates, err := st.InsertThreatEvents(ctx, w.SystemID, w.Events)
+		if err != nil {
+			return err
+		}
+
+		// Accounting failures must never lose the work item: the evidence is
+		// already stored, and the counters are an operator convenience.
+		if err := st.RecordIngestCounters(ctx, w.Day, w.SystemID, w.Counters, duplicates); err != nil {
+			slog.Error("record ingest counters failed", "system_id", w.SystemID, "error", err)
+		}
+		return nil
+	}
+}
+
 type server struct {
 	store   Store
+	queue   Publisher
 	snap    *blocklist.Snapshot
 	trusted httpx.TrustedProxies
 	cfg     Config
@@ -50,11 +98,14 @@ type Config struct {
 
 func defaultNow() int64 { return time.Now().UnixMilli() }
 
-func NewServer(st Store, snap *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config) http.Handler {
+// NewServer builds threatd's client API. q is not optional: every deployment
+// bounds ingest against the single-writer database, so cmd/threatd always
+// builds one and there is no synchronous fallback path to leave untested.
+func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = defaultNow
 	}
-	srv := &server{store: st, snap: snap, trusted: trusted, cfg: cfg}
+	srv := &server{store: st, queue: q, snap: snap, trusted: trusted, cfg: cfg}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)

@@ -34,7 +34,9 @@ func newAllowlistTestStore(t *testing.T) *threatstore.Store {
 }
 
 func allowlistServer(st Store) http.Handler {
-	return NewServer(st, nil, trustedProxy, Config{
+	// No queue and no blocklist snapshot: these tests exercise only
+	// /v1/allowlist-requests, which touches neither.
+	return NewServer(st, nil, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
 	})

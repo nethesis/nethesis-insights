@@ -241,6 +241,9 @@ The forward-auth cache Traefik calls before any pipeline sees a request. See
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
 | `THREAT_EVENT_RETENTION` | how long raw threat events are kept (default `168h`) |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request decision cap; over-cap batches are truncated, not rejected (default `500`) |
+| `THREAT_QUEUE_SIZE` | sanitized reports buffered before ingest answers 503 (default `256`) — bounds concurrency against the single-writer database, not an LLM call |
+| `THREAT_QUEUE_WORKERS` | concurrent store writes (default `2`) |
+| `THREAT_QUEUE_TIMEOUT` | ceiling for one report's store write (default `30s`) |
 
 ### `sizingd`
 

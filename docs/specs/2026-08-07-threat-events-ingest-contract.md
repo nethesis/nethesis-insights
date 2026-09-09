@@ -79,8 +79,6 @@ hand-written collection needs no coordination with the server at all.
 ```json
 {
   "accepted": true,
-  "stored": 3,
-  "duplicates": 1,
   "dropped": {
     "accepted": 4,
     "dropped_type": 0,
@@ -94,12 +92,17 @@ hand-written collection needs no coordination with the server at all.
 }
 ```
 
-- `stored` — new rows written.
-- `duplicates` — decisions that matched an existing row and were ignored.
 - `dropped` — the full per-rule accounting for the batch, including `accepted`,
-  the number of decisions that passed every filter. `stored` is normally lower
-  than `accepted`, because decisions describing the same `(ip, scenario,
-  second)` are folded into one row with a summed hit count.
+  the number of decisions that passed every filter.
+
+**Ingest is asynchronous.** Sanitizing runs synchronously, so `dropped` is
+always accurate in the `202` body; the write itself is queued and happens
+after the response is sent, to bound how many decoded batches can be waiting
+on the single-writer database at once. `stored` and `duplicates` are
+post-write facts and therefore cannot appear here any more — a batch that
+sanitizes to zero events is never even queued, since there is nothing left to
+write and the `dropped` counters already say why. Read them from the operator
+UI's per-system ingest accounting instead.
 
 | status | meaning |
 |---|---|
@@ -108,7 +111,11 @@ hand-written collection needs no coordination with the server at all.
 | `401` | invalid credential |
 | `403` | `system_id` does not match the authenticated system |
 | `405` | method other than `POST` |
-| `503` | validator unreachable, or the store failed |
+| `503` | validator unreachable, or the ingest queue is at capacity |
+
+**A `503` here means retry**, exactly as for `/logs/v1/bundles`: the batch was
+never queued, so nothing was lost, and the reporter should re-send it (or wait
+for its next cycle) rather than treating it as a permanent failure.
 
 **Ingest is fail-closed on authentication and fail-open on content.** A
 malformed decision is dropped and counted; the rest of the batch is stored. A
@@ -116,7 +123,10 @@ reporter under active attack must not lose its whole batch to one bad row.
 
 **Advance the watermark only on `2xx`.** A server outage should produce delayed
 events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, scenario,
-observed_at)` is unique, so a repeated batch cannot inflate anything.
+observed_at)` is unique, so a repeated batch cannot inflate anything — which is
+also why a batch dropped from the queue on a crash needs no compensation: the
+reporter re-sends it on its next cycle and the unique index makes that a
+no-op.
 
 ### Drop rules
 

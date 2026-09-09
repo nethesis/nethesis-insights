@@ -41,11 +41,19 @@ A related, separate feature also lives here and is **implemented**:
 `internal/threat/sanitize.go`'s drop rules). Server-side fleet-wide CrowdSec ban sharing:
 `POST /blocklist/v1/events` in, `GET /blocklist/v1/feed` out. It is **not** part of the
 ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
-gate, no fingerprint, no queue. Treat it as a distinct pipeline — its own binary,
+gate, no fingerprint. Treat it as a distinct pipeline — its own binary,
 `threatd`, with its own SQLite file — sharing only Traefik, the `authd` forward-auth
 cache and the SQLite runtime settings (`internal/platform/sqlitex`); do not use it as
 context for changes to bundles, gating or findings, and do not conflate the two when
 editing either.
+
+`threatd` does have an ingest queue (`internal/platform/ingestq`, distinct from the
+log pipeline's `internal/queue`), but not for the log pipeline's reason: there is no
+LLM call here to keep off the request goroutine. `POST /v1/events` sanitizes
+synchronously and then queues the write, bounding how many decoded, sanitized
+reports can be waiting on the single-writer database at once — the queue exists to
+bound concurrency against that single writer, not to hide latency. See "Ingest is
+bounded, not serialized" below.
 
 Threat Shield rules that are as load-bearing as the gate's:
 
@@ -76,6 +84,28 @@ Threat Shield rules that are as load-bearing as the gate's:
   the allowlist is now the only promotion exclusion.)
 - **Roll up before pruning.** `RollupThreatDailyStats` must precede
   `PruneThreatEvents`, or the dropped day loses its history permanently.
+- **Ingest is bounded, not serialized.** The database already has exactly one
+  writer — `SetMaxOpenConns(1)` plus the store's write mutex, and
+  `InsertThreatEvents` already wraps a whole report in one transaction with
+  `ON CONFLICT … DO NOTHING` — so `internal/platform/ingestq` in front of
+  `POST /v1/events` does not introduce single-writer semantics; those hold
+  regardless. What it adds is a bound: without it, a burst of reporters
+  produces one blocked goroutine per in-flight request, each holding a
+  decoded, sanitized report, all queued on the mutex with no limit and no way
+  to shed load. `threat.Sanitize` still runs synchronously in the handler —
+  so the `202`'s `dropped` counters stay accurate and the queue only ever
+  holds clean events — and only the `InsertThreatEvents`/`RecordIngestCounters`
+  write (`api/threat.NewConsumer`) moves behind `Publish`. Past capacity,
+  `Publish` returns `ErrFull` and the handler answers `503` for the reporter to
+  retry, instead of the process growing until it dies. `stored` and
+  `duplicates` are consequently gone from the `202` body — they are
+  post-write facts and cannot survive an asynchronous ingest — leaving
+  `accepted` and `dropped`. A batch dropped from the queue on a crash needs no
+  compensation: `(system_id, attacker_ip, scenario, observed_at)` is unique,
+  so the reporter's next-cycle redelivery is a no-op. This is a different
+  queue type from the log pipeline's `internal/queue` — no window claim, no
+  idempotency logic, because threat events don't need it and rewriting
+  working code for symmetry buys nothing.
 - **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.

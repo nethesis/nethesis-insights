@@ -290,6 +290,12 @@ paths:
         Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
         after decompression, and at most `THREAT_MAX_DECISIONS_PER_REQUEST`
         decisions (default 500) per request.
+
+        Sanitizing (and therefore the `dropped` counters) happens
+        synchronously, but the write is queued and answered before it lands:
+        `stored` and `duplicates` are post-write facts and cannot survive
+        that. A `503` here means the ingest queue is at capacity -- retry,
+        exactly as for a bundle rejected by `/logs/v1/bundles`.
       security:
         - basicAuth: []
       requestBody:
@@ -322,8 +328,6 @@ paths:
                 $ref: "#/components/schemas/ThreatIngestResponse"
               example:
                 accepted: true
-                stored: 3
-                duplicates: 1
                 dropped:
                   accepted: 4
                   dropped_type: 0
@@ -362,7 +366,10 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "method not allowed" }
         "503":
-          description: Forward-auth validator unreachable, or the store failed to write.
+          description: >-
+            Forward-auth validator unreachable, or the ingest queue is at
+            capacity. Retryable, exactly like a `503` from
+            `/logs/v1/bundles`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -940,11 +947,14 @@ components:
 
     ThreatIngestResponse:
       type: object
-      required: [accepted, stored, duplicates, dropped]
+      description: >-
+        Ingest is asynchronous: the batch is sanitized and queued for
+        storage before this is returned, so stored/duplicates (post-write
+        facts) cannot be part of it -- only accepted and dropped, both known
+        before the batch is queued.
+      required: [accepted, dropped]
       properties:
         accepted: { type: boolean }
-        stored: { type: integer, description: New rows written. Normally lower than dropped.accepted, since same-second same-scenario decisions for one IP fold into one row with a summed hit count. }
-        duplicates: { type: integer, description: Decisions that matched an existing row via the redelivery-safe unique key and were ignored. }
         dropped: { $ref: "#/components/schemas/ThreatCounters" }
 
     SizingReport:

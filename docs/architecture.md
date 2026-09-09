@@ -61,8 +61,11 @@ in the path; see "Authentication" below for why that is load-bearing.
 **Three independent pipelines, one proxy, one auth cache, three databases.**
 The bundle path spends money per call, so everything in it exists to avoid
 spending it. Threat Shield and fleet sizing are both high-volume factual data
-with no LLM anywhere in them: ingest is synchronous, there is no gate and no
-fingerprint. Each pipeline is its own binary with its own SQLite file; the
+with no LLM anywhere in them: there is no gate and no fingerprint. Fleet
+sizing's ingest is synchronous end to end; Threat Shield's sanitizes
+synchronously but queues the write behind `internal/platform/ingestq`, a bound
+against its single-writer database rather than anything to do with an LLM
+call. Each pipeline is its own binary with its own SQLite file; the
 only things shared across all three are Traefik, `authd` and
 `internal/platform/{auth,httpx,sqlitex}`. They are described separately
 throughout this document for that reason.
@@ -76,6 +79,10 @@ cmd/authd  cmd/insightsd  cmd/threatd  cmd/sizingd    four binaries; authd owns
 internal/platform/auth  httpx  sqlitex   shared: ForwardAuth+cache, HTTP
                                           plumbing (ClientIP, SystemID,
                                           Logging, Healthz), SQLite Open
+internal/platform/ingestq                generic bounded queue; threatd's
+                                          ingest bound. Not shared with
+                                          internal/queue (below) -- that one
+                                          carries logs-only window-claim logic
 
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
@@ -105,6 +112,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. Used only by `cmd/authd` now; moved from `internal/auth`. |
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
+| `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
@@ -112,7 +120,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. |
-| `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. |
+| `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
 | `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the rollups that outlive the raw events. |
@@ -120,11 +128,11 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/store/sizing` | sizingd's only store package: ingest, the cohort pass's inputs and outputs, and the rollups that outlive the daily rows. |
 | `internal/api/logs` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz` (registered unprefixed; Traefik adds `/logs`). |
-| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz` (Traefik adds `/blocklist`). |
+| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz` (Traefik adds `/blocklist`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handler for `POST /v1/reports`, `/healthz` (Traefik adds `/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings, systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines. Read-only — no write routes. |
-| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. |
+| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /healthz`. Owns no store and no UI. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs` and the bundle pipeline together, runs graceful shutdown. |
@@ -254,8 +262,20 @@ system's findings (optionally filtered by `since`/`status`), sorted by
 
 ### Threat ingest: `POST /v1/events` (public path `/blocklist/v1/events`)
 
-Synchronous end to end — no queue, because there is no LLM call to outlive the
-client's timeout.
+Sanitizing is synchronous; the write is queued. The database already has
+exactly one writer — `SetMaxOpenConns(1)` plus the store's write mutex, and
+`InsertThreatEvents` already wraps a whole report in one transaction with
+`ON CONFLICT … DO NOTHING` — so `internal/platform/ingestq` in front of this
+handler does not introduce single-writer semantics; those hold regardless.
+What it adds is a bound: without it, a burst of reporters produces one
+blocked goroutine per in-flight request, each holding a decoded, sanitized
+report, all queued on the mutex with no limit and no way to shed load. A
+bounded channel with a fixed consumer pool turns that into a queue depth an
+operator can see (threatd's `/status` page) and a fast `503` the reporter
+retries — the same trade `internal/queue` makes for bundles, for a different
+reason: there is still no LLM call to outlive the client's timeout here, the
+queue exists to bound concurrency against the single writer, not to hide
+latency.
 
 1. `threat.handleEvents` reads the system identity via `httpx.SystemID`, the
    same trusted-proxy rule as the bundle path.
@@ -264,15 +284,41 @@ client's timeout.
    credential when present" rule as bundles.
 3. `threat.Sanitize` turns raw CrowdSec decisions into `model.ThreatEvent`s,
    dropping and counting anything that fails a rule. The reporter's own source
-   address is passed in and excluded.
-4. `InsertThreatEvents` stores the batch and the per-day ingest counters are
-   recorded.
-5. `202` with `stored`, `duplicates` and the full drop accounting.
+   address is passed in and excluded. This step stays on the request
+   goroutine, synchronous, so the `202`'s `dropped` counters are always
+   accurate and the queue only ever holds clean events, never a raw report.
+4. If sanitizing produced at least one event, `api/threat.Work{SystemID,
+   Events, Counters, Day}` is published to the ingest queue
+   (`ingestq.Queue[Work]`); a batch that sanitizes to zero events has nothing
+   to write, so it is never queued at all. Past capacity, `Publish` returns
+   `ingestq.ErrFull` and the handler answers `503` — the batch was never
+   queued, so nothing was lost, and the reporter retries.
+5. `202` with `accepted` and the full drop accounting (`dropped`). `stored`
+   and `duplicates` are **not** in this response: they are post-write facts,
+   and the write has not happened yet when this is sent.
+6. Asynchronously, one of the queue's workers calls `api/threat.NewConsumer`'s
+   handler: `InsertThreatEvents` stores the batch, then
+   `RecordIngestCounters` records the per-day counters (including the
+   `duplicates` count `InsertThreatEvents` returned). A crash between step 5
+   and step 6 loses the batch with no compensation needed — the
+   `(system_id, attacker_ip, scenario, observed_at)` unique index makes the
+   reporter's next-cycle redelivery a no-op.
 
-**Fail-closed on authentication, fail-open on content.** Only a store failure
-turns into a `503`; accounting failures are logged and the `202` still goes
-out, because the evidence is already committed and losing the reporter's
-watermark would cost more than the counters are worth.
+**Fail-closed on authentication, fail-open on content.** An insert failure in
+step 6 is logged and the item is dropped by the queue (`ingestq` recovers a
+failing or panicking handler so one bad batch cannot take a worker, and every
+batch queued behind it, down); a `RecordIngestCounters` failure is logged and
+never fails the work item, because the evidence is already stored and the
+counters are an operator convenience. Neither can reach the client any more —
+the `202` was already sent in step 5.
+
+`internal/platform/ingestq` is deliberately not `internal/queue`: the log
+pipeline's queue carries a `(system_id, window_start)` in-flight claim that
+makes bundle redelivery idempotent while an LLM call is still running, which
+threat events neither have (no LLM call) nor need (the unique index already
+makes redelivery a no-op). `ingestq` is the generic half — bounded channel,
+`ErrFull`, a fixed worker pool, `Depth`/`Cap` for the status page — with no
+window claim at all.
 
 **The reporter's source address is `httpx.ClientIP`, not bare `r.RemoteAddr`** —
 this reverses the prototype's rule. Behind Traefik, `RemoteAddr` is always the

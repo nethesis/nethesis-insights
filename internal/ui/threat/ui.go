@@ -83,6 +83,18 @@ type Feed interface {
 	ETag() string
 }
 
+// Runtime reports the live state of threatd's ingest queue.
+// *ingestq.Queue[threatapi.Work] satisfies it -- the same Depth/Cap/Workers
+// shape insightsd's bundle queue reports through logsui.Runtime, though the
+// two queue types are unrelated. rt may be nil -- tests, and a misconfigured
+// deployment -- in which case the status page's queue section renders "n/a"
+// rather than panicking.
+type Runtime interface {
+	Depth() int
+	Cap() int
+	Workers() int
+}
+
 // Bounds on unbounded-by-default queries. This is a fleet-wide,
 // unauthenticated surface and no list here is allowed to be unbounded.
 const (
@@ -134,15 +146,17 @@ type server struct {
 	reader Reader
 	feed   Feed
 	writer Writer
+	rt     Runtime
 	config []chrome.ConfigItem
 }
 
-// NewServer builds threatd's operator UI handler. feed and w may be nil: a
-// nil feed renders "n/a" on the status and blocklist pages, and a nil writer
-// (equivalently, cfg.AdminKey == "") leaves every write route unreachable --
-// an operator who has not set ADMIN_API_KEY gets the plain read-only
-// dashboard, with no write form reachable at all.
-func NewServer(r Reader, feed Feed, w Writer, cfg chrome.Config) (http.Handler, error) {
+// NewServer builds threatd's operator UI handler. feed, w and rt may all be
+// nil: a nil feed renders "n/a" on the status and blocklist pages, a nil
+// writer (equivalently, cfg.AdminKey == "") leaves every write route
+// unreachable -- an operator who has not set ADMIN_API_KEY gets the plain
+// read-only dashboard, with no write form reachable at all -- and a nil rt
+// renders the status page's queue section as "n/a".
+func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -166,6 +180,7 @@ func NewServer(r Reader, feed Feed, w Writer, cfg chrome.Config) (http.Handler, 
 		reader: r,
 		feed:   feed,
 		writer: w,
+		rt:     rt,
 		config: cfg.Info.Config,
 	}
 
@@ -256,11 +271,18 @@ func (s *server) feedState() feedState {
 	}
 }
 
+// statusPageData carries queue depth, cap and worker count as its own
+// fields, the same shape insightsd's status page uses (see logsui's own
+// statusPageData): chrome.Info has no Workers field.
 type statusPageData struct {
 	chrome.PageData
-	Counts threatstore.Counts
-	Feed   feedState
-	Config []chrome.ConfigItem
+	Counts     threatstore.Counts
+	Feed       feedState
+	HasQueue   bool
+	QueueDepth int
+	QueueCap   int
+	Workers    int
+	Config     []chrome.ConfigItem
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -269,12 +291,19 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "status", err)
 		return
 	}
-	s.chrome.Render(w, "status.html", statusPageData{
+	data := statusPageData{
 		PageData: s.chrome.PageData(r, "status"),
 		Counts:   counts,
 		Feed:     s.feedState(),
+		HasQueue: s.rt != nil,
 		Config:   s.config,
-	})
+	}
+	if s.rt != nil {
+		data.QueueDepth = s.rt.Depth()
+		data.QueueCap = s.rt.Cap()
+		data.Workers = s.rt.Workers()
+	}
+	s.chrome.Render(w, "status.html", data)
 }
 
 type indexPageData struct {

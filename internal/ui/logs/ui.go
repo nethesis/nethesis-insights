@@ -22,9 +22,11 @@
 //     caller, and this package never reads the environment.
 //   - insightsd has no write routes: the log pipeline has nothing to
 //     approve or reject, unlike Threat Shield's allowlist (internal/ui/threat).
-//   - insightsd is the only one of the three binaries with a queue, so it is
-//     the only dashboard whose status page has a Queue section at all -- see
-//     Runtime and statusPageData.
+//   - insightsd's queue is the analysis pipeline's bundle queue (see
+//     internal/queue), not the generic internal/platform/ingestq threatd
+//     uses for its ingest bound -- the two are unrelated types that happen
+//     to satisfy the same Depth/Cap/Workers shape. See Runtime and
+//     statusPageData.
 package logs
 
 import (
@@ -209,8 +211,7 @@ func sanitizeStatus(v string) string {
 // --- handlers ---
 
 // statusPageData carries queue depth, cap and worker count as its own
-// fields: chrome.Info deliberately has no Workers field (insightsd is the
-// only one of the three binaries with a queue), so this dashboard's own page
+// fields: chrome.Info has no Workers field, so this dashboard's own page
 // data is where that number lives.
 type statusPageData struct {
 	chrome.PageData

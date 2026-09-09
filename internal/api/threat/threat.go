@@ -34,7 +34,17 @@ const blocklistCacheSeconds = 900
 // Fail-closed on authentication, fail-open on content: a malformed decision
 // is dropped with a counter and the rest of the batch is stored, because a
 // probe under active attack is exactly the reporter whose batch must not be
-// thrown away whole. Synchronous -- there is no LLM here, so no queue.
+// thrown away whole.
+//
+// Sanitizing happens here, synchronously, before the batch is queued: the
+// 202 can then report accurate drop counters, and the queue holds only
+// clean events, never a raw report. The write itself is asynchronous --
+// not because the writes need to be serialized (SetMaxOpenConns(1) plus the
+// store's write mutex already do that), but to bound how many decoded
+// batches can be waiting on that single writer at once. Past that bound
+// Publish answers ErrFull immediately and the reporter gets a 503 to retry,
+// rather than the server growing one blocked goroutine per burst request
+// until it runs out of memory.
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -87,43 +97,43 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		MaxDecisions: s.cfg.MaxDecisions,
 	}, now)
 
-	inserted, duplicates, err := s.store.InsertThreatEvents(r.Context(), authenticatedSystemID, res.Events)
-	if err != nil {
-		slog.Error("insert threat events failed", "system_id", authenticatedSystemID, "error", err)
-		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
-		return
-	}
-
-	// Accounting failures must never cost the reporter its 202: the evidence
-	// is already stored, and the counters are an operator convenience.
-	day := threatstore.DayString(now)
-	if err := s.store.RecordIngestCounters(r.Context(), day, authenticatedSystemID, res.Counters, duplicates); err != nil {
-		slog.Error("record ingest counters failed", "system_id", authenticatedSystemID, "error", err)
+	// A batch every decision of which was dropped has nothing to write, so
+	// there is nothing to queue either -- the drop counters below are
+	// already the whole story, and the reporter already has them.
+	if len(res.Events) > 0 {
+		work := Work{
+			SystemID: authenticatedSystemID,
+			Events:   res.Events,
+			Counters: res.Counters,
+			Day:      threatstore.DayString(now),
+		}
+		if err := s.queue.Publish(work); err != nil {
+			reject(w, r, http.StatusServiceUnavailable, "temporarily unavailable",
+				"system_id", authenticatedSystemID, "error", err.Error())
+			return
+		}
 	}
 
 	slog.Debug("threat report accepted",
 		"system_id", authenticatedSystemID,
 		"decisions", len(report.Decisions),
-		"stored", inserted,
-		"duplicates", duplicates,
 		"counters", res.Counters,
 	)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(threatIngestResponse{
-		Accepted:   true,
-		Stored:     inserted,
-		Duplicates: duplicates,
-		Dropped:    res.Counters,
+		Accepted: true,
+		Dropped:  res.Counters,
 	})
 }
 
+// threatIngestResponse is the 202 body. stored and duplicates are post-write
+// facts and cannot survive an asynchronous ingest -- only accepted and
+// dropped, both known before the batch is queued, leave the handler.
 type threatIngestResponse struct {
-	Accepted   bool                 `json:"accepted"`
-	Stored     int                  `json:"stored"`
-	Duplicates int                  `json:"duplicates"`
-	Dropped    model.ThreatCounters `json:"dropped"`
+	Accepted bool                 `json:"accepted"`
+	Dropped  model.ThreatCounters `json:"dropped"`
 }
 
 // handleFeed serves the consensus feed as plain text.

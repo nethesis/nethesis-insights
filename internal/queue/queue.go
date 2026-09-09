@@ -187,5 +187,5 @@ func (q *Queue) Depth() int { return len(q.ch) }
 func (q *Queue) Cap() int { return cap(q.ch) }
 
 // Workers reports how many worker goroutines Start launched. Exposed for the
-// operator UI's queue status -- insightsd is the only binary with a queue.
+// operator UI's queue status.
 func (q *Queue) Workers() int { return q.workers }

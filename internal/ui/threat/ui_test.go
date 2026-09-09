@@ -120,6 +120,15 @@ func (f fakeFeed) Entries() int       { return f.entries }
 func (f fakeFeed) GeneratedAt() int64 { return f.generatedAt }
 func (f fakeFeed) ETag() string       { return f.etag }
 
+// fakeRuntime is a fixed ingest-queue state, mirroring logsui's fakeRuntime.
+type fakeRuntime struct {
+	depth, cap, workers int
+}
+
+func (f fakeRuntime) Depth() int   { return f.depth }
+func (f fakeRuntime) Cap() int     { return f.cap }
+func (f fakeRuntime) Workers() int { return f.workers }
+
 func threatReader() *fakeReader {
 	expires := int64(1700009000000)
 	r := &fakeReader{
@@ -188,7 +197,18 @@ func testInfo() chrome.Info {
 // meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, nil, chrome.Config{Info: testInfo()})
+	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return h
+}
+
+// newTestServerWithRuntime builds a server exposing the ingest queue's
+// live state on the status page.
+func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
+	t.Helper()
+	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -199,7 +219,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 // w, authenticated with adminKey.
 func newWriteTestServer(t *testing.T, r Reader, feed Feed, w Writer, adminKey string) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, w, chrome.Config{AdminKey: adminKey, Info: testInfo()})
+	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -291,6 +311,30 @@ func TestBlocklistPageRendersEntriesAndAllowlist(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/ is missing %q", want)
 		}
+	}
+}
+
+// The status page's queue section has two renderings: no queue attached
+// (rt == nil, the tests above all exercise this implicitly), and a queue
+// reporting live depth/cap/workers -- both must render without panicking,
+// and the live one must show the actual numbers.
+func TestStatusPageShowsQueueState(t *testing.T) {
+	cases := []struct {
+		name string
+		rt   Runtime
+		want string
+	}{
+		{"no queue", nil, "no queue attached to this process"},
+		{"live queue", fakeRuntime{depth: 3, cap: 256, workers: 2}, "<td class=\"num\">3</td>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestServerWithRuntime(t, threatReader(), tc.rt)
+			body := get(t, h, "/status").Body.String()
+			if !strings.Contains(body, tc.want) {
+				t.Fatalf("/status %s: missing %q, got:\n%s", tc.name, tc.want, body)
+			}
+		})
 	}
 }
 

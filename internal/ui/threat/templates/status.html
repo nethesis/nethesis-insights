@@ -21,6 +21,25 @@ SPDX-License-Identifier: GPL-3.0-or-later
 </article>
 
 <article>
+<h2>Ingest queue</h2>
+{{if .HasQueue}}
+<figure>
+<table class="striped">
+<thead><tr><th scope="col" class="num">Depth</th><th scope="col" class="num">Capacity</th><th scope="col" class="num">Workers</th></tr></thead>
+<tbody>
+<tr><td class="num">{{.QueueDepth}}</td><td class="num">{{.QueueCap}}</td><td class="num">{{.Workers}}</td></tr>
+</tbody>
+</table>
+</figure>
+<p><small>This bounds how many decoded, sanitized reports can be waiting on the
+single-writer database at once; it does not make the writes serial, they
+already are.</small></p>
+{{else}}
+<p>n/a &mdash; no queue attached to this process.</p>
+{{end}}
+</article>
+
+<article>
 <h2>Blocklist feed</h2>
 {{if not .Feed.Present}}
 <p>n/a &mdash; the blocklist feed is not wired into this process.</p>

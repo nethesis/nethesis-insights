@@ -19,6 +19,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
@@ -78,8 +79,26 @@ func (f *fakeThreatStore) UpsertAllowlistRequest(context.Context, string, string
 	return 0, nil
 }
 
-func threatServer(st Store, snap *blocklist.Snapshot) http.Handler {
-	return NewServer(st, snap, trustedProxy, Config{
+// fakeQueue stands in for the ingest queue at the HTTP layer: handleEvents
+// must never touch the store directly any more, only Publish a Work item, so
+// these tests assert against what was published rather than what was
+// stored. The consumer that turns a published Work into store calls --
+// NewConsumer -- is tested on its own below, against fakeThreatStore.
+type fakeQueue struct {
+	published []Work
+	err       error
+}
+
+func (q *fakeQueue) Publish(w Work) error {
+	if q.err != nil {
+		return q.err
+	}
+	q.published = append(q.published, w)
+	return nil
+}
+
+func threatServer(st Store, q Publisher, snap *blocklist.Snapshot) http.Handler {
+	return NewServer(st, q, snap, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
 	})
@@ -117,11 +136,15 @@ func reportBody(t *testing.T, systemID string, ds ...model.Decision) string {
 	return string(b)
 }
 
-func TestThreatIngestStoresSanitizedEvents(t *testing.T) {
+// The handler answers 202 as soon as the batch is queued, before anything
+// reaches the store: sanitizing (and therefore the drop counters) happens
+// synchronously, but the write is the queue's job.
+func TestThreatIngestQueuesSanitizedEventsAndAnswersBeforeAnyWrite(t *testing.T) {
 	st := &fakeThreatStore{}
+	q := &fakeQueue{}
 	body := reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec"))
 
-	rec := postThreat(t, threatServer(st, nil), body, true)
+	rec := postThreat(t, threatServer(st, q, nil), body, true)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202 (body %s)", rec.Code, rec.Body.String())
@@ -130,58 +153,107 @@ func TestThreatIngestStoresSanitizedEvents(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !got.Accepted || got.Stored != 1 || got.Dropped.Accepted != 1 {
+	if !got.Accepted || got.Dropped.Accepted != 1 {
 		t.Fatalf("response: %+v", got)
 	}
-	if len(st.events) != 1 || st.events[0].AttackerIP != "203.0.113.7" {
-		t.Fatalf("stored events: %+v", st.events)
+	// Nothing reached the store: handleEvents publishes and returns, it
+	// never calls InsertThreatEvents itself any more.
+	if len(st.events) != 0 {
+		t.Fatalf("the store was written synchronously: %+v", st.events)
 	}
-	if st.systemID != testSystemID {
-		t.Fatalf("system id: got %q, want the authenticated one", st.systemID)
+	if len(q.published) != 1 || q.published[0].Events[0].AttackerIP != "203.0.113.7" {
+		t.Fatalf("published work: %+v", q.published)
 	}
-	if st.day != "2026-08-28" {
-		t.Fatalf("counter day: got %q", st.day)
+	if q.published[0].SystemID != testSystemID {
+		t.Fatalf("system id: got %q, want the authenticated one", q.published[0].SystemID)
+	}
+	if q.published[0].Day != "2026-08-28" {
+		t.Fatalf("work day: got %q", q.published[0].Day)
+	}
+}
+
+// A queue at capacity must answer 503 and store nothing, exactly like the
+// bundle queue -- the caller retries.
+func TestThreatIngestAnswers503WhenTheQueueIsFull(t *testing.T) {
+	st := &fakeThreatStore{}
+	q := &fakeQueue{err: ingestq.ErrFull}
+	rec := postThreat(t, threatServer(st, q, nil),
+		reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503 (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(st.events) != 0 {
+		t.Fatalf("a rejected batch reached the store: %+v", st.events)
+	}
+}
+
+// A batch every decision of which is dropped by threat.Sanitize has nothing
+// to write, so it must never reach the queue at all -- the drop counters
+// already tell the whole story, and the reporter already has them in the
+// response body.
+func TestThreatIngestWithEveryDecisionDroppedNeverEnqueues(t *testing.T) {
+	st := &fakeThreatStore{}
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(st, q, nil),
+		reportBody(t, testSystemID, decision("10.0.0.5", "crowdsecurity/ssh-bf", "crowdsec")), true)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got threatIngestResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Dropped.DroppedPrivateIP != 1 {
+		t.Fatalf("dropped counters: %+v", got.Dropped)
+	}
+	if len(q.published) != 0 {
+		t.Fatalf("a fully-dropped batch was enqueued: %+v", q.published)
+	}
+	if len(st.events) != 0 {
+		t.Fatalf("a fully-dropped batch reached the store: %+v", st.events)
 	}
 }
 
 // The reporter is identified by its credential; the body's system_id is
 // optional and only ever cross-checked.
 func TestThreatIngestAcceptsAnOmittedSystemID(t *testing.T) {
-	st := &fakeThreatStore{}
-	rec := postThreat(t, threatServer(st, nil),
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil),
 		reportBody(t, "", decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
-	if st.systemID != testSystemID {
-		t.Fatalf("system id: got %q, want %q", st.systemID, testSystemID)
+	if len(q.published) != 1 || q.published[0].SystemID != testSystemID {
+		t.Fatalf("published work: %+v, want system id %q", q.published, testSystemID)
 	}
 }
 
 func TestThreatIngestRejectsAForeignSystemID(t *testing.T) {
-	st := &fakeThreatStore{}
-	rec := postThreat(t, threatServer(st, nil),
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil),
 		reportBody(t, "someone-else", decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d, want 403", rec.Code)
 	}
-	if len(st.events) != 0 {
-		t.Fatalf("a foreign report was stored: %+v", st.events)
+	if len(q.published) != 0 {
+		t.Fatalf("a foreign report was enqueued: %+v", q.published)
 	}
 }
 
 func TestThreatIngestRequiresAuthentication(t *testing.T) {
-	st := &fakeThreatStore{}
-	rec := postThreat(t, threatServer(st, nil),
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil),
 		reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), false)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
 	}
-	if len(st.events) != 0 {
-		t.Fatal("an unauthenticated report reached the store")
+	if len(q.published) != 0 {
+		t.Fatal("an unauthenticated report was enqueued")
 	}
 }
 
@@ -189,8 +261,8 @@ func TestThreatIngestRequiresAuthentication(t *testing.T) {
 // is the entire boundary: a direct connection must not be able to name a
 // system_id.
 func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
-	st := &fakeThreatStore{}
-	h := NewServer(st, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions})
+	q := &fakeQueue{}
+	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions})
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{"decisions":[]}`))
 	r.RemoteAddr = "203.0.113.7:4444"
@@ -202,8 +274,8 @@ func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
-	if n := len(st.events); n != 0 {
-		t.Fatalf("a direct request stored %d events", n)
+	if n := len(q.published); n != 0 {
+		t.Fatalf("a direct request enqueued %d work items", n)
 	}
 }
 
@@ -219,13 +291,13 @@ func TestThreatIngestRejectsBadRequests(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			st := &fakeThreatStore{}
-			rec := postThreat(t, threatServer(st, nil), tc.body, true)
+			q := &fakeQueue{}
+			rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil), tc.body, true)
 			if rec.Code != tc.want {
 				t.Fatalf("status: got %d, want %d", rec.Code, tc.want)
 			}
-			if len(st.events) != 0 {
-				t.Fatalf("rejected body still stored: %+v", st.events)
+			if len(q.published) != 0 {
+				t.Fatalf("rejected body still enqueued: %+v", q.published)
 			}
 		})
 	}
@@ -236,7 +308,7 @@ func TestThreatIngestRejectsWrongMethod(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
-	threatServer(&fakeThreatStore{}, nil).ServeHTTP(rec, req)
+	threatServer(&fakeThreatStore{}, &fakeQueue{}, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d, want 405", rec.Code)
@@ -245,7 +317,7 @@ func TestThreatIngestRejectsWrongMethod(t *testing.T) {
 
 // Fail-open on content: one bad decision must not cost the batch.
 func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
-	st := &fakeThreatStore{}
+	q := &fakeQueue{}
 	body := reportBody(t, testSystemID,
 		decision("10.0.0.5", "crowdsecurity/ssh-bf", "crowdsec"),
 		decision("203.0.113.7", "crowdsecurity/ssh-bf", "CAPI"),
@@ -253,13 +325,13 @@ func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
 		decision("203.0.113.9", "crowdsecurity/ssh-bf", "crowdsec"),
 	)
 
-	rec := postThreat(t, threatServer(st, nil), body, true)
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil), body, true)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
-	if len(st.events) != 1 || st.events[0].AttackerIP != "203.0.113.9" {
-		t.Fatalf("stored: %+v, want only 203.0.113.9", st.events)
+	if len(q.published) != 1 || len(q.published[0].Events) != 1 || q.published[0].Events[0].AttackerIP != "203.0.113.9" {
+		t.Fatalf("published: %+v, want only 203.0.113.9", q.published)
 	}
 	var got threatIngestResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
@@ -271,19 +343,19 @@ func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
 // A scenario the server has never seen is stored, not dropped: there is no
 // allowlist, so a third-party or hand-written collection still contributes.
 func TestThreatIngestAcceptsAnUnfamiliarScenario(t *testing.T) {
-	st := &fakeThreatStore{}
-	rec := postThreat(t, threatServer(st, nil),
+	q := &fakeQueue{}
+	rec := postThreat(t, threatServer(&fakeThreatStore{}, q, nil),
 		reportBody(t, testSystemID,
 			decision("203.0.113.7", "LePresidente/http-generic-401-bf", "crowdsec")), true)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
-	if len(st.events) != 1 {
-		t.Fatalf("stored: %+v, want the event kept", st.events)
+	if len(q.published) != 1 || len(q.published[0].Events) != 1 {
+		t.Fatalf("published: %+v, want the event kept", q.published)
 	}
-	if st.events[0].Scenario != "LePresidente/http-generic-401-bf" {
-		t.Fatalf("scenario: got %q", st.events[0].Scenario)
+	if q.published[0].Events[0].Scenario != "LePresidente/http-generic-401-bf" {
+		t.Fatalf("scenario: got %q", q.published[0].Events[0].Scenario)
 	}
 }
 
@@ -292,7 +364,7 @@ func TestThreatIngestAcceptsAnUnfamiliarScenario(t *testing.T) {
 // check must key off X-Forwarded-For (via httpx.ClientIP), which is what
 // makes it possible for the check to fire at all.
 func TestThreatIngestDropsTheReportersOwnAddress(t *testing.T) {
-	st := &fakeThreatStore{}
+	q := &fakeQueue{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/events",
 		strings.NewReader(reportBody(t, testSystemID, decision("198.51.100.5", "crowdsecurity/ssh-bf", "crowdsec"))))
 	req.RemoteAddr = "127.0.0.1:12345" // the trusted proxy
@@ -300,13 +372,13 @@ func TestThreatIngestDropsTheReportersOwnAddress(t *testing.T) {
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
 
-	threatServer(st, nil).ServeHTTP(rec, req)
+	threatServer(&fakeThreatStore{}, q, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
-	if len(st.events) != 0 {
-		t.Fatalf("the reporter's own address was stored: %+v", st.events)
+	if len(q.published) != 0 {
+		t.Fatalf("the reporter's own address was enqueued: %+v", q.published)
 	}
 }
 
@@ -315,7 +387,7 @@ func TestThreatIngestDropsTheReportersOwnAddress(t *testing.T) {
 // outright (TestIngestRefusesARequestThatDidNotComeThroughTheProxy), so a
 // direct connection cannot use a header to pose as coming through Traefik.
 func TestThreatIngestFromAnUntrustedConnectionIsRejectedRegardlessOfXForwardedFor(t *testing.T) {
-	st := &fakeThreatStore{}
+	q := &fakeQueue{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/events",
 		strings.NewReader(reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec"))))
 	req.RemoteAddr = "198.51.100.5:44321" // not a trusted proxy
@@ -323,18 +395,18 @@ func TestThreatIngestFromAnUntrustedConnectionIsRejectedRegardlessOfXForwardedFo
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
 
-	threatServer(st, nil).ServeHTTP(rec, req)
+	threatServer(&fakeThreatStore{}, q, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
 	}
-	if len(st.events) != 0 {
-		t.Fatal("an unauthenticated report reached the store")
+	if len(q.published) != 0 {
+		t.Fatal("an unauthenticated report was enqueued")
 	}
 }
 
 func TestThreatIngestAcceptsGzip(t *testing.T) {
-	st := &fakeThreatStore{}
+	q := &fakeQueue{}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	_, _ = zw.Write([]byte(reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec"))))
@@ -345,36 +417,76 @@ func TestThreatIngestAcceptsGzip(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
-	threatServer(st, nil).ServeHTTP(rec, req)
+	threatServer(&fakeThreatStore{}, q, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202 (body %s)", rec.Code, rec.Body.String())
 	}
-	if len(st.events) != 1 {
-		t.Fatalf("stored: %+v", st.events)
+	if len(q.published) != 1 {
+		t.Fatalf("published: %+v", q.published)
 	}
 }
 
-func TestThreatIngestAnswers503WhenTheStoreFails(t *testing.T) {
-	st := &fakeThreatStore{insertErr: errors.New("disk on fire")}
-	rec := postThreat(t, threatServer(st, nil),
-		reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
+// --- the queue's consumer: NewConsumer ---
+//
+// These replace what used to be handler-level assertions (store errors,
+// accounting failures) now that InsertThreatEvents and RecordIngestCounters
+// no longer run on the request goroutine at all -- they run here, in the
+// function the queue calls, once per accepted Work item.
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status: got %d, want 503", rec.Code)
+func TestConsumerStoresEventsAndRecordsCounters(t *testing.T) {
+	st := &fakeThreatStore{}
+	consume := NewConsumer(st)
+
+	err := consume(context.Background(), Work{
+		SystemID: testSystemID,
+		Events:   []model.ThreatEvent{{AttackerIP: "203.0.113.7", Scenario: "crowdsecurity/ssh-bf"}},
+		Counters: model.ThreatCounters{Accepted: 1},
+		Day:      "2026-08-28",
+	})
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if len(st.events) != 1 || st.events[0].AttackerIP != "203.0.113.7" {
+		t.Fatalf("stored events: %+v", st.events)
+	}
+	if st.systemID != testSystemID {
+		t.Fatalf("system id: got %q, want %q", st.systemID, testSystemID)
+	}
+	if st.day != "2026-08-28" {
+		t.Fatalf("counter day: got %q", st.day)
+	}
+}
+
+// A store failure on the insert itself is a real failure: nothing was
+// written, so the consumer must report it (ingestq logs it and drops the
+// item -- redelivery on the reporter's next cycle is the recovery path).
+func TestConsumerReturnsErrorWhenInsertFails(t *testing.T) {
+	st := &fakeThreatStore{insertErr: errors.New("disk on fire")}
+	consume := NewConsumer(st)
+
+	err := consume(context.Background(), Work{
+		SystemID: testSystemID,
+		Events:   []model.ThreatEvent{{AttackerIP: "203.0.113.7", Scenario: "crowdsecurity/ssh-bf"}},
+	})
+	if err == nil {
+		t.Fatal("consume: got nil error, want the insert failure")
 	}
 }
 
 // Accounting is an operator convenience; the evidence is already stored, so
-// its failure must not cost the reporter its 202 (and therefore its
-// watermark).
-func TestThreatIngestSucceedsWhenAccountingFails(t *testing.T) {
+// its failure must not fail the work item -- there is nothing left to retry
+// usefully, and the queue would just log a success as a failure.
+func TestConsumerSucceedsWhenAccountingFails(t *testing.T) {
 	st := &fakeThreatStore{countErr: errors.New("nope")}
-	rec := postThreat(t, threatServer(st, nil),
-		reportBody(t, testSystemID, decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")), true)
+	consume := NewConsumer(st)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status: got %d, want 202", rec.Code)
+	err := consume(context.Background(), Work{
+		SystemID: testSystemID,
+		Events:   []model.ThreatEvent{{AttackerIP: "203.0.113.7", Scenario: "crowdsecurity/ssh-bf"}},
+	})
+	if err != nil {
+		t.Fatalf("consume: got %v, want nil (accounting failures are logged, not propagated)", err)
 	}
 	if len(st.events) != 1 {
 		t.Fatalf("stored: %+v", st.events)
@@ -414,7 +526,7 @@ func getBlocklist(t *testing.T, h http.Handler, withAuth bool, headers map[strin
 
 func TestBlocklistServesThePlainTextFeed(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
-	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, snap), true, nil)
+	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, snap), true, nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", rec.Code)
@@ -435,7 +547,7 @@ func TestBlocklistServesThePlainTextFeed(t *testing.T) {
 
 func TestBlocklistRequiresAuthentication(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
-	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, snap), false, nil)
+	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, snap), false, nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401", rec.Code)
 	}
@@ -444,7 +556,7 @@ func TestBlocklistRequiresAuthentication(t *testing.T) {
 // At a five-minute regeneration cadence, 304 is the normal answer.
 func TestBlocklistAnswers304OnAMatchingETag(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
-	h := threatServer(&fakeThreatStore{}, snap)
+	h := threatServer(&fakeThreatStore{}, nil, snap)
 
 	for _, header := range []string{snap.ETag(), `W/` + snap.ETag(), `"other", ` + snap.ETag(), "*"} {
 		rec := getBlocklist(t, h, true, map[string]string{"If-None-Match": header})
@@ -464,7 +576,7 @@ func TestBlocklistAnswers304OnAMatchingETag(t *testing.T) {
 
 func TestBlocklistServesGzipWhenAccepted(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
-	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, snap), true,
+	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, snap), true,
 		map[string]string{"Accept-Encoding": "gzip, deflate"})
 
 	if rec.Code != http.StatusOK {
@@ -486,7 +598,7 @@ func TestBlocklistServesGzipWhenAccepted(t *testing.T) {
 // An empty body would mean "no threats" to every client that imports it,
 // which silently disables protection.
 func TestBlocklistRefusesBeforeTheFirstGeneration(t *testing.T) {
-	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, blocklist.NewSnapshot()), true, nil)
+	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, blocklist.NewSnapshot()), true, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
 	}
@@ -496,7 +608,7 @@ func TestBlocklistRefusesBeforeTheFirstGeneration(t *testing.T) {
 // ingest-only tests above) must behave exactly like one that has never
 // generated -- not panic.
 func TestBlocklistRefusesWithNoSnapshotWired(t *testing.T) {
-	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil), true, nil)
+	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, nil), true, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
 	}
@@ -508,7 +620,7 @@ func TestBlocklistRejectsWrongMethod(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
-	threatServer(&fakeThreatStore{}, snap).ServeHTTP(rec, req)
+	threatServer(&fakeThreatStore{}, nil, snap).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d, want 405", rec.Code)

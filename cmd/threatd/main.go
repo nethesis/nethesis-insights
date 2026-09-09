@@ -25,6 +25,7 @@ import (
 	threatapi "github.com/nethesis/nethesis-insights/internal/api/threat"
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
@@ -104,11 +105,11 @@ func warnIfNotLoopback(addr string) {
 // newUIServer builds threatd's operator UI listener, or nil when
 // UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly
 // turns it on.
-func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, adminKey string, info chrome.Info) *http.Server {
+func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info) *http.Server {
 	if addr == "" {
 		return nil
 	}
-	handler, err := threatui.NewServer(r, feed, w, chrome.Config{
+	handler, err := threatui.NewServer(r, feed, w, rt, chrome.Config{
 		BasePath: basePath,
 		AdminKey: adminKey,
 		Info:     info,
@@ -152,6 +153,15 @@ func main() {
 	threatRetention := getenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
 	threatMaxDecisions := getenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
 
+	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
+	// plus the store's write mutex already do that -- it bounds how many
+	// decoded, sanitized reports can be waiting on that single writer at once,
+	// so a burst of reporters sheds load at the edge with a 503 instead of
+	// growing the process until it dies.
+	threatQueueSize := getenvInt("THREAT_QUEUE_SIZE", 256)
+	threatQueueWorkers := getenvInt("THREAT_QUEUE_WORKERS", 2)
+	threatQueueTimeout := getenvDuration("THREAT_QUEUE_TIMEOUT", 30*time.Second)
+
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
@@ -178,7 +188,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Threat Shield's consensus pass: no LLM, no gate, no queue.
+	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
 	consensus := blocklist.New(s, snapshot, blocklist.Config{
 		Window:     blocklistWindow,
@@ -188,7 +198,14 @@ func main() {
 		Retention:  threatRetention,
 	})
 
-	handler := threatapi.NewServer(s, snapshot, trusted, threatapi.Config{
+	// The queue's handler is bound to the store here, before either the queue
+	// or the API server exists: the queue's handler must be fixed at
+	// construction, and NewServer takes the already-built queue as a
+	// parameter, so this is the one order that works.
+	ingestQueue := ingestq.New(threatQueueSize, threatQueueTimeout, threatapi.NewConsumer(s))
+	ingestQueue.Start(threatQueueWorkers)
+
+	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
 		MaxDecisions: threatMaxDecisions,
 		Now:          func() int64 { return time.Now().UnixMilli() },
 	})
@@ -217,13 +234,18 @@ func main() {
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
+		{Name: "THREAT_QUEUE_SIZE", Value: strconv.Itoa(threatQueueSize)},
+		{Name: "THREAT_QUEUE_WORKERS", Value: strconv.Itoa(threatQueueWorkers)},
+		{Name: "THREAT_QUEUE_TIMEOUT", Value: threatQueueTimeout.String()},
 	}
 
 	// s satisfies both threatui.Reader and threatui.Writer; the write routes
 	// are reachable only when adminAPIKey is non-empty (chrome.CanWrite), so
 	// wiring the writer unconditionally is safe -- an operator who has not
-	// set ADMIN_API_KEY still gets the plain read-only dashboard.
-	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, s, adminAPIKey, chrome.Info{
+	// set ADMIN_API_KEY still gets the plain read-only dashboard. ingestQueue
+	// satisfies threatui.Runtime (Depth/Cap/Workers), the same shape
+	// insightsd's queue already reports through logsui.Runtime.
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, s, ingestQueue, adminAPIKey, chrome.Info{
 		StartedAt: startedAt,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
@@ -231,7 +253,8 @@ func main() {
 
 	// NEVER log the API key or any credential.
 	slog.Info("starting threatd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,
-		"db_path", dbPath, "log_level", logLevel, "trusted_proxy_cidrs", trustedProxyCIDRs)
+		"db_path", dbPath, "log_level", logLevel, "trusted_proxy_cidrs", trustedProxyCIDRs,
+		"queue_size", threatQueueSize, "queue_workers", threatQueueWorkers)
 
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -274,6 +297,11 @@ func main() {
 			slog.Error("ui graceful shutdown failed", "error", err)
 		}
 	}
+
+	// Stop accepting first, then drain: every queued report was already
+	// acknowledged to a reporter that will not send it again.
+	ingestQueue.Stop()
+	slog.Info("ingest queue drained")
 
 	// The consensus loop holds no acknowledged work -- a cancelled pass just
 	// leaves the previous snapshot in place -- so it is stopped last and
