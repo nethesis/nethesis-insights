@@ -233,7 +233,7 @@ The forward-auth cache Traefik calls before any pipeline sees a request. See
 
 | Variable | Purpose |
 |---|---|
-| `ADMIN_API_KEY` | HTTP Basic password for the dashboard's write routes (add/remove an allowlist entry, approve/reject a request) — secret; unset means **those routes do not exist**, never a default credential. `threatd` is the only pipeline that reads this |
+| `ADMIN_API_KEY` | HTTP Basic password for the dashboard's write routes (add/remove an allowlist entry, approve/reject a request) — secret; unset means those routes answer **`405`**, never a default credential. `threatd` is the only pipeline that reads this |
 | `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`) |
 | `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`) |
 | `BLOCKLIST_MIN_SYSTEMS` | distinct systems required to publish an address (default `3`) |
@@ -374,8 +374,8 @@ Everything else about a dashboard is constrained to match its exposure:
   answers `GET` with no credential.
 - **Only the blocklist dashboard has writes**, and only when `ADMIN_API_KEY` is
   set, on a short enumerated list of `POST` routes, each authenticating with
-  HTTP Basic against that key before doing anything. With no key those routes
-  are never registered. The Basic *username* becomes the actor recorded in the
+  HTTP Basic against that key before doing anything. With no key they answer
+  `405` — not "reachable but unauthorized". The Basic *username* becomes the actor recorded in the
   audit trail (`/audit`), which is why there is no separate actor field — the
   separate admin plane and its `X-Admin-Actor` header are gone. It is not a
   security control: anyone holding the key can claim any name. The logs and
@@ -457,8 +457,17 @@ Try it locally, with the promotion rule relaxed to a single system:
     BLOCKLIST_MIN_SYSTEMS=1 BLOCKLIST_CONSENSUS_INTERVAL=10s \
     UI_LISTEN_ADDR=127.0.0.1:9606 DB_PATH=/tmp/threat.db go run ./cmd/threatd
 
-    scripts/insights-api.sh events decisions.json
-    scripts/insights-api.sh feed
+    INSIGHTS_URL=http://localhost:9595 INSIGHTS_CRED=<system_id>:<auth_token> \
+      scripts/insights-api.sh raw /v1/events -X POST \
+      -H 'Content-Type: application/json' --data @decisions.json
+    INSIGHTS_URL=http://localhost:9595 INSIGHTS_CRED=<system_id>:<auth_token> \
+      scripts/insights-api.sh raw /v1/feed
+
+`threatd` run this way is standalone, with no Traefik in front, so it answers
+on its own unprefixed routes — the `events`/`feed` subcommands default to
+Traefik's prefixed paths on port 80 and cannot be pointed at a bare binary
+(see the script's own header comment); `raw` with an explicit `INSIGHTS_URL`
+is the way to drive one directly.
 
 ## Allowlist management
 
@@ -533,19 +542,23 @@ nothing to show yet on a fresh deployment.
 
 `docs/api/openapi.yaml` (OpenAPI 3.1) describes every HTTP endpoint across all
 three pipelines — logs, Threat Shield and fleet sizing — at its public,
-prefixed path (`/logs/v1/*`, `/blocklist/v1/*`, `/sizing/v1/*`), plus each
-pipeline's `/healthz`, with the schemas mirroring `internal/model`
-field-for-field. It is what `ns8-crowdsec`, `ns8-loki` and (eventually)
-`ns8-core` build clients against. There is no admin-plane surface to document
-any more — allowlist writes go through the blocklist operator UI only.
+prefixed path (`/logs/v1/*`, `/blocklist/v1/*`, `/sizing/v1/*`), with the
+schemas mirroring `internal/model` field-for-field. It is what `ns8-crowdsec`,
+`ns8-loki` and (eventually) `ns8-core` build clients against. There is no
+admin-plane surface to document any more — allowlist writes go through the
+blocklist operator UI only.
 
-The three operator dashboards are deliberately absent from it: that surface
-serves HTML to a human, has no stable contract, and documenting it would
-invite scripting against it.
+`/healthz` is deliberately **not** documented: every binary registers it, but
+Traefik never routes to it (only the quadlet `HealthCmd=` reaches it, inside
+the container), so documenting it would describe an endpoint no client can
+reach. The three operator dashboards are absent from it for a different
+reason: that surface serves HTML to a human, has no stable contract, and
+documenting it would invite scripting against it.
 
 `docs/api/openapi_test.go` walks one expected route list per service and
 fails the build if an endpoint is added to a service without being documented
-at its prefixed path, or documented without a route to back it.
+at its prefixed path, documented without a route to back it, or if `/healthz`
+ever appears there (`TestHealthzNotDocumented`).
 
 ## License
 

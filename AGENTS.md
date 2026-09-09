@@ -39,11 +39,13 @@ A related, separate feature also lives here and is **implemented**:
 `docs/specs/2026-08-07-threat-events-ingest-contract.md` (the wire contract
 `ns8-crowdsec` builds against — keep it in step with
 `internal/threat/sanitize.go`'s drop rules). Server-side fleet-wide CrowdSec ban sharing:
-`POST /v1/threat-events` in, `GET /v1/blocklist` out. It is **not** part of the
+`POST /blocklist/v1/events` in, `GET /blocklist/v1/feed` out. It is **not** part of the
 ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
-gate, no fingerprint, no queue. Treat it as a distinct pipeline sharing only the
-listener, the `Authenticator` and the SQLite file; do not use it as context for changes
-to bundles, gating or findings, and do not conflate the two when editing either.
+gate, no fingerprint, no queue. Treat it as a distinct pipeline — its own binary,
+`threatd`, with its own SQLite file — sharing only Traefik, the `authd` forward-auth
+cache and the SQLite runtime settings (`internal/platform/sqlitex`); do not use it as
+context for changes to bundles, gating or findings, and do not conflate the two when
+editing either.
 
 Threat Shield rules that are as load-bearing as the gate's:
 
@@ -74,7 +76,7 @@ Threat Shield rules that are as load-bearing as the gate's:
   the allowlist is now the only promotion exclusion.)
 - **Roll up before pruning.** `RollupThreatDailyStats` must precede
   `PruneThreatEvents`, or the dropped day loses its history permanently.
-- **Never serve blank.** `GET /v1/blocklist` answers 503 before the first successful
+- **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.
 - **`X-Forwarded-For` is trusted, but only from a configured proxy address.** This
@@ -90,7 +92,7 @@ Threat Shield rules that are as load-bearing as the gate's:
   `127.0.0.1` by construction, not merely by convention, which is what makes the
   default `TRUSTED_PROXY_CIDRS=127.0.0.0/8` correct without a per-deployment value.
 - **Nothing is ever allowlisted automatically.** A client request
-  (`POST /v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
+  (`POST /blocklist/v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
   an explicit admin approval creates an entry. Never add a consensus threshold that
   promotes one. A wrong blocklist entry blocks a legitimate address loudly and expires;
   a wrong allowlist entry exempts an attacker silently and permanently, so the two
@@ -126,12 +128,13 @@ the source draft got wrong) and
 builds against — keep it in step with `internal/sizing/sanitize.go`'s drop
 rules). NS8 cluster leaders post one complete-UTC-day workload and performance
 report per cluster; the server scores each node, folds a multi-day verdict, and
-publishes cohort hardware baselines. `POST /v1/sizing-reports` in, two operator
-UI pages out. It shares only the listener, the `Authenticator`, the SQLite file
-and `model.ModuleFamily` — deliberately, because that is already the single
-definition of module identity and a second one would eventually disagree. **No
-LLM call, no gate, no fingerprint, no queue.** Do not use it as context for
-changes to bundles, gating or findings.
+publishes cohort hardware baselines. `POST /sizing/v1/reports` in, three operator
+UI pages out. It is its own binary, `sizingd`, with its own SQLite file, sharing
+only Traefik, the `authd` forward-auth cache, the SQLite runtime settings
+(`internal/platform/sqlitex`) and `model.ModuleFamily` — deliberately, because
+that is already the single definition of module identity and a second one
+would eventually disagree. **No LLM call, no gate, no fingerprint, no queue.**
+Do not use it as context for changes to bundles, gating or findings.
 
 Fleet-sizing rules that are as load-bearing as the gate's:
 
@@ -252,8 +255,8 @@ of the spec are **not** built before assuming a bug:
 | Auth | moved to the proxy: `cmd/authd` is a caching forward-auth service (`internal/platform/auth.ForwardAuth`) that Traefik calls as a `forwardAuth` middleware — forwards to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design. Each pipeline no longer validates a credential itself: it reads `system_id` from the already-forwarded Basic username via `httpx.SystemID`, trusting it only when the request arrived from `TRUSTED_PROXY_CIDRS` — that check is the whole security boundary, so a pipeline reached directly (bypassing authd/Traefik) accepts any password | same |
 | Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
 | Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | per-pipeline `Store` iface already in place; `pgStore` added later |
-| Cost control | `gate` only | `internal/budget`: `LLM_MAX_CONCURRENCY`, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook, currently never set) |
-| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `budget`, `maint`, `version` |
+| Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `maint`, `version` |
 | Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
 | Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's enumerated `POST` routes additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
@@ -503,12 +506,12 @@ after:
 ```
 
 `#`-comment form for SQL, YAML, Makefile and shell; `<!-- … -->` for HTML
-templates; `/* … */` for CSS. In `internal/ui/templates/layout.html` the header
+templates; `/* … */` for CSS. In `internal/ui/chrome/templates/layout.html` the header
 sits outside any `{{define}}` block, so it is emitted into the served page
 source — that is correct and intended for GPL.
 
 **Vendored third-party files are exempt and must stay exempt.** Anything under
-`internal/ui/static/` that is not ours — today `pico.min.css` and `pico.LICENSE`
+`internal/ui/chrome/static/` that is not ours — today `pico.min.css` and `pico.LICENSE`
 (Pico CSS v2.1.1, MIT) — keeps its own upstream copyright and permission notice
 byte-for-byte and must **never** receive the Nethesis GPL header: we did not
 write them, and MIT requires the original notice ship intact. MIT is

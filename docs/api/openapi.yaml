@@ -33,7 +33,8 @@ info:
     (`ns8-crowdsec`, `ns8-loki`, `ns8-core`); it is kept in lockstep with the
     Go handlers in `internal/api/logs`, `internal/api/threat` and
     `internal/api/sizing`, not just with the design intent. It does not
-    cover the operator UI (`internal/ui`): that surface serves HTML to a
+    cover the three operator dashboards (`internal/ui/logs`,
+    `internal/ui/threat`, `internal/ui/sizing`): that surface serves HTML to a
     human -- including the allowlist review and management writes that used
     to live on a separate bearer-key-protected admin plane -- has no stable
     contract, and documenting it would invite someone to script against it.
@@ -557,9 +558,10 @@ paths:
       description: |
         An NS8 cluster **leader** posts one report per complete UTC day, one
         entry per node in the cluster. Fleet sizing is a third pipeline beside
-        the log-bundle path and Threat Shield, sharing only this listener, the
-        forward-auth `Authenticator`, the SQLite file and `model.ModuleFamily`:
-        no LLM call, no gate, no fingerprint, no queue.
+        the log-bundle path and Threat Shield -- its own binary (`sizingd`)
+        with its own SQLite file, sharing only Traefik, the `authd`
+        forward-auth cache and `model.ModuleFamily`: no LLM call, no gate, no
+        fingerprint, no queue.
 
         **The unit is a cluster-day, and a day is absolute.** One `system_id`
         is a *cluster*, so the storage key is `(system_id, node_id, day)`.

@@ -333,10 +333,10 @@ collected, counted and handed back.
    addresses, which the node imports into CrowdSec. Every subscriber gets the
    same list.
 
-### The two safety nets
+### The safety net
 
 Consensus alone has an obvious failure mode: what if the fleet agrees on
-something it shouldn't? Two exclusions run before anything is published.
+something it shouldn't? One exclusion runs before anything is published.
 
 - **The allowlist.** A hand-maintained list of addresses and ranges that must
   never be published, whatever the fleet says — a partner's security scanner, a
@@ -344,10 +344,12 @@ something it shouldn't? Two exclusions run before anything is published.
   the list is read, so adding an entry actually *removes* the address on the
   next pass rather than just hiding it.
 
-- **Fleet self-protection.** The server remembers the address each reporting
-  node connects from, and never publishes any of them. This closes the worst
-  case: one customer's misconfigured appliance reporting the fleet's own
-  gateway, and the fleet then blocking itself.
+An earlier design also automatically excluded the address each reporting node
+connects from ("fleet self-protection"), so a misconfigured appliance
+reporting the fleet's own gateway could not get the fleet to block itself.
+That automatic exclusion was removed as too complex and too easy to get wrong
+for what it bought — the allowlist above is now the only promotion exclusion,
+and it is a human decision rather than an automatic one.
 
 ### One thing the server refuses to do
 
@@ -366,7 +368,7 @@ original design required agreement across at least two different
 organizations, precisely so one customer's misconfiguration could not get an
 address published fleet-wide. That requirement cannot be enforced here yet, so
 three machines belonging to the same customer do count as consensus. The
-allowlist and fleet self-protection above are what stands in for it.
+allowlist above is what stands in for it.
 
 ### Asking for an address to be left alone
 
@@ -574,9 +576,12 @@ guidance, since unlike the API above, a page shows data across *every* machine
 at once.
 
 In the normal deployment all three sit behind the same reverse proxy, which
-asks for a single username and password before serving *any* page of any of
-the three — read-only pages included. The password is the server's
-`ADMIN_API_KEY` value; the username is whatever the operator types, and it is
+asks for a username and password before serving *any* page of any of the
+three — read-only pages included. The username must be one an administrator
+has already provisioned in the proxy's own password file; an unrecognized
+username is rejected before the request ever reaches the dashboard. The
+password for every provisioned username is the same: the server's
+`ADMIN_API_KEY` value. Whichever provisioned username is used to sign in is
 what gets recorded as the actor on anything that page lets you change. So
 there is one login for the whole operator surface, not three, and not a
 separate one for making a change versus just looking.

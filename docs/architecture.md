@@ -528,8 +528,8 @@ newRate = observed                                              // first sample
 ```
 
 This is the standard EWMA recurrence, and the implementation matches it
-exactly (verified against `internal/store/store.go`). Two things worth being
-precise about, since the name invites confusion:
+exactly (verified against `internal/store/logs/store.go`). Two things worth
+being precise about, since the name invites confusion:
 
 - **`EWMA_ALPHA` itself must be in `(0, 1]`** — it is a blend weight, not the
   baseline. The code does not clamp or validate it (`cmd/insightsd`'s
@@ -580,8 +580,10 @@ routes (`writableRoutes` — add/update an entry, delete one, approve a request,
 reject one) are now the only writer anywhere in the deployment, gated behind
 `ADMIN_API_KEY` and HTTP Basic (`chrome.AuthenticateWrite`); the Basic username
 becomes the actor recorded on every write, exactly as `X-Admin-Actor` used to
-be. With `ADMIN_API_KEY` unset those routes are never registered — a missing
-route, not a guessable credential. In the deployed shape Traefik additionally
+be. With `ADMIN_API_KEY` unset `s.canWrite()` is false and every one of those
+routes answers `405` (`internal/ui/threat/ui.go`'s `route()`) — not "reachable
+but unauthorized", and not a guessable credential either. In the deployed
+shape Traefik additionally
 BasicAuths the whole `/blocklist` subtree with the same key value as the
 htpasswd password; that layer is additive, not a replacement — see "Operator
 UI" above for why the app-level check has to stay regardless.
