@@ -428,9 +428,13 @@ func max(a, b int) int {
 // page, must be free of <script, javascript: and on<event>= constructs.
 //
 // layout.html and static/ now live in chrome's own embed.FS (see
-// internal/ui/chrome), so this package's raw-walk half covers only its own
-// page templates; chrome's assets are exercised here through the served
-// HTTP paths instead, exactly like every other page.
+// internal/ui/chrome's own TestNoJavaScript, which walks it directly), so
+// this package's raw-walk half covers only its own page templates. The
+// served /static/... fetches below are a secondary check -- they exercise
+// this package's actual routing to those assets -- not a substitute for a
+// raw-byte walk, so each one also asserts 200: a 404 body contains no
+// JavaScript either, and would otherwise make a broken route look like a
+// pass.
 func TestNoJavaScript(t *testing.T) {
 	err := fs.WalkDir(pageAssets, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -455,12 +459,13 @@ func TestNoJavaScript(t *testing.T) {
 		rec := get(t, h, rt.path)
 		assertNoJS(t, "rendered page "+rt.path, rec.Body.Bytes())
 	}
-	rec := get(t, h, "/static/style.css")
-	assertNoJS(t, "rendered /static/style.css", rec.Body.Bytes())
-	rec = get(t, h, "/static/pico.min.css")
-	assertNoJS(t, "rendered /static/pico.min.css", rec.Body.Bytes())
-	rec = get(t, h, "/static/pico.LICENSE")
-	assertNoJS(t, "rendered /static/pico.LICENSE", rec.Body.Bytes())
+	for _, p := range []string{"/static/style.css", "/static/pico.min.css", "/static/pico.LICENSE"} {
+		rec := get(t, h, p)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, want 200 (a 404 body would pass assertNoJS vacuously)", p, rec.Code)
+		}
+		assertNoJS(t, "rendered "+p, rec.Body.Bytes())
+	}
 }
 
 // TestSecretRedaction asserts this package cannot leak a secret value even
