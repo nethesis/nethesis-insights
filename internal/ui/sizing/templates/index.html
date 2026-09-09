@@ -6,22 +6,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <h1>Sizing &mdash; nodes</h1>
 <p><small>Is each node's hardware big enough? Clusters send one report per day,
 one entry per node. <strong>Pressure</strong> is 0&ndash;100: 0 is fine, 100 is
-severe. <code>n/a</code> means there was not enough data to score.</small></p>
-
-<table>
-<tbody>
-<tr><th scope="row">Clusters reporting</th><td class="num">{{.Counts.Systems}}</td></tr>
-<tr><th scope="row">Nodes known</th><td class="num">{{.Counts.Nodes}}</td></tr>
-<tr><th scope="row">Node-days stored</th><td class="num">{{.Counts.NodeDays}}</td></tr>
-<tr><th scope="row">Newest day</th><td class="mono">{{fmtDay .Counts.LatestDay}}</td></tr>
-<tr><th scope="row">Last report received</th><td class="mono" title="{{fmtTime .Counts.LastReport}}">{{fmtAgo .Counts.LastReport}}</td></tr>
-<tr><th scope="row">Verdicts</th><td><span class="pill" data-verdict="undersized">{{.Counts.Undersized}} too small</span>
-<span class="pill" data-verdict="at_risk">{{.Counts.AtRisk}} at risk</span>
-<span class="pill" data-verdict="insufficient_data">{{.Counts.Unscored}} not enough data</span></td></tr>
-<tr><th scope="row">Published recommendations</th><td class="num">{{.Counts.Cohorts}}</td></tr>
-<tr><th scope="row">Pressure formula version</th><td class="num">{{.Version}}</td></tr>
-</tbody>
-</table>
+severe. <code>n/a</code> means there was not enough data to score. Pressure
+formula version {{.Version}}.</small></p>
 
 <form method="get">
 <fieldset role="group">

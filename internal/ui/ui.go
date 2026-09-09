@@ -31,7 +31,6 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
-	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
@@ -54,17 +53,6 @@ type Reader interface {
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]store.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]store.BaselineRow, error)
-
-	// Fleet sizing -- the second pipeline's two pages. These rows carry
-	// per-customer commercial data (mailbox and PBX user counts, product
-	// mix), so the loopback-bind advice that applies to every page here
-	// applies to them too, recorded explicitly rather than inherited by
-	// accident.
-	ListSizingNodes(ctx context.Context, systemID string, limit int) ([]store.SizingNodeUIRow, error)
-	ListSizingModules(ctx context.Context, systemID string, limit int) ([]store.SizingModuleUIRow, error)
-	ListSizingCohorts(ctx context.Context, kind string, limit int) ([]store.SizingCohortRow, error)
-	SizingIngestStats(ctx context.Context, limit int) ([]store.SizingIngestRow, error)
-	SizingCounts(ctx context.Context) (store.SizingCounts, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -96,14 +84,6 @@ const (
 	templatesLimit     = 200
 	analysesDefaultLim = 50
 	analysesMaxLimit   = 500
-	blocklistLimit     = 500
-	threatEventsDefLim = 50
-	threatEventsMaxLim = 500
-	threatStatsLimit   = 200
-	sizingNodesLimit   = 500
-	sizingModulesLimit = 2000
-	sizingCohortsLimit = 500
-	sizingIngestLimit  = 200
 )
 
 // navGroups is this dashboard's nav bar structure, handed to chrome.New as
@@ -120,10 +100,6 @@ var navGroups = []chrome.NavGroup{
 		{Key: "templates", Path: "/templates", Label: "Templates"},
 		{Key: "baselines", Path: "/baselines", Label: "Baselines"},
 	}},
-	{Label: "Sizing Pipeline", Pages: []chrome.NavPage{
-		{Key: "sizing", Path: "/sizing", Label: "Nodes"},
-		{Key: "cohorts", Path: "/cohorts", Label: "Recommendations"},
-	}},
 }
 
 // pages lists the content templates, each combined with chrome's layout
@@ -131,7 +107,6 @@ var navGroups = []chrome.NavGroup{
 var pages = []string{
 	"status.html", "systems.html", "findings.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html",
-	"sizing.html", "cohorts.html",
 }
 
 type server struct {
@@ -216,10 +191,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplates(w, r)
 	case "/baselines":
 		s.handleBaselines(w, r)
-	case "/sizing":
-		s.handleSizing(w, r)
-	case "/cohorts":
-		s.handleCohorts(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and
@@ -552,132 +523,4 @@ func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		Baselines: baselines,
 		System:    systemID,
 	})
-}
-
-// --- Fleet sizing pages ---
-
-type sizingPageData struct {
-	chrome.PageData
-	Counts     store.SizingCounts
-	Nodes      []store.SizingNodeUIRow
-	Modules    []store.SizingModuleUIRow
-	Ingest     []store.SizingIngestRow
-	Thresholds []sizing.Threshold
-	Version    int
-	System     string
-}
-
-// handleSizing is the sizing pipeline's node view: one row per node, showing
-// its most recent day's utilization percentiles, the per-axis penalties, the
-// pressure they combine into and the multi-day verdict.
-//
-// The threshold table is on the page deliberately. Most of the score's knees
-// are guesses awaiting calibration against ~30 days of fleet data, and a
-// dashboard that renders a guess with no label attached is presenting it as
-// advice. See sizing.Thresholds.
-func (s *server) handleSizing(w http.ResponseWriter, r *http.Request) {
-	systemID := r.URL.Query().Get("system")
-
-	counts, err := s.reader.SizingCounts(r.Context())
-	if err != nil {
-		s.chrome.StoreError(w, "sizing", err)
-		return
-	}
-	nodes, err := s.reader.ListSizingNodes(r.Context(), systemID, sizingNodesLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "sizing", err)
-		return
-	}
-	modules, err := s.reader.ListSizingModules(r.Context(), systemID, sizingModulesLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "sizing", err)
-		return
-	}
-	ingest, err := s.reader.SizingIngestStats(r.Context(), sizingIngestLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "sizing", err)
-		return
-	}
-
-	s.chrome.Render(w, "sizing.html", sizingPageData{
-		PageData:   s.chrome.PageData(r, "sizing"),
-		Counts:     counts,
-		Nodes:      nodes,
-		Modules:    modules,
-		Ingest:     ingest,
-		Thresholds: sizing.Thresholds(),
-		Version:    sizing.PressureVersion,
-		System:     systemID,
-	})
-}
-
-type cohortGroup struct {
-	Kind    string
-	Label   string
-	Caption string
-	Rows    []store.SizingCohortRow
-}
-
-type cohortsPageData struct {
-	chrome.PageData
-	Groups []cohortGroup
-	Floors struct {
-		DistinctSystems int
-		Nodes           int
-	}
-	CensorRAMUtil float64
-	Empty         bool
-}
-
-// handleCohorts shows the published baselines.
-//
-// An empty page is the **correct** output for a fleet below the floor, not a
-// bug: publishing a percentile computed from three nodes would be worse than
-// publishing nothing, and this pipeline's "never serve blank" is the other way
-// round from Threat Shield's for exactly that reason.
-//
-// Each group's caption says what its numbers can be used for. Only
-// family_solo is safe to quote as a recommendation; family is co-tenanted with
-// whatever else happened to be installed.
-//
-// "Only this module" is stated on the page as "plus the platform modules every
-// cluster runs", because that is what sizing.IsPlatform ignores and therefore
-// what the number includes: every node measured was also running log
-// shipping, the identity proxy, metrics and intrusion prevention. Printing it
-// as an unqualified per-module cost would overstate what was measured.
-func (s *server) handleCohorts(w http.ResponseWriter, r *http.Request) {
-	cohorts, err := s.reader.ListSizingCohorts(r.Context(), "", sizingCohortsLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "cohorts", err)
-		return
-	}
-
-	groups := []cohortGroup{
-		{Kind: sizing.CohortFamilySolo, Label: "Nodes running only this module",
-			Caption: "Use these numbers when sizing a new node for this module. These nodes run nothing else a customer chose, but they do run the platform modules every cluster has, so their cost is included."},
-		{Kind: sizing.CohortFamily, Label: "Nodes running this module plus others",
-			Caption: "Context only. These nodes share their hardware, so the numbers are not this module's cost."},
-	}
-	for i := range groups {
-		for _, c := range cohorts {
-			if c.CohortKind == groups[i].Kind {
-				groups[i].Rows = append(groups[i].Rows, c)
-			}
-		}
-	}
-
-	data := cohortsPageData{
-		PageData:      s.chrome.PageData(r, "cohorts"),
-		Groups:        groups,
-		CensorRAMUtil: sizing.CensorRAMUtil,
-		Empty:         len(cohorts) == 0,
-	}
-	// The floor is a property of the pass, not of this page; it is echoed
-	// from whichever cohort published so the page never states a floor the
-	// running configuration does not use.
-	if len(cohorts) > 0 {
-		data.Floors.DistinctSystems = cohorts[0].MinDistinctSystems
-		data.Floors.Nodes = cohorts[0].MinNodes
-	}
-	s.chrome.Render(w, "cohorts.html", data)
 }

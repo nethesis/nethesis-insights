@@ -12,15 +12,15 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
 )
 
 // The exclusions and the floors ARE the SQL and the folding, so these run
 // against a real temp-file SQLite database rather than a mock -- the same
 // reasoning as internal/blocklist's consensus tests.
-func newTestStore(t *testing.T) *store.SQLiteStore {
+func newTestStore(t *testing.T) *sizingstore.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := sizingstore.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -68,20 +68,20 @@ func defaultSpec() nodeSpec {
 
 // seed writes `systems` clusters of `nodesPer` nodes, each with `days` days of
 // history, all matching spec.
-func seed(t *testing.T, s *store.SQLiteStore, systems, nodesPer, days int, spec nodeSpec) {
+func seed(t *testing.T, s *sizingstore.Store, systems, nodesPer, days int, spec nodeSpec) {
 	t.Helper()
 	ctx := context.Background()
 
 	for sysIdx := 0; sysIdx < systems; sysIdx++ {
 		systemID := fmt.Sprintf("sys-%03d", sysIdx)
-		var rows []store.SizingDayRows
+		var rows []sizingstore.SizingDayRows
 		for d := 0; d < days; d++ {
 			day := testDay - int64(d)
-			var nodes []store.SizingNodeDayRow
+			var nodes []sizingstore.SizingNodeDayRow
 			for nodeID := 1; nodeID <= nodesPer; nodeID++ {
 				nodes = append(nodes, nodeRow(nodeID, spec))
 			}
-			rows = append(rows, store.SizingDayRows{Day: day, Nodes: nodes})
+			rows = append(rows, sizingstore.SizingDayRows{Day: day, Nodes: nodes})
 		}
 		if _, err := s.UpsertSizingDays(ctx, systemID, "1.0.0", rows, testNow); err != nil {
 			t.Fatalf("seed %s: %v", systemID, err)
@@ -89,8 +89,8 @@ func seed(t *testing.T, s *store.SQLiteStore, systems, nodesPer, days int, spec 
 	}
 }
 
-func nodeRow(nodeID int, spec nodeSpec) store.SizingNodeDayRow {
-	r := store.SizingNodeDayRow{
+func nodeRow(nodeID int, spec nodeSpec) sizingstore.SizingNodeDayRow {
+	r := sizingstore.SizingNodeDayRow{
 		NodeID:         nodeID,
 		MetricsPresent: true,
 		SampleCoverage: 0.99,
@@ -116,14 +116,14 @@ func nodeRow(nodeID int, spec nodeSpec) store.SizingNodeDayRow {
 			Family: family, Instances: 1, FactsOK: 1,
 		})
 	}
-	r.SetScore(store.SizingScore{
+	r.SetScore(sizingstore.SizingScore{
 		Pressure: fp(10), Mem: fp(8), CPU: fp(4), IO: fp(0), Disk: fp(0),
 		TopAxis: sizing.AxisMem, Version: spec.version,
 	})
 	return r
 }
 
-func cohortFor(t *testing.T, s *store.SQLiteStore, kind, key string) *store.SizingCohortRow {
+func cohortFor(t *testing.T, s *sizingstore.Store, kind, key string) *sizingstore.SizingCohortRow {
 	t.Helper()
 	rows, err := s.ListSizingCohorts(context.Background(), kind, 500)
 	if err != nil {
@@ -250,11 +250,11 @@ func TestCensoredNodesAreCountedNotHidden(t *testing.T) {
 	squeezed.ramUsed = 7.6e9
 	for sysIdx := 100; sysIdx < 115; sysIdx++ {
 		systemID := fmt.Sprintf("sys-%03d", sysIdx)
-		var rows []store.SizingDayRows
+		var rows []sizingstore.SizingDayRows
 		for d := 0; d < 3; d++ {
-			rows = append(rows, store.SizingDayRows{
+			rows = append(rows, sizingstore.SizingDayRows{
 				Day:   testDay - int64(d),
-				Nodes: []store.SizingNodeDayRow{nodeRow(1, squeezed)},
+				Nodes: []sizingstore.SizingNodeDayRow{nodeRow(1, squeezed)},
 			})
 		}
 		if _, err := s.UpsertSizingDays(ctx, systemID, "1.0.0", rows, testNow); err != nil {
@@ -294,7 +294,7 @@ func TestHardwareChangeExcludesTheNode(t *testing.T) {
 	swapped := nodeRow(1, bigger)
 	swapped.Hardware.MemTotalBytes = 32 << 30
 	if _, err := s.UpsertSizingDays(ctx, "sys-000", "1.0.0",
-		[]store.SizingDayRows{{Day: testDay, Nodes: []store.SizingNodeDayRow{swapped}}}, testNow); err != nil {
+		[]sizingstore.SizingDayRows{{Day: testDay, Nodes: []sizingstore.SizingNodeDayRow{swapped}}}, testNow); err != nil {
 		t.Fatalf("swap: %v", err)
 	}
 
@@ -385,21 +385,21 @@ func TestVerdictsAndPlacementArePublished(t *testing.T) {
 	cold := defaultSpec()
 	cold.ramUtil = 0.10
 
-	var rows []store.SizingDayRows
+	var rows []sizingstore.SizingDayRows
 	for d := 0; d < sizing.MinDaysPresent+2; d++ {
 		hotRow := nodeRow(1, hot)
-		hotRow.SetScore(store.SizingScore{
+		hotRow.SetScore(sizingstore.SizingScore{
 			Pressure: fp(80), Mem: fp(70), CPU: fp(4), IO: fp(0), Disk: fp(0),
 			TopAxis: sizing.AxisMem, Version: sizing.PressureVersion,
 		})
 		coldRow := nodeRow(2, cold)
-		coldRow.SetScore(store.SizingScore{
+		coldRow.SetScore(sizingstore.SizingScore{
 			Pressure: fp(2), Mem: fp(2), CPU: fp(0), IO: fp(0), Disk: fp(0),
 			TopAxis: sizing.AxisMem, Version: sizing.PressureVersion,
 		})
-		rows = append(rows, store.SizingDayRows{
+		rows = append(rows, sizingstore.SizingDayRows{
 			Day:   testDay - int64(d),
-			Nodes: []store.SizingNodeDayRow{hotRow, coldRow},
+			Nodes: []sizingstore.SizingNodeDayRow{hotRow, coldRow},
 		})
 	}
 	if _, err := s.UpsertSizingDays(ctx, "sys-hot", "1.0.0", rows, testNow); err != nil {
@@ -414,10 +414,10 @@ func TestVerdictsAndPlacementArePublished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verdict states: %v", err)
 	}
-	if got := states[store.SizingNodeKey("sys-hot", 1)]; got != sizing.VerdictUndersized {
+	if got := states[sizingstore.SizingNodeKey("sys-hot", 1)]; got != sizing.VerdictUndersized {
 		t.Errorf("hot node verdict = %q, want %q", got, sizing.VerdictUndersized)
 	}
-	if got := states[store.SizingNodeKey("sys-hot", 2)]; got != sizing.VerdictOK {
+	if got := states[sizingstore.SizingNodeKey("sys-hot", 2)]; got != sizing.VerdictOK {
 		t.Errorf("idle node verdict = %q, want %q", got, sizing.VerdictOK)
 	}
 
@@ -461,23 +461,23 @@ type recordingReader struct {
 
 func (r *recordingReader) note(name string) { r.calls = append(r.calls, name) }
 
-func (r *recordingReader) StaleSizingScores(context.Context, int, int) ([]store.SizingNodeDayRow, error) {
+func (r *recordingReader) StaleSizingScores(context.Context, int, int) ([]sizingstore.SizingNodeDayRow, error) {
 	r.note("stale")
 	return nil, nil
 }
-func (r *recordingReader) UpdateSizingScores(context.Context, []store.SizingNodeDayRow) error {
+func (r *recordingReader) UpdateSizingScores(context.Context, []sizingstore.SizingNodeDayRow) error {
 	r.note("update")
 	return nil
 }
-func (r *recordingReader) SizingWindow(context.Context, int64, int64) ([]store.SizingWindowRow, error) {
+func (r *recordingReader) SizingWindow(context.Context, int64, int64) ([]sizingstore.SizingWindowRow, error) {
 	r.note("window")
 	return nil, nil
 }
-func (r *recordingReader) SizingWindowFamilies(context.Context, int64, int64) ([]store.SizingNodeFamilyRow, error) {
+func (r *recordingReader) SizingWindowFamilies(context.Context, int64, int64) ([]sizingstore.SizingNodeFamilyRow, error) {
 	r.note("families")
 	return nil, nil
 }
-func (r *recordingReader) SizingWindowMetrics(context.Context, int64, int64) ([]store.SizingFamilyMetricRow, error) {
+func (r *recordingReader) SizingWindowMetrics(context.Context, int64, int64) ([]sizingstore.SizingFamilyMetricRow, error) {
 	r.note("metrics")
 	return nil, nil
 }
@@ -485,12 +485,12 @@ func (r *recordingReader) SizingVerdictStates(context.Context) (map[string]strin
 	r.note("states")
 	return map[string]string{}, nil
 }
-func (r *recordingReader) UpsertSizingVerdicts(_ context.Context, rows []store.SizingVerdictRow) error {
+func (r *recordingReader) UpsertSizingVerdicts(_ context.Context, rows []sizingstore.SizingVerdictRow) error {
 	r.note("verdicts")
 	r.verdictCalls = len(rows)
 	return nil
 }
-func (r *recordingReader) UpsertSizingCohorts(context.Context, []store.SizingCohortRow) error {
+func (r *recordingReader) UpsertSizingCohorts(context.Context, []sizingstore.SizingCohortRow) error {
 	r.note("cohorts")
 	return nil
 }

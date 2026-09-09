@@ -21,13 +21,11 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	"github.com/nethesis/nethesis-insights/internal/api"
-	"github.com/nethesis/nethesis-insights/internal/baseline"
 	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
 	"github.com/nethesis/nethesis-insights/internal/queue"
-	"github.com/nethesis/nethesis-insights/internal/sizing"
 	"github.com/nethesis/nethesis-insights/internal/store"
 	"github.com/nethesis/nethesis-insights/internal/ui"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
@@ -228,17 +226,6 @@ func main() {
 	queueSize := getenvInt("QUEUE_SIZE", 256)
 	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
 	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
-	// Fleet sizing. Every one has a default, so an existing deployment picks
-	// the pipeline up without being reconfigured. The pass interval is an
-	// hour because the inputs are whole days: running it faster cannot
-	// produce a different answer.
-	sizingRetention := getenvDuration("SIZING_RETENTION", 100*24*time.Hour)
-	sizingPassInterval := getenvDuration("SIZING_PASS_INTERVAL", time.Hour)
-	sizingWindowDays := getenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
-	sizingMinDistinctSystems := getenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
-	sizingMinNodes := getenvInt("SIZING_MIN_NODES", 30)
-	sizingMinDaysPresent := getenvInt("SIZING_MIN_DAYS_PRESENT", sizing.MinDaysPresent)
-	sizingMaxNodesPerReport := getenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
 
 	if dir := filepath.Dir(dbPath); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -306,22 +293,7 @@ func main() {
 	authenticator.PositiveTTL = authCacheTTL
 	authenticator.NegativeTTL = authNegCacheTTL
 
-	// Fleet sizing: a second pipeline sharing this listener, this
-	// authenticator and the SQLite file, and nothing else. No LLM, no gate,
-	// no fingerprint, no queue.
-	cohortPass := baseline.New(s, baseline.Config{
-		WindowDays:         sizingWindowDays,
-		MinDistinctSystems: sizingMinDistinctSystems,
-		MinNodes:           sizingMinNodes,
-		MinDaysPresent:     sizingMinDaysPresent,
-		Retention:          sizingRetention,
-	})
-
-	handler := api.NewServer(q, s, authenticator, api.SizingConfig{
-		Store:    s,
-		MaxNodes: sizingMaxNodesPerReport,
-		Now:      func() int64 { return time.Now().UnixMilli() },
-	}, excludeModules, excludeServices)
+	handler := api.NewServer(q, s, authenticator, excludeModules, excludeServices)
 
 	httpServer := &http.Server{
 		Addr:    listenAddr,
@@ -368,13 +340,6 @@ func main() {
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
-		{Name: "SIZING_RETENTION", Value: sizingRetention.String()},
-		{Name: "SIZING_PASS_INTERVAL", Value: sizingPassInterval.String()},
-		{Name: "SIZING_WINDOW_DAYS", Value: strconv.Itoa(sizingWindowDays)},
-		{Name: "SIZING_MIN_DISTINCT_SYSTEMS", Value: strconv.Itoa(sizingMinDistinctSystems)},
-		{Name: "SIZING_MIN_NODES", Value: strconv.Itoa(sizingMinNodes)},
-		{Name: "SIZING_MIN_DAYS_PRESENT", Value: strconv.Itoa(sizingMinDaysPresent)},
-		{Name: "SIZING_MAX_NODES_PER_REPORT", Value: strconv.Itoa(sizingMaxNodesPerReport)},
 	}
 
 	// BuildInfo reads runtime/debug once here, not per request.
@@ -431,11 +396,6 @@ func main() {
 		}()
 	}
 
-	// The sizing cohort pass runs on its own loop, started after the
-	// listeners so a slow first pass cannot delay readiness.
-	sizingCtx, stopSizing := context.WithCancel(context.Background())
-	sizingDone := runPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
-
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -456,37 +416,4 @@ func main() {
 	// acknowledged to an edge that will not send it again.
 	q.Stop()
 	slog.Info("queue drained")
-
-	stopSizing()
-	<-sizingDone
-	slog.Info("sizing cohort loop stopped")
-}
-
-// pass is a periodic background job. The fleet-sizing cohort pass satisfies
-// it; runPassLoop stays generic in case a later background job needs it too.
-type pass interface {
-	Run(ctx context.Context, now int64) error
-}
-
-// runPassLoop runs a pass immediately and then every interval until ctx is
-// cancelled. A failed pass is logged and the loop continues: whatever it did
-// not replace keeps being served, which is the designed degradation.
-func runPassLoop(ctx context.Context, name string, r pass, interval time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("background pass failed", "pass", name, "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return done
 }

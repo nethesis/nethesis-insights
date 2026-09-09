@@ -1,0 +1,38 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Status</h1>
+
+<article>
+<h2>Fleet sizing</h2>
+<table>
+<tbody>
+<tr><th scope="row">Clusters reporting</th><td class="num">{{.Counts.Systems}}</td></tr>
+<tr><th scope="row">Nodes known</th><td class="num">{{.Counts.Nodes}}</td></tr>
+<tr><th scope="row">Node-days stored</th><td class="num">{{.Counts.NodeDays}}</td></tr>
+<tr><th scope="row">Newest day</th><td class="mono">{{fmtDay .Counts.LatestDay}}</td></tr>
+<tr><th scope="row">Last report received</th><td class="mono" title="{{fmtTime .Counts.LastReport}}">{{fmtAgo .Counts.LastReport}}</td></tr>
+<tr><th scope="row">Verdicts</th><td><span class="pill" data-verdict="undersized">{{.Counts.Undersized}} too small</span>
+<span class="pill" data-verdict="at_risk">{{.Counts.AtRisk}} at risk</span>
+<span class="pill" data-verdict="insufficient_data">{{.Counts.Unscored}} not enough data</span></td></tr>
+<tr><th scope="row">Published recommendations</th><td class="num">{{.Counts.Cohorts}}</td></tr>
+</tbody>
+</table>
+</article>
+
+<article>
+<h2>Configuration</h2>
+<p><small>Secrets are reported as <code>set</code> / <code>unset</code> only; this page never renders a secret value.</small></p>
+<figure>
+<table class="striped">
+<thead><tr><th scope="col">Name</th><th scope="col">Value</th></tr></thead>
+<tbody>
+{{range .Config}}<tr><td class="mono">{{.Name}}</td><td class="mono">{{.Value}}</td></tr>{{end}}
+{{if not .Config}}<tr><td colspan="2">no configuration reported</td></tr>{{end}}
+</tbody>
+</table>
+</figure>
+</article>
+{{end}}

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package api
+package sizing
 
 import (
 	"bytes"
@@ -16,15 +16,36 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
+)
+
+// The credential is never verified in this process -- authd and the
+// trusted-proxy check are the whole boundary -- so any non-empty pair works
+// here; it exists only to exercise HTTP Basic's wire format.
+const (
+	testSystemID = "sys-edge-1"
+	testSecret   = "whatever"
 )
 
 // sizingNow is fixed so the day-window rules are not clock sensitive.
 var sizingNow = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC).UnixMilli()
 
+// trustedProxy is the loopback prefix every test builds its trusted set from,
+// matching httptest.NewRequest's need for an explicit RemoteAddr.
+var trustedProxy = mustTrust("127.0.0.0/8")
+
+func mustTrust(cidr string) httpx.TrustedProxies {
+	t, err := httpx.ParseTrustedProxies(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
 type fakeSizingStore struct {
-	days      []store.SizingDayRows
+	days      []sizingstore.SizingDayRows
 	counters  model.SizingCounters
 	counterD  int64
 	reporter  string
@@ -33,7 +54,7 @@ type fakeSizingStore struct {
 	upsertErr error
 }
 
-func (f *fakeSizingStore) UpsertSizingDays(_ context.Context, systemID, reporterVersion string, days []store.SizingDayRows, now int64) (int, error) {
+func (f *fakeSizingStore) UpsertSizingDays(_ context.Context, systemID, reporterVersion string, days []sizingstore.SizingDayRows, now int64) (int, error) {
 	if f.upsertErr != nil {
 		return 0, f.upsertErr
 	}
@@ -54,18 +75,17 @@ func (f *fakeSizingStore) RecordSizingIngest(_ context.Context, day int64, syste
 	return nil
 }
 
-func sizingServer(st SizingStore) http.Handler {
-	return NewServer(&fakePublisher{}, nil,
-		StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		SizingConfig{
-			Store: st,
-			Now:   func() int64 { return sizingNow },
-		}, nil, nil)
+func sizingServer(st Store) http.Handler {
+	return NewServer(st, trustedProxy, Config{
+		MaxNodes: 500,
+		Now:      func() int64 { return sizingNow },
+	})
 }
 
 func postSizing(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/sizing-reports", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345" // the trusted proxy
 	if withAuth {
 		req.SetBasicAuth(testSystemID, testSecret)
 	}
@@ -135,6 +155,28 @@ func TestSizingIngestRequiresAuth(t *testing.T) {
 	}
 }
 
+// The credential is not verified in this process, so the trusted-proxy check
+// is the entire boundary: a direct connection must not be able to name a
+// system_id.
+func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
+	st := &fakeSizingStore{}
+	h := NewServer(st, trustedProxy, Config{MaxNodes: 500})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader(validReport("2026-09-01")))
+	r.RemoteAddr = "203.0.113.7:4444"
+	r.SetBasicAuth("someone-elses-system", "whatever")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if st.upserts != 0 {
+		t.Fatalf("a direct request stored %d reports", st.upserts)
+	}
+}
+
 func TestSizingIngestRejectsWrongSchemaVersion(t *testing.T) {
 	body := `{"schema_version":99,"days":[]}`
 	if rec := postSizing(t, sizingServer(&fakeSizingStore{}), body, true); rec.Code != http.StatusBadRequest {
@@ -153,25 +195,13 @@ func TestSizingIngestRejectsMismatchedSystemID(t *testing.T) {
 
 func TestSizingIngestRejectsNonPost(t *testing.T) {
 	h := sizingServer(&fakeSizingStore{})
-	req := httptest.NewRequest(http.MethodGet, "/v1/sizing-reports", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/reports", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
-	}
-}
-
-// The zero SizingConfig leaves the route unregistered, so a deployment that
-// has not wired the pipeline serves a plain 404 rather than a half-working
-// endpoint.
-func TestSizingRouteAbsentWhenUnconfigured(t *testing.T) {
-	h := NewServer(&fakePublisher{}, nil,
-		StaticAuth{SystemID: testSystemID, Secret: testSecret},
-		SizingConfig{}, nil, nil)
-	rec := postSizing(t, h, validReport("2026-09-01"), true)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 
@@ -184,7 +214,8 @@ func TestSizingIngestAcceptsGzip(t *testing.T) {
 	gz.Close()
 
 	st := &fakeSizingStore{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/sizing-reports", &buf)
+	req := httptest.NewRequest(http.MethodPost, "/v1/reports", &buf)
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	req.Header.Set("Content-Encoding", "gzip")
 	rec := httptest.NewRecorder()
@@ -199,7 +230,8 @@ func TestSizingIngestAcceptsGzip(t *testing.T) {
 }
 
 func TestSizingIngestRejectsDeclaredOversizeBody(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/v1/sizing-reports", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader("{}"))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(testSystemID, testSecret)
 	req.ContentLength = maxSizingReportSize + 1
 	rec := httptest.NewRecorder()

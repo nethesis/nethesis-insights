@@ -20,21 +20,21 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/sizing"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
 )
 
-// Reader is the slice of store.Store the pass needs. Declared here, like
+// Reader is the slice of sizingstore.Store the pass needs. Declared here, like
 // blocklist.Reader and ui.Reader, so this package is testable with a fake and
-// the layering stays a DAG. *store.SQLiteStore satisfies it.
+// the layering stays a DAG. *sizingstore.Store satisfies it.
 type Reader interface {
-	StaleSizingScores(ctx context.Context, version, limit int) ([]store.SizingNodeDayRow, error)
-	UpdateSizingScores(ctx context.Context, rows []store.SizingNodeDayRow) error
-	SizingWindow(ctx context.Context, fromDay, toDay int64) ([]store.SizingWindowRow, error)
-	SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) ([]store.SizingNodeFamilyRow, error)
-	SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) ([]store.SizingFamilyMetricRow, error)
+	StaleSizingScores(ctx context.Context, version, limit int) ([]sizingstore.SizingNodeDayRow, error)
+	UpdateSizingScores(ctx context.Context, rows []sizingstore.SizingNodeDayRow) error
+	SizingWindow(ctx context.Context, fromDay, toDay int64) ([]sizingstore.SizingWindowRow, error)
+	SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) ([]sizingstore.SizingNodeFamilyRow, error)
+	SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) ([]sizingstore.SizingFamilyMetricRow, error)
 	SizingVerdictStates(ctx context.Context) (map[string]string, error)
-	UpsertSizingVerdicts(ctx context.Context, rows []store.SizingVerdictRow) error
-	UpsertSizingCohorts(ctx context.Context, rows []store.SizingCohortRow) error
+	UpsertSizingVerdicts(ctx context.Context, rows []sizingstore.SizingVerdictRow) error
+	UpsertSizingCohorts(ctx context.Context, rows []sizingstore.SizingCohortRow) error
 	DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error)
 	RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error
 	PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error)
@@ -206,7 +206,7 @@ func (r *Runner) recompute(ctx context.Context) (int, error) {
 	for i := range stale {
 		row := &stale[i]
 		score := sizing.Evaluate(row.ScoreInput())
-		row.SetScore(store.SizingScore{
+		row.SetScore(sizingstore.SizingScore{
 			Pressure: score.Pressure,
 			Mem:      score.Mem,
 			CPU:      score.CPU,
@@ -263,11 +263,11 @@ type node struct {
 // Per-node: hardware that changed inside the window means the percentiles
 // would straddle two physical machines, so the node is excluded from demand
 // estimation entirely.
-func foldNodes(window []store.SizingWindowRow, fromDay int64, now int64) map[string]*node {
+func foldNodes(window []sizingstore.SizingWindowRow, fromDay int64, now int64) map[string]*node {
 	fromMillis := fromDay * sizing.DayMillis
 	out := map[string]*node{}
 	for _, row := range window {
-		key := store.SizingNodeKey(row.SystemID, row.NodeID)
+		key := sizingstore.SizingNodeKey(row.SystemID, row.NodeID)
 		n, seen := out[key]
 		if !seen {
 			n = &node{
@@ -321,9 +321,9 @@ func foldNodes(window []store.SizingWindowRow, fromDay int64, now int64) map[str
 
 // attachFamilies joins the module inventory and workload metrics onto the
 // folded nodes.
-func attachFamilies(nodes map[string]*node, families []store.SizingNodeFamilyRow, metrics []store.SizingFamilyMetricRow) {
+func attachFamilies(nodes map[string]*node, families []sizingstore.SizingNodeFamilyRow, metrics []sizingstore.SizingFamilyMetricRow) {
 	for _, f := range families {
-		n, ok := nodes[store.SizingNodeKey(f.SystemID, f.NodeID)]
+		n, ok := nodes[sizingstore.SizingNodeKey(f.SystemID, f.NodeID)]
 		if !ok {
 			continue
 		}
@@ -332,7 +332,7 @@ func attachFamilies(nodes map[string]*node, families []store.SizingNodeFamilyRow
 		}
 	}
 	for _, m := range metrics {
-		n, ok := nodes[store.SizingNodeKey(m.SystemID, m.NodeID)]
+		n, ok := nodes[sizingstore.SizingNodeKey(m.SystemID, m.NodeID)]
 		if !ok {
 			continue
 		}
@@ -348,7 +348,7 @@ func attachFamilies(nodes map[string]*node, families []store.SizingNodeFamilyRow
 // buildVerdicts is steps 2 and 3: the per-node k-of-n verdict, plus the
 // per-cluster placement answer denormalised onto every node of that cluster
 // so one query renders the page.
-func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDays, minDaysPresent int, now int64) []store.SizingVerdictRow {
+func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDays, minDaysPresent int, now int64) []sizingstore.SizingVerdictRow {
 	// Cluster placement first, because the verdict row carries it.
 	clusterRAMUtil := map[string][]float64{}
 	for _, n := range nodes {
@@ -357,11 +357,11 @@ func buildVerdicts(nodes map[string]*node, previous map[string]string, windowDay
 		}
 	}
 
-	out := make([]store.SizingVerdictRow, 0, len(nodes))
+	out := make([]sizingstore.SizingVerdictRow, 0, len(nodes))
 	for key, n := range nodes {
 		v := sizing.EvaluateVerdict(n.days, previous[key], minDaysPresent)
 
-		row := store.SizingVerdictRow{
+		row := sizingstore.SizingVerdictRow{
 			SystemID:    n.systemID,
 			NodeID:      n.nodeID,
 			Verdict:     v.State,
@@ -407,7 +407,7 @@ type cohort struct {
 
 // build is steps 4 and 5: the two-stage aggregation, the censoring exclusion,
 // the two keyings and the floor.
-func (r *Runner) build(nodes map[string]*node, now int64) []store.SizingCohortRow {
+func (r *Runner) build(nodes map[string]*node, now int64) []sizingstore.SizingCohortRow {
 	cohorts := map[cohortKey]*cohort{}
 
 	// Deterministic iteration: a published number must not depend on map
@@ -484,13 +484,13 @@ func (r *Runner) build(nodes map[string]*node, now int64) []store.SizingCohortRo
 // The floor counts **distinct system_id**, the same rule and the same reason
 // as Threat Shield's promotion: one MSP's forty identical clusters is one
 // opinion about hardware, not forty.
-func (r *Runner) publishCohorts(cohorts map[cohortKey]*cohort, now int64) []store.SizingCohortRow {
-	out := make([]store.SizingCohortRow, 0, len(cohorts))
+func (r *Runner) publishCohorts(cohorts map[cohortKey]*cohort, now int64) []sizingstore.SizingCohortRow {
+	out := make([]sizingstore.SizingCohortRow, 0, len(cohorts))
 	for id, c := range cohorts {
 		if len(c.systems) < r.cfg.MinDistinctSystems || c.nodes < r.cfg.MinNodes {
 			continue
 		}
-		row := store.SizingCohortRow{
+		row := sizingstore.SizingCohortRow{
 			CohortKind:         id.kind,
 			CohortKey:          id.key,
 			Nodes:              c.nodes,

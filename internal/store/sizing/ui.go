@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+package sizing
 
 import (
 	"context"
@@ -102,7 +102,7 @@ type SizingCounts struct {
 // than a window function: this has to run on SQLite today and Postgres later.
 // The NULL-aware ordering is written as (pressure IS NULL) rather than
 // NULLS LAST for the same reason.
-func (s *SQLiteStore) ListSizingNodes(ctx context.Context, systemID string, limit int) ([]SizingNodeUIRow, error) {
+func (s *Store) ListSizingNodes(ctx context.Context, systemID string, limit int) ([]SizingNodeUIRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.system_id, d.node_id, d.day, d.metrics_present, d.sample_coverage,
 			d.cpu_cores, d.mem_total_bytes, d.cpu_model, d.os_id, d.os_version, d.virtualization,
@@ -186,7 +186,7 @@ func (s *SQLiteStore) ListSizingNodes(ctx context.Context, systemID string, limi
 // The fold happens in Go and the grouping in SQL, following the threat
 // precedent: JSON is parsed in Go for display fields only, because whenever
 // the grouping is the correctness it belongs in SQL.
-func (s *SQLiteStore) ListSizingModules(ctx context.Context, systemID string, limit int) ([]SizingModuleUIRow, error) {
+func (s *Store) ListSizingModules(ctx context.Context, systemID string, limit int) ([]SizingModuleUIRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.system_id, m.node_id, m.day, m.module_family, m.instances, m.facts_ok, m.versions
 		FROM sizing_module_daily m
@@ -291,7 +291,7 @@ func moduleKey(systemID string, nodeID int, day int64, family string) string {
 // one kind. An empty result is the correct answer for a fleet below the
 // floor -- the page says "insufficient fleet data" rather than showing a
 // percentile computed from three nodes.
-func (s *SQLiteStore) ListSizingCohorts(ctx context.Context, kind string, limit int) ([]SizingCohortRow, error) {
+func (s *Store) ListSizingCohorts(ctx context.Context, kind string, limit int) ([]SizingCohortRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT cohort_kind, cohort_key, nodes, distinct_systems, censored_nodes,
 			ram_used_p50, ram_used_p75, ram_used_p90,
@@ -326,7 +326,7 @@ func (s *SQLiteStore) ListSizingCohorts(ctx context.Context, kind string, limit 
 // SizingIngestStats returns the per-day, per-system drop accounting, newest
 // first. This is how "why does this cluster send but store nothing" is
 // answered without reading logs.
-func (s *SQLiteStore) SizingIngestStats(ctx context.Context, limit int) ([]SizingIngestRow, error) {
+func (s *Store) SizingIngestStats(ctx context.Context, limit int) ([]SizingIngestRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT day, system_id, reports, last_report_at, reporter_version,
 			accepted_nodes, accepted_modules, accepted_metrics,
@@ -363,7 +363,7 @@ func (s *SQLiteStore) SizingIngestStats(ctx context.Context, limit int) ([]Sizin
 }
 
 // SizingCounts is the status page's one-line summary of the pipeline.
-func (s *SQLiteStore) SizingCounts(ctx context.Context) (SizingCounts, error) {
+func (s *Store) SizingCounts(ctx context.Context) (SizingCounts, error) {
 	var c SizingCounts
 
 	var latest, lastReport sql.NullInt64

@@ -1,7 +1,17 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package store
+// Package sizing is fleet sizing's storage: ingest, the cohort pass's inputs
+// and outputs, and the rollups that outlive the daily rows. It is sizingd's
+// only store package -- a separate SQLite file from the logs and Threat
+// Shield pipelines, sharing nothing with them but the sqlitex runtime
+// settings.
+//
+// This file (store.go) deliberately imports nothing but model and platform
+// packages. The pressure formula lives in internal/sizing (pure) and reaches
+// the store as already-derived columns on SizingNodeDayRow, so "what the
+// score is" and "where rows go" can never drift into each other.
+package sizing
 
 import (
 	"context"
@@ -13,16 +23,291 @@ import (
 	"github.com/uptrace/bun"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/sqlitex"
 )
 
-// Fleet-sizing storage: ingest, the cohort pass's inputs and outputs, and the
-// rollups that outlive the daily rows. Write methods take the same mutex as
-// the rest of the store; read methods do not.
+// Store is fleet sizing's SQLite-backed store: ingest, the cohort pass's
+// reads and writes, and the operator UI's reads. Write methods take the
+// shared write mutex (sqlitex.DB.Lock/Unlock); read methods do not.
+type Store struct {
+	db *sqlitex.DB
+}
+
+// Open opens the fleet-sizing database at path with the project's standard
+// SQLite runtime settings (WAL, busy_timeout, a single connection plus the
+// write mutex) -- see internal/platform/sqlitex.
+func Open(path string) (*Store, error) {
+	db, err := sqlitex.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("sizing: open: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+const dayMillis = 86400000
+
+// Init creates fleet sizing's nine tables if they do not already exist.
 //
-// This file deliberately imports nothing but model. The pressure formula
-// lives in internal/sizing (pure) and reaches the store as already-derived
-// columns on SizingNodeDayRow, so "what the score is" and "where rows go" can
-// never drift into each other.
+// Two conventions run through every table here.
+//
+// `day` is an INTEGER **UTC day index** (unix millis / 86400000), NOT a TEXT
+// 'YYYY-MM-DD'. These tables are range-queried constantly (a 28-day verdict
+// window, a 90-day UI, a prune below a cutoff), and an integer index does all
+// three with the arithmetic this codebase already performs, removing the bug
+// class where a formatter with the wrong location writes two rows for one
+// day. The monthly rollup goes the other way -- month TEXT 'YYYY-MM' --
+// because nothing does arithmetic on months.
+//
+// There are **no surrogate ULIDs** on these tables. The project bans
+// AUTOINCREMENT/SERIAL; it does not mandate a surrogate, and a bare composite
+// PK is used throughout. Said out loud here because a reader will otherwise
+// over-apply the rule.
+func (s *Store) Init(ctx context.Context) error {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	stmts := []string{
+		// One node-day of measurements, keyed (system_id, node_id, day). A
+		// system_id is a *cluster*, so one report carries N of these rows.
+		//
+		// Every measurement column is nullable, and NULL means "not
+		// measured" -- never zero. A zero says "measured, and fine", which is
+		// the opposite. pressure is NULL whenever the coverage gate refused
+		// to score, because a score derived from missing data is worse than
+		// no score.
+		//
+		// UPSERT IDIOM: **recompute**. A day is an absolute fact, so the
+		// second and third daily sends are byte-identical restatements and
+		// must overwrite rather than accumulate. sizing_ingest_daily below is
+		// the one table here that accumulates; mixing the two silently is
+		// exactly why each is commented.
+		`CREATE TABLE IF NOT EXISTS sizing_node_daily (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			received_at INTEGER,
+			reporter_version TEXT,
+			metrics_present INTEGER,
+			sample_coverage REAL,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			cpu_model TEXT,
+			os_id TEXT,
+			os_version TEXT,
+			kernel_release TEXT,
+			virtualization TEXT,
+			ram_util_p95 REAL,
+			ram_used_bytes_p95 REAL,
+			cpu_util_p95 REAL,
+			cpu_cores_used_p95 REAL,
+			load15_per_core_p95 REAL,
+			fs_used_frac_max REAL,
+			fs_days_to_full REAL,
+			disk_io_util_p95 REAL,
+			iowait_busy_frac REAL,
+			swapin_pps_p95 REAL,
+			oom_kills REAL,
+			reboots REAL,
+			pressure REAL,
+			p_mem REAL,
+			p_cpu REAL,
+			p_io REAL,
+			p_disk REAL,
+			pressure_top_axis TEXT,
+			pressure_reasons TEXT,
+			pressure_version INTEGER,
+			PRIMARY KEY (system_id, node_id, day)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_node_daily_day ON sizing_node_daily(day)`,
+		// So a pressure_version bump can find the rows it has to recompute
+		// without a full scan of 100 days of node-days.
+		`CREATE INDEX IF NOT EXISTS idx_sizing_node_daily_version
+			ON sizing_node_daily(pressure_version, day)`,
+		// One module family per node-day. module_family is the family
+		// (model.ModuleFamily), never the instance. versions is JSON TEXT and
+		// display-only -- a version is not extensive, so it is never a
+		// workload metric and never a cohort key. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_module_daily (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			module_family TEXT,
+			instances INTEGER,
+			facts_ok INTEGER,
+			versions TEXT,
+			PRIMARY KEY (system_id, node_id, day, module_family)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_daily_day ON sizing_module_daily(day)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_daily_family
+			ON sizing_module_daily(module_family, day)`,
+		// The open workload map, NORMALISED TO ROWS rather than stored as a
+		// JSON blob. The project forbids json1/jsonb, so a blob would force
+		// the cohort pass to pull ~1.4M rows through a SetMaxOpenConns(1)
+		// connection and JSON-parse each one, hourly. The threat precedent
+		// parses JSON in Go for *display* fields only and groups in SQL,
+		// because the grouping is the correctness. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_module_metric (
+			system_id TEXT,
+			node_id INTEGER,
+			day INTEGER,
+			module_family TEXT,
+			metric TEXT,
+			value REAL,
+			PRIMARY KEY (system_id, node_id, day, module_family, metric)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_metric_day ON sizing_module_metric(day)`,
+		`CREATE INDEX IF NOT EXISTS idx_sizing_module_metric_family
+			ON sizing_module_metric(module_family, metric, day)`,
+		// Cluster-wide counters that belong to no single node: the summed
+		// user_domains totals from cluster/get-facts. openldap has no
+		// get-facts of its own and needs none, so this is where its workload
+		// lives. Recompute upsert.
+		`CREATE TABLE IF NOT EXISTS sizing_cluster_daily (
+			system_id TEXT,
+			day INTEGER,
+			metric TEXT,
+			value REAL,
+			PRIMARY KEY (system_id, day, metric)
+		)`,
+		// The node dimension, and the fix for the unstable-identity problem:
+		// `node` is a small integer scoped to a cluster, so a rebuilt cluster
+		// reuses system_id with fresh ids and a replaced machine keeps its id
+		// with different hardware. hw_changed_at is when the installed
+		// capacity last changed under a stable (system_id, node_id) -- the
+		// cohort pass excludes nodes whose hardware changed inside its
+		// window, because those percentiles straddle two physical machines.
+		`CREATE TABLE IF NOT EXISTS sizing_node (
+			system_id TEXT,
+			node_id INTEGER,
+			first_seen INTEGER,
+			last_seen INTEGER,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			hw_changed_at INTEGER,
+			PRIMARY KEY (system_id, node_id)
+		)`,
+		// Per-rule drop accounting, one row per (day, system_id).
+		//
+		// UPSERT IDIOM: **accumulate** -- the opposite of every other sizing
+		// table. A day posted three times is one set of measurements and
+		// three requests' worth of counters, and that difference is what
+		// makes "this cluster sends but stores nothing, and here is the rule
+		// dropping it" answerable from the UI instead of from logs. There is
+		// a test asserting both halves.
+		`CREATE TABLE IF NOT EXISTS sizing_ingest_daily (
+			day INTEGER,
+			system_id TEXT,
+			reports INTEGER,
+			last_report_at INTEGER,
+			reporter_version TEXT,
+			accepted_nodes INTEGER,
+			accepted_modules INTEGER,
+			accepted_metrics INTEGER,
+			dropped_day INTEGER,
+			dropped_duplicate INTEGER,
+			dropped_node INTEGER,
+			dropped_family INTEGER,
+			dropped_metric_key INTEGER,
+			dropped_metric_value INTEGER,
+			dropped_resource_value INTEGER,
+			truncated_days INTEGER,
+			truncated_nodes INTEGER,
+			truncated_families INTEGER,
+			truncated_metrics INTEGER,
+			PRIMARY KEY (day, system_id)
+		)`,
+		// Monthly rollup, kept indefinitely (~49k rows/yr) so the fleet keeps
+		// a history after sizing_node_daily is pruned at SIZING_RETENTION.
+		// month is TEXT 'YYYY-MM': nothing does arithmetic on months, and the
+		// aggregates are computed in SQL over an explicit day range whose
+		// bounds Go supplies -- SQLite and Postgres share no date function.
+		//
+		// Every column names its own composition (pressure_max, not
+		// pressure): load15_avg holding a peak is exactly the bug this
+		// convention prevents.
+		`CREATE TABLE IF NOT EXISTS sizing_node_monthly (
+			system_id TEXT,
+			node_id INTEGER,
+			month TEXT,
+			days_present INTEGER,
+			days_scored INTEGER,
+			bad_days INTEGER,
+			pressure_avg REAL,
+			pressure_max REAL,
+			ram_util_p95_max REAL,
+			ram_used_bytes_p95_max REAL,
+			cpu_util_p95_max REAL,
+			cpu_cores_used_p95_max REAL,
+			fs_used_frac_max_max REAL,
+			oom_kills_total REAL,
+			cpu_cores INTEGER,
+			mem_total_bytes INTEGER,
+			PRIMARY KEY (system_id, node_id, month)
+		)`,
+		// The multi-day verdict. cluster_* is denormalised onto every node of
+		// a cluster on purpose, so one query renders the page; placement is
+		// "rebalance" or "balanced" and is empty for a single-node cluster,
+		// which has no placement answer at all.
+		`CREATE TABLE IF NOT EXISTS sizing_node_verdict (
+			system_id TEXT,
+			node_id INTEGER,
+			verdict TEXT,
+			top_axis TEXT,
+			days_present INTEGER,
+			bad_days INTEGER,
+			risk_days INTEGER,
+			window_days INTEGER,
+			cluster_nodes INTEGER,
+			cluster_ram_util_spread REAL,
+			placement TEXT,
+			updated_at INTEGER,
+			PRIMARY KEY (system_id, node_id)
+		)`,
+		// Published cohort baselines. Absolute bytes and cores, not
+		// utilization: utilization is a property of hardware someone happened
+		// to buy, and the deliverable is advice on what to buy.
+		// installed_ram_* sits alongside so the residual bias (MemTotal -
+		// MemAvailable scales mildly with installed RAM) is visible rather
+		// than hidden, and censored_nodes is published rather than swallowed
+		// -- a cohort that is 40 % censored is the most valuable finding this
+		// pass can produce.
+		`CREATE TABLE IF NOT EXISTS sizing_cohort_baseline (
+			cohort_kind TEXT,
+			cohort_key TEXT,
+			nodes INTEGER,
+			distinct_systems INTEGER,
+			censored_nodes INTEGER,
+			ram_used_p50 REAL,
+			ram_used_p75 REAL,
+			ram_used_p90 REAL,
+			cpu_cores_used_p50 REAL,
+			cpu_cores_used_p75 REAL,
+			cpu_cores_used_p90 REAL,
+			installed_ram_p50 REAL,
+			installed_ram_p90 REAL,
+			installed_cores_p50 REAL,
+			installed_cores_p90 REAL,
+			window_days INTEGER,
+			min_distinct_systems INTEGER,
+			min_nodes INTEGER,
+			pressure_version INTEGER,
+			updated_at INTEGER,
+			PRIMARY KEY (cohort_kind, cohort_key)
+		)`,
+	}
+
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("sizing: init: %w", err)
+		}
+	}
+
+	return nil
+}
 
 // MonthlyBadDayPressure is the pressure at which the monthly rollup counts a
 // day as bad. It is deliberately a plain number here rather than an import of
@@ -220,13 +505,13 @@ type SizingIngestRow struct {
 //
 // sizing_ingest_daily is the one sizing table that accumulates, and it is
 // written by RecordSizingIngest, not here.
-func (s *SQLiteStore) UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []SizingDayRows, now int64) (int, error) {
+func (s *Store) UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []SizingDayRows, now int64) (int, error) {
 	if len(days) == 0 {
 		return 0, nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -441,9 +726,9 @@ func replaceSizingClusterDay(ctx context.Context, tx bun.Tx, systemID string, da
 // When a report carried no usable day at all, day is 0 and the counters land
 // under the day the request arrived -- there is nowhere else to put them, and
 // dropping them would hide precisely the reporter that needs fixing.
-func (s *SQLiteStore) RecordSizingIngest(ctx context.Context, day int64, systemID, reporterVersion string, c model.SizingCounters, now int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) RecordSizingIngest(ctx context.Context, day int64, systemID, reporterVersion string, c model.SizingCounters, now int64) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	if day == 0 {
 		day = now / dayMillis
@@ -494,7 +779,7 @@ func (s *SQLiteStore) RecordSizingIngest(ctx context.Context, day int64, systemI
 // unbounded rewrite of 100 days of history through a single-writer
 // connection; the pass simply catches up over several runs. Newest first
 // because the trailing verdict window is what a stale score breaks first.
-func (s *SQLiteStore) StaleSizingScores(ctx context.Context, version, limit int) ([]SizingNodeDayRow, error) {
+func (s *Store) StaleSizingScores(ctx context.Context, version, limit int) ([]SizingNodeDayRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, node_id, day, metrics_present, sample_coverage,
 			cpu_cores, mem_total_bytes,
@@ -545,13 +830,13 @@ func (s *SQLiteStore) StaleSizingScores(ctx context.Context, version, limit int)
 }
 
 // UpdateSizingScores writes recomputed pressure back, touching nothing else.
-func (s *SQLiteStore) UpdateSizingScores(ctx context.Context, rows []SizingNodeDayRow) error {
+func (s *Store) UpdateSizingScores(ctx context.Context, rows []SizingNodeDayRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -588,7 +873,7 @@ func (s *SQLiteStore) UpdateSizingScores(ctx context.Context, rows []SizingNodeD
 // One query serves three of the pass's steps -- the verdicts, the cluster
 // imbalance and the cohort reduction -- because they read the same rows and a
 // second query would be a second chance for them to disagree.
-func (s *SQLiteStore) SizingWindow(ctx context.Context, fromDay, toDay int64) ([]SizingWindowRow, error) {
+func (s *Store) SizingWindow(ctx context.Context, fromDay, toDay int64) ([]SizingWindowRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.system_id, d.node_id, d.day, d.sample_coverage, d.cpu_cores, d.mem_total_bytes,
 			n.hw_changed_at, d.pressure, d.pressure_top_axis,
@@ -640,7 +925,7 @@ func (s *SQLiteStore) SizingWindow(ctx context.Context, fromDay, toDay int64) ([
 // window with the window's maximum instances and facts_ok. MAX and not SUM:
 // these say what was installed on a day, and summing 28 days of them would
 // report 56 nethvoice instances on a node that has always had two.
-func (s *SQLiteStore) SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) ([]SizingNodeFamilyRow, error) {
+func (s *Store) SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) ([]SizingNodeFamilyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, node_id, module_family, MAX(instances), MAX(facts_ok)
 		FROM sizing_module_daily
@@ -671,7 +956,7 @@ func (s *SQLiteStore) SizingWindowFamilies(ctx context.Context, fromDay, toDay i
 
 // SizingWindowMetrics returns each (system, node, family, metric) in the
 // window reduced with MAX, for the same reason as SizingWindowFamilies.
-func (s *SQLiteStore) SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) ([]SizingFamilyMetricRow, error) {
+func (s *Store) SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) ([]SizingFamilyMetricRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, node_id, module_family, metric, MAX(value)
 		FROM sizing_module_metric
@@ -702,7 +987,7 @@ func (s *SQLiteStore) SizingWindowMetrics(ctx context.Context, fromDay, toDay in
 // SizingVerdictStates returns the current verdict per node, keyed
 // "<system_id>/<node_id>". The pass needs it because the verdict has
 // hysteresis: once undersized, it holds until the bad days fall away.
-func (s *SQLiteStore) SizingVerdictStates(ctx context.Context) (map[string]string, error) {
+func (s *Store) SizingVerdictStates(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT system_id, node_id, verdict FROM sizing_node_verdict`)
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing verdict states: %w", err)
@@ -731,13 +1016,13 @@ func SizingNodeKey(systemID string, nodeID int) string {
 }
 
 // UpsertSizingVerdicts replaces the verdict rows the pass recomputed.
-func (s *SQLiteStore) UpsertSizingVerdicts(ctx context.Context, rows []SizingVerdictRow) error {
+func (s *Store) UpsertSizingVerdicts(ctx context.Context, rows []SizingVerdictRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -776,13 +1061,13 @@ func (s *SQLiteStore) UpsertSizingVerdicts(ctx context.Context, rows []SizingVer
 }
 
 // UpsertSizingCohorts publishes the baselines that cleared the floor.
-func (s *SQLiteStore) UpsertSizingCohorts(ctx context.Context, rows []SizingCohortRow) error {
+func (s *Store) UpsertSizingCohorts(ctx context.Context, rows []SizingCohortRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -838,9 +1123,9 @@ func (s *SQLiteStore) UpsertSizingCohorts(ctx context.Context, rows []SizingCoho
 // Deleting rather than leaving a stale row, mirroring ExpireBlocklist: a
 // published baseline that no longer has the evidence behind it is worse than
 // no baseline, because nothing on the page says how old it is.
-func (s *SQLiteStore) DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) DeleteStaleSizingCohorts(ctx context.Context, before int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM sizing_cohort_baseline WHERE updated_at IS NULL OR updated_at < ?`, before)
@@ -879,7 +1164,7 @@ type sizingMonthlyRow struct {
 // It recomputes rather than accumulates, so running it twice, or after a
 // missed pass, converges instead of double counting. It must run BEFORE
 // PruneSizingDaily, or the day being dropped loses its history permanently.
-func (s *SQLiteStore) RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error {
+func (s *Store) RollupSizingMonthly(ctx context.Context, fromDay, toDay int64) error {
 	for _, m := range monthRanges(fromDay, toDay) {
 		rows, err := s.readSizingMonthly(ctx, m.label, m.from, m.to)
 		if err != nil {
@@ -926,7 +1211,7 @@ func monthRanges(fromDay, toDay int64) []monthRange {
 
 // readSizingMonthly is the read half, split from the write half so its rows
 // are closed before the write mutex is taken.
-func (s *SQLiteStore) readSizingMonthly(ctx context.Context, month string, fromDay, toDay int64) ([]sizingMonthlyRow, error) {
+func (s *Store) readSizingMonthly(ctx context.Context, month string, fromDay, toDay int64) ([]sizingMonthlyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT system_id, node_id, COUNT(*), COUNT(pressure),
 			SUM(CASE WHEN pressure >= ? THEN 1 ELSE 0 END),
@@ -958,9 +1243,9 @@ func (s *SQLiteStore) readSizingMonthly(ctx context.Context, month string, fromD
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) writeSizingMonthly(ctx context.Context, rows []sizingMonthlyRow) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) writeSizingMonthly(ctx context.Context, rows []sizingMonthlyRow) error {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1010,9 +1295,9 @@ func (s *SQLiteStore) writeSizingMonthly(ctx context.Context, rows []sizingMonth
 // It must run AFTER RollupSizingMonthly, or the day being dropped loses its
 // history permanently -- the same ordering constraint, and the same reason, as
 // PruneThreatEvents.
-func (s *SQLiteStore) PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) PruneSizingDaily(ctx context.Context, olderThanDay int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

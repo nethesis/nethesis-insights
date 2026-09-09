@@ -80,11 +80,10 @@ type Publisher interface {
 }
 
 type server struct {
-	queue  Publisher
-	store  store.Store
-	auth   Authenticator
-	sizing SizingConfig
-	mux    *http.ServeMux
+	queue Publisher
+	store store.Store
+	auth  Authenticator
+	mux   *http.ServeMux
 
 	// excludeModules names modules dropped from every bundle before it is
 	// queued, and excludeServices names syslog identifiers dropped the same
@@ -94,25 +93,16 @@ type server struct {
 	excludeServices map[string]bool
 }
 
-// NewServer builds the ingest and read API.
-//
-// sc wires the fleet-sizing endpoint, a separate pipeline sharing only this
-// listener and the Authenticator; its zero value leaves the route
-// unregistered. excludeModules and excludeServices name modules and syslog
-// identifiers stripped from every incoming bundle; nil keeps all of them.
-func NewServer(q Publisher, s store.Store, auth Authenticator, sc SizingConfig, excludeModules, excludeServices map[string]bool) http.Handler {
-	if sc.Now == nil {
-		sc.Now = func() int64 { return time.Now().UnixMilli() }
-	}
-	srv := &server{queue: q, store: s, auth: auth, sizing: sc,
+// NewServer builds the ingest and read API. excludeModules and
+// excludeServices name modules and syslog identifiers stripped from every
+// incoming bundle; nil keeps all of them.
+func NewServer(q Publisher, s store.Store, auth Authenticator, excludeModules, excludeServices map[string]bool) http.Handler {
+	srv := &server{queue: q, store: s, auth: auth,
 		excludeModules: excludeModules, excludeServices: excludeServices}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
 	mux.HandleFunc("/healthz", srv.handleHealthz)
-	if sc.enabled() {
-		mux.HandleFunc("/v1/sizing-reports", srv.handleSizingReports)
-	}
 	srv.mux = mux
 	return &loggingHandler{next: mux}
 }

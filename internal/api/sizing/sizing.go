@@ -1,46 +1,28 @@
 // Copyright (C) 2026 Nethesis S.r.l.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package api
+package sizing
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
-	"github.com/nethesis/nethesis-insights/internal/store"
+	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
 )
-
-// SizingStore is the slice of the store the sizing ingest handler needs.
-// Declared here, narrow, so the handler is testable with a small fake instead
-// of a fifty-method stub. *store.SQLiteStore satisfies it.
-type SizingStore interface {
-	UpsertSizingDays(ctx context.Context, systemID, reporterVersion string, days []store.SizingDayRows, now int64) (int, error)
-	RecordSizingIngest(ctx context.Context, day int64, systemID, reporterVersion string, c model.SizingCounters, now int64) error
-}
-
-// SizingConfig wires POST /v1/sizing-reports. The zero value leaves it
-// unregistered, which is what api's own tests use.
-type SizingConfig struct {
-	Store    SizingStore
-	MaxNodes int
-	Now      func() int64
-}
-
-func (c SizingConfig) enabled() bool { return c.Store != nil }
 
 // maxSizingReportSize matches the bundle and threat limits. A report is a
 // handful of numbers per node per day, so it is far smaller in practice; the
 // cap exists to bound a malicious or broken reporter, not the honest one.
 const maxSizingReportSize = 8 << 20 // 8 MiB
 
-// handleSizingReports ingests one cluster's complete-day workload and
-// performance report.
+// handleReports ingests one cluster's complete-day workload and performance
+// report.
 //
 // Fail-closed on authentication, fail-open on content: a malformed node,
 // family or metric is dropped with a counter and the rest of the report is
@@ -51,14 +33,15 @@ const maxSizingReportSize = 8 << 20 // 8 MiB
 // scoring at the edge would make every node an uncoordinated second
 // implementation of the formula, and then a threshold recalibration would
 // need the fleet's cooperation instead of one recompute pass.
-func (s *server) handleSizingReports(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	authenticatedSystemID, ok := s.authenticate(w, r)
-	if !ok {
+	authenticatedSystemID, err := httpx.SystemID(r, s.trusted)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -96,23 +79,23 @@ func (s *server) handleSizingReports(w http.ResponseWriter, r *http.Request) {
 	}
 	// system_id is optional -- the credential already identifies the reporter
 	// -- but a mismatch is a broken reporter, not something to silently
-	// override. Same rule as handleBundles.
+	// override. Same rule as insightsd's bundle ingest.
 	if report.SystemID != "" && report.SystemID != authenticatedSystemID {
 		reject(w, r, http.StatusForbidden, "system_id does not match authenticated system",
 			"report_system_id", report.SystemID, "authenticated_system_id", authenticatedSystemID)
 		return
 	}
 
-	now := s.sizing.Now()
-	res := sizing.Sanitize(report, sizing.Options{MaxNodes: s.sizing.MaxNodes}, now)
+	now := s.cfg.Now()
+	res := sizing.Sanitize(report, sizing.Options{MaxNodes: s.cfg.MaxNodes}, now)
 	reporterVersion := sizing.CleanReporterVersion(report.ReporterVersion)
 
 	days := scoreSizingDays(res.Days)
 
-	stored, err := s.sizing.Store.UpsertSizingDays(r.Context(), authenticatedSystemID, reporterVersion, days, now)
+	stored, err := s.store.UpsertSizingDays(r.Context(), authenticatedSystemID, reporterVersion, days, now)
 	if err != nil {
 		slog.Error("upsert sizing days failed", "system_id", authenticatedSystemID, "error", err)
-		writeJSONError(w, http.StatusServiceUnavailable, "temporarily unavailable")
+		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
 	}
 
@@ -124,7 +107,7 @@ func (s *server) handleSizingReports(w http.ResponseWriter, r *http.Request) {
 	if n := len(days); n > 0 {
 		counterDay = days[n-1].Day
 	}
-	if err := s.sizing.Store.RecordSizingIngest(r.Context(), counterDay, authenticatedSystemID, reporterVersion, res.Counters, now); err != nil {
+	if err := s.store.RecordSizingIngest(r.Context(), counterDay, authenticatedSystemID, reporterVersion, res.Counters, now); err != nil {
 		slog.Error("record sizing ingest failed", "system_id", authenticatedSystemID, "error", err)
 	}
 
@@ -159,12 +142,12 @@ type sizingIngestResponse struct {
 // Kept as a function rather than inlined because internal/baseline runs the
 // same Evaluate over rows it read back after a pressure_version bump, and the
 // two paths must not be able to score differently.
-func scoreSizingDays(days []model.SanitizedSizingDay) []store.SizingDayRows {
-	out := make([]store.SizingDayRows, 0, len(days))
+func scoreSizingDays(days []model.SanitizedSizingDay) []sizingstore.SizingDayRows {
+	out := make([]sizingstore.SizingDayRows, 0, len(days))
 	for _, d := range days {
-		row := store.SizingDayRows{Day: d.Day, ClusterWorkload: d.ClusterWorkload}
+		row := sizingstore.SizingDayRows{Day: d.Day, ClusterWorkload: d.ClusterWorkload}
 		for _, n := range d.Nodes {
-			row.Nodes = append(row.Nodes, store.SizingNodeDayRow{
+			row.Nodes = append(row.Nodes, sizingstore.SizingNodeDayRow{
 				NodeID:         n.NodeID,
 				MetricsPresent: n.MetricsPresent,
 				SampleCoverage: n.SampleCoverage,
@@ -174,7 +157,7 @@ func scoreSizingDays(days []model.SanitizedSizingDay) []store.SizingDayRows {
 				Modules:        n.Modules,
 			})
 			score := sizing.Evaluate(n)
-			row.Nodes[len(row.Nodes)-1].SetScore(store.SizingScore{
+			row.Nodes[len(row.Nodes)-1].SetScore(sizingstore.SizingScore{
 				Pressure: score.Pressure,
 				Mem:      score.Mem,
 				CPU:      score.CPU,

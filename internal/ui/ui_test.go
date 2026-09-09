@@ -33,12 +33,6 @@ type fakeReader struct {
 	templates []store.TemplateRow
 	baselines []store.BaselineRow
 
-	sizingCounts  store.SizingCounts
-	sizingNodes   []store.SizingNodeUIRow
-	sizingModules []store.SizingModuleUIRow
-	sizingCohorts []store.SizingCohortRow
-	sizingIngest  []store.SizingIngestRow
-
 	err error // when set, every method returns this error instead
 }
 
