@@ -1902,8 +1902,11 @@ Environment=LISTEN_ADDR=127.0.0.1:9605
 Environment=UI_LISTEN_ADDR=127.0.0.1:9606
 Environment=UI_BASE_PATH=/blocklist
 Environment=DB_PATH=/var/lib/threat/threat.db
-Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
 EnvironmentFile=/etc/insights/threatd.env
+# Each unit's OWN port. In a shared namespace a healthcheck pointed at the
+# wrong port succeeds against a sibling container and reports its health as
+# this one's -- a failure that looks like everything is fine.
 HealthCmd=wget -qO- http://127.0.0.1:9605/healthz || exit 1
 HealthInterval=30s
 HealthRetries=3
@@ -2073,6 +2076,11 @@ journalctl -u threatd -n 50 | grep remote_addr | head
 curl -sS --max-time 3 http://127.0.0.1:9606/ ; echo "exit=$?"
 curl -sS --max-time 3 "http://$(hostname -I | awk '{print $1}'):9606/" ; echo "exit=$?"
 
+# Run these from a WORKSTATION, not on the box. The pod's own 80/443 publish is
+# still a DNAT: inbound from the internet preserves the source address, so
+# Traefik sees the real client -- but an on-box curl to the public name
+# hairpins and IS masqueraded, so it fails for a reason that has nothing to do
+# with the deployment.
 curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/v1/feed
 # 401 without a credential
 

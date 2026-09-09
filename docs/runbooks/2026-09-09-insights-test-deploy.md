@@ -10,9 +10,19 @@ command to run when the deployment is actually performed, not a result already
 observed. Where a fact could only be established by changing the machine, it is listed
 in "Open questions" instead of being guessed at.
 
-The deployment is: Traefik on host networking terminating TLS for one host, three
-pipeline containers (`insightsd`, `threatd`, `sizingd`) and one forward-auth cache
-(`authd`) published to loopback, three SQLite volumes, managed by podman quadlets.
+The deployment is: five containers — Traefik, one forward-auth cache (`authd`) and three
+pipelines (`insightsd`, `threatd`, `sizingd`) — **sharing a single podman pod**, three
+SQLite volumes, managed by podman quadlets. The pod publishes 80 and 443 and nothing
+else.
+
+> **Revision, 2026-09-09.** This document was first written against an earlier
+> arrangement in which each container published its own port to `127.0.0.1` and Traefik
+> ran with host networking. The plan was then amended (`docs/plans/2026-09-09-pipeline-split.md`,
+> "Ports and environment" and Task 9 Step 2) to put all five in one pod. The survey in
+> §1 is unchanged — the machine did not change, only the deployment model — but §4, §5
+> and §6 are rewritten, and the finding that used to sit in §4 is now dissolved rather
+> than worked around. §4 keeps the reasoning anyway, because a reader who finds only the
+> conclusion cannot tell whether it was thought about.
 
 ---
 
@@ -57,13 +67,27 @@ way it differs from `rl1`.
 Two consequences worth stating up front, because they set the shape of everything below.
 
 **This box is a blank slate, and it is unfirewalled.** There is no host packet filter of
-any kind — not disabled, *absent*. Ports 80 and 443 are reachable from the internet the
-moment something binds them, which is exactly what makes ACME HTTP-01 workable with no
-extra step. It also means `PublishPort=127.0.0.1:…` is the **only** thing keeping the
-three pipelines and `authd` off the public internet. A quadlet that says `PublishPort=9605:9595`
-instead of `PublishPort=127.0.0.1:9605:9595` publishes an unauthenticated operator surface
-to the world here, with nothing behind it to catch the mistake. Treat the loopback prefix
-in every `PublishPort=` line as load-bearing, not stylistic.
+any kind — not disabled, *absent*. `firewalld` is inactive and not even installed;
+`firewall-cmd`, `nft` and `iptables` are all missing from the filesystem. Ports 80 and
+443 are reachable from the internet the moment something binds them, which is exactly
+what makes ACME HTTP-01 workable with no extra step. It is also why the pod matters more
+here than it would on a firewalled host.
+
+The three operator UIs are unauthenticated and fleet-wide by design — `/logs`,
+`/blocklist` and `/sizing` between them expose every `system_id` in the fleet, its
+security-category findings, the LLM spend, and the whole threat blocklist. Under the
+earlier published-port arrangement, the only thing keeping those off the public internet
+on this machine was the `127.0.0.1:` prefix on seven `PublishPort=` lines: a single
+`PublishPort=9606:9596` typo would have published a fleet-wide security dashboard to the
+world, with **nothing behind it to catch the mistake** — no firewall to fail closed, no
+default-deny zone, no second layer of any kind.
+
+In a pod that failure mode does not exist. The pipeline containers have no published port
+at all; only `insights.pod` publishes, and it publishes 80 and 443. There is no
+`PublishPort=` line in any `.container` unit to get wrong. The single route to an operator
+UI is through Traefik's `operator-auth` BasicAuth middleware. On a machine with no
+firewall, "has no published port" is worth considerably more than "bound to
+`127.0.0.1`", because the former survives a typo and the latter is the typo.
 
 **Cockpit is already exposed.** `cockpit.socket` is enabled and `*:9090` answers from the
 internet (verified: TCP connect succeeds from the workstation). It is not ours and this
@@ -86,16 +110,37 @@ work.
 | **`container-selinux` is not installed and SELinux is Enforcing.** Without the policy module, container processes run unconfined-or-denied and every bind mount of host config into a container is denied. | Install it alongside podman (it is a hard dependency of `podman` on EL10, so a plain `dnf install podman` pulls it — verify with `rpm -q container-selinux` afterwards rather than assuming). |
 | **No `/var/lib/containers`.** Image and volume storage does not exist yet. | Created on podman's first run, on `/` — 57 GB free, ample. Four Go-on-alpine images plus Traefik is well under 1 GB. |
 
-### 2.2 Blocking — the `127.0.0.1` assumption in the plan is wrong as written
+### 2.2 Not a gap — quadlet pod support is available
 
-This has its own section (§4) because it is the failure the brief specifically warned
-about, and because it is the one that will present as an auth bug.
+The deployment needs `.pod` quadlet units and the `.container` `Pod=` key. Both were
+introduced in **Podman 5.0**; before that, quadlet could define networks and volumes but
+not pods, and a pod had to be built by a wrapper unit calling `podman pod create`.
 
-### 2.3 Blocking — the hostname is baked into a committed file
+Rocky 10 appstream offers **`podman 5.8.2-5.el10_2`** (`dnf -q --cacheonly list --available podman`),
+so the floor is met with several minor versions to spare. Record the floor rather than
+the observed version: **this deployment requires podman ≥ 5.0**, and anything EL10 ships
+will satisfy it.
+
+**Check**, after §5.1's install and before writing any unit:
+
+```bash
+podman --version                                              # >= 5.0
+/usr/libexec/podman/quadlet -dryrun 2>&1 | head               # runs, does not "unknown unit type"
+man 5 podman-systemd.unit | grep -c '^\s*Pod='                # the key is documented
+```
+
+### 2.3 Dissolved — the `127.0.0.1` assumption
+
+The first revision of this document flagged, as its most serious finding, that the
+plan's `TRUSTED_PROXY_CIDRS=127.0.0.0/8` would be wrong under the published-port model.
+The pod arrangement removes the cause rather than mitigating it. §4 has the full
+reasoning and the one check that still needs running.
+
+### 2.4 Blocking — the hostname is baked into a committed file
 
 Also its own section (§3).
 
-### 2.4 Should be closed before or during the deploy
+### 2.5 Should be closed before or during the deploy
 
 | Gap | Closes with |
 |---|---|
@@ -107,7 +152,7 @@ Also its own section (§3).
 | **Rootless is not viable as root.** `/etc/subuid` and `/etc/subgid` map only `rocky`. `loginctl show-user root` shows a session but lingering is not enabled. | Deploy **rootful**: quadlets in `/etc/containers/systemd`, `systemctl daemon-reload`, `systemctl start`. Note this diverges from the plan's Task 9 Step 5, which says `systemctl --user daemon-reload` — on this machine that would put the units in the wrong place and start nothing. Use the system manager. |
 | **No `git` on the node.** The `rl1` runbook's `tar | ssh | tar` shipping trick is still the way to get a working tree over, if a local build is ever needed. | `dnf install -y git`, or ship a tarball. |
 
-### 2.5 SELinux specifics
+### 2.6 SELinux specifics
 
 `getenforce` returns `Enforcing`, and it should stay that way. Three concrete
 consequences:
@@ -122,10 +167,10 @@ consequences:
 - **Named podman volumes need nothing.** `insights-logs`, `insights-threat` and
   `insights-sizing` live under `/var/lib/containers/storage/volumes/` and podman labels
   them `container_file_t` itself.
-- **Host-networked Traefik is not an SELinux problem.** `NetworkMode=host` needs no
-  boolean and no policy change; `container-selinux` permits it. The `httpd_can_network_*`
-  booleans found `off` in the survey are for the `httpd_t` domain and are irrelevant
-  here — do not flip them.
+- **A shared pod namespace is not an SELinux problem.** Pods need no boolean and no
+  policy change; `container-selinux` handles the shared namespace and the infra container
+  itself. The `httpd_can_network_*` booleans found `off` in the survey are for the
+  `httpd_t` domain and are irrelevant here — do not flip them.
 
 If something is denied anyway, read it, do not disable enforcement:
 
@@ -271,107 +316,115 @@ grep -c "Host(\`$INSIGHTS_HOST\`)" /etc/traefik/dynamic.yaml   # must be 6
 
 ---
 
-## 4. The pipelines will **not** see `127.0.0.1` — and that is a 401, not an auth bug
+## 4. `RemoteAddr` really is `127.0.0.1` — by construction, not by convention
 
-The plan states, in a comment inside `threatd.container` and again under "Ports and
-environment", that "Traefik runs with host networking, so every `RemoteAddr` this
-process sees is `127.0.0.1`, which is what `TRUSTED_PROXY_CIDRS` below trusts".
+`TRUSTED_PROXY_CIDRS` defaults to `127.0.0.0/8`, and everything in `httpx` hangs off it:
+`ClientIP` consults `X-Forwarded-For` only when `RemoteAddr` is a configured proxy, and
+`SystemID` returns `ErrUntrustedProxy` otherwise. Get it wrong and **every**
+`/logs/v1/*`, `/blocklist/v1/*` and `/sizing/v1/*` request returns 401 with a perfectly
+good credential, from a perfectly good Traefik — a networking failure wearing an auth
+failure's clothes.
 
-Checked against this machine, the first half of that is arrangeable and the second half
-does not follow.
+Under the pod arrangement the default is correct, and correct for a structural reason
+rather than a configured one. All five containers share **one network namespace**.
+Traefik's connection to `http://127.0.0.1:9605` is a genuine loopback connection inside
+that namespace: it is never routed, never DNATed, never masqueraded, and never touches
+the host's network stack at all. The source address `threatd` reads out of the socket is
+the literal loopback address, because there is nothing in the path that could make it
+anything else.
 
-**What is true:** Traefik with `NetworkMode=host` connects to `http://127.0.0.1:9605`
-over the host's loopback, and the pipelines publish only to `127.0.0.1`. Ports 80, 443
-and all seven loopback targets are free, and nothing else on the box competes. So the
-*intent* is achievable here.
+That also means `TRUSTED_PROXY_CIDRS` needs no per-machine value. It is `127.0.0.0/8` on
+this box, on production, and on any future one, and it does not have to be looked up
+after a rebuild.
 
-**What does not follow:** with rootful podman and a `PublishPort=127.0.0.1:9605:9595`
-bridge-network container, the address the container sees is **the bridge gateway, not
-`127.0.0.1`**. The mechanism is forced, not incidental: the host DNATs
-`127.0.0.1:9605` to `<container-ip>:9595`, and if the source address were left as
-`127.0.0.1` the container's reply would route to the container's *own* loopback and never
-come back. Podman therefore masquerades hairpin traffic to the bridge IP. The pipeline
-receives `RemoteAddr = 10.89.0.1:…` (or whatever the network's gateway is), which is not
-inside `127.0.0.0/8`.
+### 4.1 Why the earlier reasoning no longer applies
 
-The consequence runs straight through `httpx`. `ClientIP` consults `X-Forwarded-For`
-"only when `RemoteAddr` is a proxy we configured"; `SystemID` returns
-`ErrUntrustedProxy` otherwise. So:
+The first revision of this document recommended
+`TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32` and a pinned `Subnet=`/`Gateway=` in an
+`insights.network` unit. **Both are now wrong and both should be dropped.** The reasoning
+is kept because the conclusion alone would not tell a reader whether the question had
+been considered — and because the same trap is waiting for anyone who later moves a
+container out of the pod.
 
-> Every `/logs/v1/*`, `/blocklist/v1/*` and `/sizing/v1/*` request returns **401**, with a
-> correct credential, from a correctly configured Traefik. And `threat.Sanitize`'s
-> reporter-own-address check — the reason Decision 4 exists at all — is fed the bridge
-> gateway address for every report.
+Under the published-port model, each pipeline ran in its own namespace on a bridge
+network and Traefik reached it through `PublishPort=127.0.0.1:9605:9595`. That path is
+DNAT: the host rewrites the destination of a packet arriving on `127.0.0.1:9605` to
+`<container-ip>:9595`. If the *source* were left as `127.0.0.1`, the container's reply
+would be addressed to `127.0.0.1` and would be delivered to the container's own loopback
+interface, never reaching the host. Rootful podman therefore also SNATs the hairpin,
+rewriting the source to the bridge gateway. The container would have observed
+`RemoteAddr = 10.89.0.1:…`, outside `127.0.0.0/8`, and every `/v1/*` request would have
+401'd.
 
-This is precisely the failure mode flagged in the brief: it presents as an auth bug and
-is a networking one.
+Sharing a namespace removes the DNAT, which removes the reply-routing problem, which
+removes the masquerade, which removes the wrong source address. Nothing is being trusted
+that was not trusted before; there is simply no longer an address translation in the
+path to be wrong about.
 
-### 4.1 Two ways to make it true, and which to take
+Two corollaries worth keeping:
 
-**Option A — pin the network subnet and trust it (recommended).**
+- **If a container is ever moved out of the pod, this breaks silently and presents as
+  401.** The `LISTEN_ADDR=127.0.0.1:<port>` form in each unit is deliberate for that
+  reason: outside a shared namespace it fails loudly (nothing can reach it) instead of
+  quietly (reachable, but every request unauthorised).
+- **The pod's own published ports, 80 and 443, still go through DNAT** — but that is
+  inbound from the internet, where podman preserves the source address and does not
+  masquerade, so Traefik sees the real client IP and can set `X-Forwarded-For` from it.
+  The exception is a request made *from the host itself* to `127.0.0.1:443`: that is a
+  hairpin, so it is masqueraded and Traefik will see the gateway. On-box `curl` against
+  the public port is therefore not a valid test of the address chain — run smoke test 7
+  from the workstation, which is why §6 says so.
 
-Do not let podman pick. Declare the subnet in `deploy/quadlet/insights.network`, and put
-it in `TRUSTED_PROXY_CIDRS` alongside loopback:
+### 4.2 One port space, so every listener needs a distinct port
 
-```ini
-[Network]
-NetworkName=insights
-Subnet=10.89.0.0/24
-Gateway=10.89.0.1
-```
+The other consequence of a shared namespace: the three pipelines can no longer all bind
+`:9595`. Each binds its own, and a collision is a container that fails to start rather
+than a request that silently reaches the wrong backend:
 
-```
-Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32
-```
+| Service | API | UI |
+|---|---|---|
+| authd | `127.0.0.1:9590` | — |
+| insightsd | `127.0.0.1:9595` | `127.0.0.1:9596` |
+| threatd | `127.0.0.1:9605` | `127.0.0.1:9606` |
+| sizingd | `127.0.0.1:9615` | `127.0.0.1:9616` |
+| traefik | `:80`, `:443` | — |
 
-A `/32` on the gateway, not the whole `/24`: only the gateway ever appears as a
-masqueraded source, and a `/24` would additionally trust any sibling container that
-reached the port directly. Keeps the plan's quadlets and its network isolation intact,
-and the value is deterministic because the subnet is declared rather than allocated.
+These are the same numbers the earlier revision published to the host, which is why
+**Traefik's dynamic configuration needs no change at all**: its six
+`loadBalancer.servers[].url` values were already `http://127.0.0.1:9595`,
+`:9596`, `:9605`, `:9606`, `:9615`, `:9616`. Same numbers, different meaning — they are
+now in-pod ports rather than host-published ones. It looks like nothing changed while
+quite a lot did, so do not read an unchanged `dynamic.yaml.tmpl` as evidence that the
+pod migration was not applied. Check the `.container` units instead: the migration is
+done when no `.container` file contains a `PublishPort=` line.
 
-**Option B — host-network the pipelines too.**
+`HealthCmd=` must also follow the new ports — `wget -qO- http://127.0.0.1:9605/healthz`
+for threatd, not `:9595`. A healthcheck left on the old port either fails forever or, if
+another pipeline happens to be listening there, reports the wrong container healthy.
 
-Drop `PublishPort=` and `Network=`, set `NetworkMode=host` on all four, and bind
-explicitly:
+### 4.3 Verify it anyway, first thing
 
-```
-Environment=LISTEN_ADDR=127.0.0.1:9605
-Environment=UI_LISTEN_ADDR=127.0.0.1:9606
-```
-
-Now `RemoteAddr` really is `127.0.0.1` and the plan's comment becomes literally true.
-Simpler, one less moving part, and on a box with no firewall the loopback bind is the
-same protection the published port was providing. The cost is that the four services
-share the host network namespace and each must bind a distinct port itself — a typo in
-`LISTEN_ADDR` binds `0.0.0.0` on an unfirewalled public host, which is a worse failure
-than the one it avoids.
-
-**Take Option A.** It keeps the loopback publish as a structural guard rather than a
-configuration value, and the extra CIDR is one line. But it is Option A *with the subnet
-pinned* — leaving podman to allocate `10.88.0.0/16` or `10.89.x.0/24` by creation order
-makes `TRUSTED_PROXY_CIDRS` a value someone has to look up after every rebuild.
-
-### 4.2 Verify it on the machine, first thing
-
-This could not be established read-only, because podman is not installed. It is the
-first thing to check after the containers start, before wiring Traefik:
+Podman is not installed, so this was reasoned from the namespace semantics and not
+measured. The reasoning is much stronger than the published-port case it replaces —
+there is no translation left to be surprised by — but the cost of being wrong is a
+misdiagnosed 401, so spend one command on it before wiring anything else:
 
 ```bash
-# from the host, straight at threatd's published port
-curl -s -o /dev/null -H 'X-Forwarded-For: 198.51.100.9' http://127.0.0.1:9605/v1/feed
+podman exec traefik wget -qO- --header='X-Forwarded-For: 198.51.100.9' \
+  http://127.0.0.1:9605/healthz
 journalctl -u threatd -n 5
-# read the logged client address. 10.89.0.1 -> Option A's CIDR is required and correct.
-# 127.0.0.1 -> the plan's comment holds on this podman version; leave the default.
 ```
 
-Whichever it is, record the answer here. Do not assume it, and do not assume it is the
-same after a podman major upgrade.
+The logged client address must be `127.0.0.1`. Anything else means the containers are
+not actually sharing a namespace — check `podman pod inspect insights` and confirm all
+five are listed, and that no `.container` unit kept a `Network=` or `PublishPort=` line,
+which would silently take it out of the pod.
 
 ---
 
 ## 5. Deployment
 
-Run as `root` on `insights.gs.nethserver.net`. Rootful throughout — see §2.4 for why
+Run as `root` on `insights.gs.nethserver.net`. Rootful throughout — see §2.5 for why
 `systemctl --user` is not available on this box.
 
 ### 5.1 Install the container stack
@@ -394,7 +447,7 @@ getenforce                                         # still Enforcing
 
 ### 5.2 Get the four images
 
-**Path A — pull from CI (recommended on this machine; see the RAM gap in §2.4).**
+**Path A — pull from CI (recommended on this machine; see the RAM gap in §2.5).**
 
 Task 9 Step 4 gives `image.yml` a matrix over `[authd, insightsd, threatd, sizingd]`,
 pushing `ghcr.io/nethesis/nethesis-insights-<service>`. Once that has run on the branch:
@@ -428,20 +481,38 @@ Then use `localhost/insights-<s>:latest` in the quadlets' `Image=`.
 
 **Check:** `podman images | grep insights` lists four.
 
-### 5.3 Network and volume units
+### 5.3 The pod and volume units
 
-`/etc/containers/systemd/insights.network` — with the subnet pinned per §4.1:
+`/etc/containers/systemd/insights.pod` is the **only** unit in the deployment that
+publishes anything:
 
 ```ini
 #
 # Copyright (C) 2026 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-[Network]
-NetworkName=insights
-Subnet=10.89.0.0/24
-Gateway=10.89.0.1
+
+[Unit]
+Description=nethesis-insights
+
+[Pod]
+PodName=insights
+# The only ports that exist outside this host. Every backend listens on
+# loopback inside the shared namespace and has no published port at all, which
+# is what keeps the three unauthenticated operator UIs reachable only through
+# Traefik's BasicAuth -- this machine has no firewall of any kind, so "not
+# published" is worth a great deal more than "bound to 127.0.0.1".
+PublishPort=80:80
+PublishPort=443:443
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+There is **no `insights.network` unit**. The earlier revision of this runbook specified
+one with a pinned `Subnet=`/`Gateway=`; §4.1 explains why that is no longer needed and
+should not be reintroduced. Podman gives the pod a default network of its own, and
+nothing in the deployment depends on its address range.
 
 Three volume units, `/etc/containers/systemd/insights-{logs,threat,sizing}.volume`, each:
 
@@ -454,35 +525,84 @@ Three volume units, `/etc/containers/systemd/insights-{logs,threat,sizing}.volum
 VolumeName=insights-logs
 ```
 
-Three separate volumes, per Decision 7 — three fresh databases, nothing carried across.
+Traefik additionally needs `traefik-acme.volume` for `acme.json`. Three separate pipeline
+volumes, per Decision 7 — three fresh databases, nothing carried across.
 
 ### 5.4 The five container units
 
-All in `/etc/containers/systemd/`, all following the plan's Task 9 Step 2 shape. The
-per-service differences that matter on this machine:
+All in `/etc/containers/systemd/`, all following the plan's Task 9 Step 2 shape. **No
+`.container` unit carries a `PublishPort=` or a `Network=` line**; each carries
+`Pod=insights.pod` instead. That absence is the single best check that the pod migration
+was applied — see §4.2.
 
-| Unit | `Image=` | Ports | Volume | `UI_BASE_PATH` | Secret file |
+| Unit | `Image=` | `LISTEN_ADDR` / `UI_LISTEN_ADDR` | Volume | `UI_BASE_PATH` | Secret file |
 |---|---|---|---|---|---|
-| `authd.container` | `…-authd` | `PublishPort=127.0.0.1:9590:9590` | — | — | `/etc/insights/authd.env` (`AUTH_PEPPER`) |
-| `insightsd.container` | `…-insightsd` | `127.0.0.1:9595:9595`, `127.0.0.1:9596:9596` | `insights-logs:/var/lib/insights` | `/logs` | `/etc/insights/insightsd.env` (`LLM_API_KEY`) |
-| `threatd.container` | `…-threatd` | `127.0.0.1:9605:9595`, `127.0.0.1:9606:9596` | `insights-threat:/var/lib/threat` | `/blocklist` | `/etc/insights/threatd.env` (`ADMIN_API_KEY`) |
-| `sizingd.container` | `…-sizingd` | `127.0.0.1:9615:9595`, `127.0.0.1:9616:9596` | `insights-sizing:/var/lib/sizing` | `/sizing` | `/etc/insights/sizingd.env` |
-| `traefik.container` | `docker.io/library/traefik:v3.3` | `NetworkMode=host` | `/etc/traefik:/etc/traefik:z`, `traefik-acme:/acme` | — | — |
+| `authd.container` | `…-authd` | `AUTH_LISTEN_ADDR=127.0.0.1:9590` | — | — | `/etc/insights/authd.env` (`AUTH_PEPPER`) |
+| `insightsd.container` | `…-insightsd` | `127.0.0.1:9595` / `127.0.0.1:9596` | `insights-logs:/var/lib/insights` | `/logs` | `/etc/insights/insightsd.env` (`LLM_API_KEY`) |
+| `threatd.container` | `…-threatd` | `127.0.0.1:9605` / `127.0.0.1:9606` | `insights-threat:/var/lib/threat` | `/blocklist` | `/etc/insights/threatd.env` (`ADMIN_API_KEY`) |
+| `sizingd.container` | `…-sizingd` | `127.0.0.1:9615` / `127.0.0.1:9616` | `insights-sizing:/var/lib/sizing` | `/sizing` | `/etc/insights/sizingd.env` |
+| `traefik.container` | `docker.io/library/traefik:v3.3` | binds `:80`, `:443` in-pod | `/etc/traefik:/etc/traefik:z`, `traefik-acme.volume:/acme` | — | — |
 
-Each pipeline unit carries, in addition to the plan's text:
+Every pipeline unit carries:
 
 ```
-Network=insights.network
-Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32
+Pod=insights.pod
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
 ```
 
-`authd.container` needs no volume and no `UI_BASE_PATH`; the three pipelines get
-`After=authd.service`. Traefik gets `After=insightsd.service threatd.service sizingd.service`
-so it does not start routing to nothing, though `forwardAuth` and the services will
-recover on their own either way.
+`127.0.0.0/8` **alone** — no `10.89.0.1/32`. The gateway CIDR belonged to the
+published-port model and is wrong here; §4.1 says why at length. Note that the plan's
+Task 9 Step 2 example still shows the gateway appended (see §7 item 3) — the surrounding
+prose in the plan is right and that one line is stale.
 
-`traefik.container` is the one unit that deviates structurally, because host networking
-and `PublishPort=` are mutually exclusive:
+`threatd.container` in full, the others by analogy:
+
+```ini
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Threat Shield pipeline
+After=authd.service
+
+[Container]
+Image=ghcr.io/nethesis/nethesis-insights-threatd:latest
+ContainerName=threatd
+# No PublishPort: this container has no port of its own. It shares the pod's
+# network namespace, so Traefik reaches it over real loopback and it sees
+# RemoteAddr == 127.0.0.1 -- which is what makes the default
+# TRUSTED_PROXY_CIDRS correct by construction.
+#
+# One namespace means one port space: 9605/9606 are threatd's alone, and a
+# collision is a startup failure rather than a subtle misroute.
+Pod=insights.pod
+Volume=insights-threat.volume:/var/lib/threat
+Environment=LISTEN_ADDR=127.0.0.1:9605
+Environment=UI_LISTEN_ADDR=127.0.0.1:9606
+Environment=UI_BASE_PATH=/blocklist
+Environment=DB_PATH=/var/lib/threat/threat.db
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
+EnvironmentFile=/etc/insights/threatd.env
+HealthCmd=wget -qO- http://127.0.0.1:9605/healthz || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `HealthCmd` port must match that unit's own `LISTEN_ADDR` — `:9605` here, `:9595` for
+insightsd, `:9615` for sizingd. In one namespace a healthcheck pointed at the wrong port
+can report a *different* container's health as this one's, which is worse than failing.
+
+`traefik.container` no longer uses host networking; it joins the pod like everything
+else, and the pod's `PublishPort` lines are what put it on 80 and 443:
 
 ```ini
 #
@@ -497,10 +617,10 @@ After=authd.service insightsd.service threatd.service sizingd.service
 [Container]
 Image=docker.io/library/traefik:v3.3
 ContainerName=traefik
-# Host networking, deliberately: it is what puts the proxy's connections to
-# the pipelines on the host's loopback, and what lets it bind 80/443 without
-# a second NAT hop in front of the ACME challenge.
-NetworkMode=host
+# In the pod, not on the host network: its connections to the four backends
+# stay inside the shared namespace, which is what makes their RemoteAddr a
+# real 127.0.0.1. Publishing is the pod's job, not this unit's.
+Pod=insights.pod
 Volume=/etc/traefik:/etc/traefik:z
 Volume=traefik-acme.volume:/acme
 Exec=--configFile=/etc/traefik/traefik.yaml
@@ -512,7 +632,7 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-The `:z` on `/etc/traefik` is the SELinux relabel from §2.5 and is not optional here.
+The `:z` on `/etc/traefik` is the SELinux relabel from §2.6 and is not optional here.
 
 ### 5.5 Traefik configuration
 
@@ -563,6 +683,18 @@ accessLog: {}
 occurrences. Keep the explicit `priority: 200` / `priority: 100`, keep
 `removeHeader: false` on `operator-auth`, and keep `passHostHeader: true` on all six
 services; §3.4 is why the last one matters.
+
+**The pod migration changed nothing in this file**, and that is worth stating rather than
+noticing. The `forwardAuth.address` (`http://127.0.0.1:9590/auth`) and all six
+`loadBalancer.servers[].url` values were already loopback URLs on those port numbers;
+they are now in-pod ports instead of host-published ones. Identical text, different
+mechanism — so an unchanged `dynamic.yaml.tmpl` is not evidence the migration was
+skipped. §4.2 gives the check that is.
+
+The `web` entrypoint's `forwardedHeaders.trustedIPs: []` in `traefik.yaml.tmpl` also
+stays empty: nothing sits in front of Traefik, so it overwrites `X-Forwarded-For` with
+the address that connected to the published port — which, for traffic from the internet,
+is the real client. That overwrite is what smoke test 7 proves end to end.
 
 ### 5.6 Secrets
 
@@ -618,10 +750,16 @@ set -a; . /etc/insights/deploy.env; set +a
 bash /root/nethesis-insights/deploy/render.sh      # or the two envsubst lines from §3.2
 
 systemctl daemon-reload
+systemctl start insights-pod.service
 systemctl start authd.service
 systemctl start insightsd.service threatd.service sizingd.service
 systemctl start traefik.service
 ```
+
+Quadlet names the pod's generated unit `insights-pod.service` (from `insights.pod`), and
+each `.container` unit gains an implicit dependency on it, so starting a container starts
+the pod anyway. Starting it explicitly first is not required, only clearer to read in the
+journal when something fails.
 
 Quadlet-generated units are transient: `systemctl enable` is not used, and
 `WantedBy=multi-user.target` in the `[Install]` section is what makes them start at boot.
@@ -629,13 +767,26 @@ Quadlet-generated units are transient: `systemctl enable` is not used, and
 **Check:**
 
 ```bash
-systemctl is-active authd insightsd threatd sizingd traefik   # five x active
-podman ps --format '{{.Names}}\t{{.Status}}'                  # five, all healthy
-ss -tlnp | grep -E ':(80|443|9590|9595|9596|9605|9606|9615|9616)\b'
-# 80 and 443 on 0.0.0.0 (traefik); every other port on 127.0.0.1 ONLY.
-# Any of 9590-9616 on 0.0.0.0 is an exposed operator UI on an unfirewalled
-# public host -- stop and fix the PublishPort line before going further.
+systemctl is-active insights-pod authd insightsd threatd sizingd traefik   # all active
+podman pod ps                                        # one pod "insights", 6 containers
+                                                     # (5 + the infra container)
+podman pod inspect insights --format '{{range .Containers}}{{.Name}} {{end}}'
+# authd insightsd threatd sizingd traefik (+ the -infra one). A missing name
+# means that unit did not join the pod -- check it for a stray Network= line.
+podman ps --format '{{.Names}}\t{{.Status}}'         # five, all healthy
 ```
+
+Then confirm the host's port surface, which is the security property of §1:
+
+```bash
+ss -tlnp | grep -E ':(80|443|9590|9595|9596|9605|9606|9615|9616)\b'
+```
+
+Expect **80 and 443 only**. The 95xx/96xx ports must not appear at all — they exist
+inside the pod's namespace and are invisible to the host's `ss`. Seeing any of them here
+means a `.container` unit kept a `PublishPort=` line and is not in the pod; that is an
+unauthenticated fleet-wide dashboard on an unfirewalled public host, so stop and fix it
+before continuing.
 
 ### 5.8 TLS
 
@@ -777,11 +928,23 @@ Then on the node:
 journalctl -u threatd -n 20 | grep -i 'client\|remote\|POST /v1/events'
 ```
 
-The logged client address **must equal `$MYIP`**. If it is `127.0.0.1`, Traefik is not
-setting `X-Forwarded-For` (check `forwardedHeaders.trustedIPs` is empty, per §5.5). If it
-is `10.89.0.1`, the pipeline is not treating the proxy as trusted and `ClientIP` fell
-back to `RemoteAddr` — §4.1, `TRUSTED_PROXY_CIDRS`. If it is the *rightmost* value of a
-header you did not send, someone put a second proxy in front of Traefik.
+The logged client address **must equal `$MYIP`**, and this must be run from the
+workstation, not the node: a request made on the host to `127.0.0.1:443` is a hairpin
+through the pod's published port, gets masqueraded, and would show the gateway for
+reasons that have nothing to do with the header chain (§4.1).
+
+Reading a wrong answer:
+
+- `127.0.0.1` — Traefik is not setting `X-Forwarded-For`. Check that
+  `forwardedHeaders.trustedIPs` is empty in `traefik.yaml` (§5.5); a non-empty list that
+  does not contain the real client makes Traefik preserve an absent header rather than
+  write one.
+- The pod's gateway address, or any `10.x` — the pipeline did not treat the proxy as
+  trusted and `ClientIP` fell back to `RemoteAddr`. That should be impossible in a shared
+  namespace, so it means the container is **not in the pod**: check for a stray
+  `PublishPort=` or `Network=` line (§4.2), not for a wrong `TRUSTED_PROXY_CIDRS`.
+- The rightmost value of a header you did not send — someone put a second proxy in front
+  of Traefik.
 
 This is what makes `threat.Sanitize`'s reporter-own-address check live again, which is
 the entire point of Decision 4. Verify the negative too — post a decision naming
@@ -796,17 +959,68 @@ curl -sS -u "$CRED" -H 'Content-Type: application/json' \
 The response counters should show the drop. Then confirm the accepted 203.0.113.42 is
 visible on `https://${INSIGHTS_HOST}/blocklist/events` with operator credentials.
 
-**8. Nothing but 80 and 443 is exposed.** From the workstation, not the node:
+**8. Nothing but 80 and 443 is exposed — the negative check.** The pod is supposed to
+publish exactly two ports. That is now a property worth *proving* rather than assuming,
+because it is the only thing standing between three unauthenticated fleet-wide operator
+dashboards and the internet on a machine with no firewall (§1).
+
+Two probes, and both must fail to connect.
+
+From **the host**, where the published ports live — an in-pod port must not be reachable
+from outside the pod's namespace:
+
+```bash
+timeout 4 bash -c '</dev/tcp/127.0.0.1/9606' && echo 'FAIL: 9606 published to the host' \
+  || echo 'ok: 9606 not reachable from the host'
+timeout 4 bash -c '</dev/tcp/127.0.0.1/443' && echo 'ok: 443 published' \
+  || echo 'FAIL: 443 not published'
+```
+
+From **the workstation**, against the public address:
 
 ```bash
 for p in 80 443 9090 9590 9595 9596 9605 9606 9615 9616; do
-  printf '%s ' $p
+  printf '%-5s ' $p
   timeout 4 bash -c "</dev/tcp/68.183.70.132/$p" 2>/dev/null && echo OPEN || echo closed
 done
 ```
 
-Expect `80 OPEN`, `443 OPEN`, `9090 OPEN` (pre-existing cockpit, see §1), and **closed
-for every 95xx/96xx port**. Any of those open is the unfirewalled-host failure from §2.
+Expect exactly `80 OPEN`, `443 OPEN`, `9090 OPEN` (pre-existing cockpit, see §1), and
+**closed for every 95xx/96xx port**.
+
+If either probe reaches `9606` — on `127.0.0.1` or on the public address — the pod is
+publishing more than 80 and 443. The cause is almost always a `.container` unit that kept
+a `PublishPort=` line, which also takes it out of the shared namespace and will break
+§4's `RemoteAddr` guarantee at the same time. Grep for it:
+
+```bash
+grep -l PublishPort /etc/containers/systemd/*.container   # must return nothing
+```
+
+Note the asymmetry between the two probes: a host-side `127.0.0.1:9606` that answers is a
+**local** exposure only, and a public-address `9606` that answers is a global one. Both
+are bugs; the second is an incident.
+
+**9. Confirm the operator UI is reachable only through Traefik.** The positive form of
+test 8, and the property the pod exists to give:
+
+```bash
+# through Traefik, with credentials -- works
+curl -sS -u "$OPCRED" -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/
+# 200
+
+# through Traefik, without -- refused
+curl -sS -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/
+# 401
+
+# around Traefik, from the host -- no route at all
+timeout 4 bash -c '</dev/tcp/127.0.0.1/9606' || echo 'ok: no way around the proxy'
+```
+
+There is no fourth case. Under the published-port model there was: anything on the host,
+including any other process and any future tenant, could reach `127.0.0.1:9606` directly
+and read the whole fleet's findings with no credential. In the pod that path does not
+exist.
 
 ---
 
@@ -814,12 +1028,12 @@ for every 95xx/96xx port**. Any of those open is the unfirewalled-host failure f
 
 Ordered by how much they would change the deployment.
 
-1. **The masquerade question (§4) is unresolved and cannot be resolved read-only.**
-   Podman is not installed, so the source address a container actually observes on a
-   loopback-published port was reasoned from the DNAT/reply-routing mechanism, not
-   measured. It is the single highest-value thing to check in the first ten minutes, with
-   the command in §4.2. If it turns out to be `127.0.0.1` on podman 5.8, drop the extra
-   CIDR and record that here.
+1. **The pod's `RemoteAddr` guarantee is reasoned, not measured.** Podman is not
+   installed, so §4 argues from namespace semantics rather than from an observation. The
+   argument is strong — a loopback connection inside one namespace has no translation in
+   it to be wrong about — and much stronger than the published-port case it replaces, but
+   the cost of being wrong is a 401 that reads as an auth bug. Run §4.3's one command
+   before wiring Traefik and record the answer here.
 
 2. **Whether `dnf install podman` pulls `container-selinux` on EL10.** It is listed as a
    dependency and is available in appstream, but this was not verified by a dry run
@@ -845,10 +1059,12 @@ Ordered by how much they would change the deployment.
 
 7. **There is no host firewall to fall back on.** No firewalld, no nftables, no iptables
    userspace. Installing podman brings a packet-filter backend for its own NAT, but not a
-   host policy. Every safety property of this deployment rests on the `127.0.0.1:` prefix
-   in seven `PublishPort=` lines and on Traefik's two middlewares. Consider installing
-   and configuring `firewalld` with only 22/80/443 open as a second layer — that is a
-   change, so it is listed here rather than in §5.
+   host policy. What the pod changed is how much rests on that absence: the operator UIs
+   now have no published port at all, so reaching one requires getting through Traefik's
+   BasicAuth, and there is no `PublishPort=` line in a `.container` unit left to typo.
+   What still rests on it is everything else — cockpit on 9090, sshd, and any future
+   service. Consider installing and configuring `firewalld` with only 22/80/443 open as a
+   second layer; that is a change, so it is listed here rather than in §5.
 
 8. **Single instance, no distributed lock.** Both the Threat Shield consensus pass and
    the fleet-sizing cohort pass are documented single-instance. One box, so fine today;
@@ -873,3 +1089,26 @@ Ordered by how much they would change the deployment.
     lingering plus a way to bind 80/443 (`net.ipv4.ip_unprivileged_port_start` is 1024, so
     that needs a sysctl or a capability). Rootful is the right call for a single-purpose
     box; noted so the question is not reopened without the constraints.
+
+13. **The plan's Task 9 Step 2 example still appends the gateway CIDR.** Its
+    `threatd.container` block reads
+    `Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8,10.89.0.1/32`, which is a leftover from
+    the published-port arrangement. The plan's own "Ports and environment" prose is
+    correct and says the default is right *because* the containers share a pod. The unit
+    example is stale on that one line. This runbook uses `127.0.0.0/8` alone (§5.4); the
+    plan should be corrected to match, and it is flagged here rather than edited because
+    the plan is not this document's to change.
+
+14. **`.pod` quadlet support is recorded as a floor, not an observation.** Podman 5.0
+    introduced `.pod` units and the `.container` `Pod=` key; the box's appstream offers
+    5.8.2. Nothing was installed, so this was not exercised — §2.2 has the check to run
+    after installing. Anything below 5.0 cannot deploy this at all and would need a
+    wrapper unit calling `podman pod create`.
+
+15. **Pod-level lifecycle coupling was not exercised.** All five containers now share one
+    namespace and one infra container, so restarting the pod restarts everything, and a
+    pod-level failure takes down `threatd`'s ingest along with the operator UIs. Under
+    the previous model the four services failed independently. This is an accepted
+    consequence of the pod, not a regression to fix, but it means "restart just threatd"
+    (`systemctl restart threatd`) should be verified to work without cycling the pod
+    before anyone relies on it during an incident.
