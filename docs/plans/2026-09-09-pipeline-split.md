@@ -178,6 +178,9 @@ survives someone later moving a container out of the pod.
 
 **New variables**
 
+- `ACME_EMAIL` — the contact address Let's Encrypt sends expiry warnings to. **Read by no
+  binary**, same as `INSIGHTS_HOST`, and per-environment for the same reason: the dev host's
+  certificate problems should not page whoever owns production's.
 - `INSIGHTS_HOST` — the served hostname, e.g. `insights.gs.nethserver.net` or
   `insights.nethesis.it`. **Read by no binary.** It lives in `/etc/insights/deploy.env` and is
   consumed only when rendering Traefik's dynamic configuration, which is what keeps the
@@ -1825,7 +1828,9 @@ that contradict this task as originally written — are in
 **Files:**
 - Modify: `Containerfile`
 - Create: `deploy/quadlet/{insights.pod,authd.container,insightsd.container,threatd.container,sizingd.container,traefik.container}`
-- Create: `deploy/traefik/{traefik.yaml,dynamic.yaml.tmpl}`
+- Create: `deploy/quadlet/{insights-logs.volume,insights-threat.volume,insights-sizing.volume,traefik-acme.volume}`
+  — a `Volume=name.volume:/path` reference requires a matching `.volume` unit to exist
+- Create: `deploy/traefik/{traefik.yaml.tmpl,dynamic.yaml.tmpl}`
 - Modify: `.github/workflows/image.yml`
 - Modify: `deploy.md`
 
@@ -1930,7 +1935,12 @@ deploy time and is reproducible from `INSIGHTS_HOST` alone:
 ```bash
 set -a; . /etc/insights/deploy.env; set +a
 envsubst '$INSIGHTS_HOST' < deploy/traefik/dynamic.yaml.tmpl > /etc/traefik/dynamic.yaml
+envsubst '$INSIGHTS_HOST $ACME_EMAIL' < deploy/traefik/traefik.yaml.tmpl > /etc/traefik/traefik.yaml
 ```
+
+Both Traefik files are templates, deliberately: one templated and one static is a trap,
+because the static one looks editable in place and its edits are then silently
+overwritten — or worse, are not, and the two disagree.
 
 Naming the variable in `envsubst`'s argument matters: unquoted, it would also expand
 Traefik's own `${…}` syntax. `INSIGHTS_HOST` drives the six `Host()` matchers and the ACME
