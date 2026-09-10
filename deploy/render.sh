@@ -37,14 +37,55 @@ fi
 
 mkdir -p "$dest_dir"
 
+# traefik.yaml.tmpl configures the file provider with watch: true, so
+# $dest_dir is a directory Traefik is actively reading from while this
+# script runs. Rendering straight into dynamic.yaml/traefik.yaml would give
+# Traefik a window to read a half-written file mid-render -- a routing
+# outage that lands at exactly the moment someone is changing routing, and
+# looks like a bad config rather than the race it actually is. So render
+# into a temp file in the SAME directory first -- mv is only atomic within a
+# filesystem, so a temp file anywhere else would turn the final step back
+# into a non-atomic copy -- and rename over the target: Traefik then only
+# ever sees the old file or the fully-rendered new one, never a partial one.
+tmp_dynamic=$(mktemp "$dest_dir/.dynamic.yaml.XXXXXX")
+tmp_traefik=$(mktemp "$dest_dir/.traefik.yaml.XXXXXX")
+# set -euo pipefail means a failed envsubst below exits the script
+# immediately, and without this trap the temp file it was writing would be
+# left behind in a directory Traefik watches -- harmless to Traefik (it
+# never matches *.tmp), but clutter next to config an operator is
+# debugging. Runs on success too, where both mv's below have already
+# renamed the temp files away, so rm -f is a no-op.
+trap 'rm -f "$tmp_dynamic" "$tmp_traefik"' EXIT
+
 # The explicit variable list matters: unquoted and unargumented, envsubst
 # also expands Traefik's own ${...} syntax, producing a config that parses
 # cleanly and is silently wrong.
 envsubst '$INSIGHTS_HOST $ACME_EMAIL' \
     < "$script_dir/traefik/dynamic.yaml.tmpl" \
-    > "$dest_dir/dynamic.yaml"
+    > "$tmp_dynamic"
 envsubst '$INSIGHTS_HOST $ACME_EMAIL' \
     < "$script_dir/traefik/traefik.yaml.tmpl" \
-    > "$dest_dir/traefik.yaml"
+    > "$tmp_traefik"
+
+# rename(2) carries the temp file's own permissions onto the destination, not
+# the destination's -- so without this, the first render after an operator
+# hand-edited a mode on either file would silently discard it, and every
+# render would otherwise inherit mktemp's 0600 instead of the readable mode
+# a plain "> file" would have created. Match what's already there; on the
+# very first render there is nothing to match, so fall back to the same 0644
+# a fresh "> file" gets under a standard umask.
+if [ -e "$dest_dir/dynamic.yaml" ]; then
+    chmod --reference="$dest_dir/dynamic.yaml" "$tmp_dynamic"
+else
+    chmod 644 "$tmp_dynamic"
+fi
+if [ -e "$dest_dir/traefik.yaml" ]; then
+    chmod --reference="$dest_dir/traefik.yaml" "$tmp_traefik"
+else
+    chmod 644 "$tmp_traefik"
+fi
+
+mv -f "$tmp_dynamic" "$dest_dir/dynamic.yaml"
+mv -f "$tmp_traefik" "$dest_dir/traefik.yaml"
 
 echo "rendered $dest_dir/dynamic.yaml and $dest_dir/traefik.yaml for INSIGHTS_HOST=$INSIGHTS_HOST" >&2
