@@ -634,7 +634,14 @@ at one line per request each, on a box with 1.7 GiB and no swap.
 
 [Unit]
 Description=Threat Shield pipeline
+# After= orders the start; Wants= also pulls authd in, so a boot where authd
+# fails to start still leaves this unit running and answering every valid
+# credential with a Traefik-generated 500 -- indistinguishable from a backend
+# fault -- rather than that being silent. Not Requires=: authd failing should
+# not take a healthy pipeline down with it; this unit's own health check is
+# what makes the difference visible instead.
 After=authd.service
+Wants=authd.service
 
 [Container]
 Image=ghcr.io/nethesis/nethesis-insights-threatd:latest
@@ -681,7 +688,14 @@ else, and the pod's `PublishPort` lines are what put it on 80 and 443:
 
 [Unit]
 Description=Traefik reverse proxy
+# Wants=authd.service for the same reason as the three pipelines, and if
+# anything more so: every API request Traefik proxies passes through authd's
+# forwardAuth middleware first, so a failed authd should not go unnoticed as
+# Traefik quietly 500ing every valid credential. No Wants= for the three
+# pipelines: Traefik tolerates any one of them being briefly down as a 502 on
+# that route, not a blanket failure.
 After=authd.service insightsd.service threatd.service sizingd.service
+Wants=authd.service
 
 [Container]
 Image=docker.io/library/traefik:v3.3

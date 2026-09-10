@@ -100,9 +100,20 @@ Three issues, deliberately not 28. Full list with file:line in
 
 ## 4. Known operational sharp edges
 
-- [ ] **authd down is indistinguishable from a backend fault.** Verified on the
-      box: requests return a Traefik-generated `500`. `Wants=authd.service` on
-      the three pipelines would make systemd say so.
+- [x] **authd down is indistinguishable from a backend fault.** Fixed:
+      `Wants=authd.service` added alongside the existing `After=` on
+      `insightsd.container`, `threatd.container`, `sizingd.container` and
+      `traefik.container` (`traefik.container` got the same treatment on the
+      reasoning that it is the one unit that actually calls authd on every
+      API request, via the `forwardAuth` middleware) -- not `Requires=`:
+      propagating authd's failure would turn a recoverable auth outage into
+      dead pipelines, and each unit's own health check is what's meant to
+      make the difference visible instead. Still true: this only closes the
+      boot-time gap where authd never got pulled in at all. A request while
+      authd is down still comes back as a Traefik-generated `500`
+      indistinguishable from a backend fault -- `Wants=` makes systemd say so
+      in `systemctl status`/`list-dependencies`, it does not change the HTTP
+      response.
 - [x] **The authd negative cache is unbounded.** Fixed: `internal/platform/auth`
       now keeps two separately capped LRU tiers
       (`AUTH_CACHE_MAX_ENTRIES`/`AUTH_NEG_CACHE_MAX_ENTRIES`, default

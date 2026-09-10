@@ -5,7 +5,23 @@
 
 [Unit]
 Description=Traefik reverse proxy
+# authd is more than an ordering dependency for this unit: every API request
+# Traefik proxies to the three pipelines passes through authd's forwardAuth
+# middleware first (dynamic.yaml's six services split three-and-three between
+# that middleware and operator-auth's BasicAuth), so an authd that failed to
+# start -- After= orders but does not pull it in -- leaves Traefik up and
+# answering every one of those requests with its own 500, on a perfectly
+# valid credential. That is the same failure mode the three pipeline units
+# now guard against, and if anything belongs here more than there, since it
+# is Traefik that calls authd on every request, not they. Wants=, not
+# Requires=, for the reason given on the pipeline units: propagating authd's
+# failure by stopping Traefik would take the UI routes and the other two
+# pipelines down with it for no gain. No Wants= for insightsd/threatd/sizingd
+# here: Traefik tolerates any one of them being briefly down as a 502 on that
+# one route, not a blanket failure, so pulling them in would not reveal
+# anything the After= ordering doesn't already give.
 After=authd.service insightsd.service threatd.service sizingd.service
+Wants=authd.service
 
 [Container]
 Image=docker.io/library/traefik:v3.3

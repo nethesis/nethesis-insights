@@ -5,7 +5,15 @@
 
 [Unit]
 Description=Threat Shield pipeline
+# After= alone orders the start but does not pull authd in: on a boot where
+# authd.service fails, this unit still starts, and every request carrying a
+# perfectly valid credential is then answered by a Traefik-generated 500 --
+# observed on the live host, and indistinguishable from a backend fault.
+# Wants=, not Requires=: propagating authd's failure by stopping this unit
+# would turn a recoverable auth outage into a dead pipeline too, and this
+# unit's own health check is what makes the difference visible instead.
 After=authd.service
+Wants=authd.service
 
 [Container]
 Image=ghcr.io/nethesis/nethesis-insights-threatd:latest
