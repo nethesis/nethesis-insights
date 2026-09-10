@@ -4,6 +4,8 @@
 package logs
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -282,5 +284,70 @@ func TestIngestExcludesConfiguredServices(t *testing.T) {
 	}
 	if model.ServiceTag(got.Templates[0].Template) != "sshd-session" {
 		t.Fatalf("wrong template survived: %+v", got.Templates)
+	}
+}
+
+// A gzip bomb must be refused by size, not decompressed into memory. Before
+// the decoded-side cap existed, the limiter sat on r.Body only: a few KiB of
+// gzipped whitespace expanded without limit and the decoder consumed all of
+// it. The body here is ~35 MiB of JSON whitespace, which gzips to a few tens
+// of KiB -- so it sails past any compressed-side cap and can only be stopped
+// after gunzip.
+func TestBundleGzipBombIsRejectedBySize(t *testing.T) {
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	if _, err := gz.Write([]byte(`{"schema_version":1,`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Whitespace is valid JSON filler, so the decoder keeps reading rather
+	// than failing early on a syntax error -- which is what makes this a
+	// size test and not a parser test.
+	filler := bytes.Repeat([]byte(" "), 1<<20)
+	for range 35 {
+		if _, err := gz.Write(filler); err != nil {
+			t.Fatalf("write filler: %v", err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if body.Len() > maxCompressedBundleSize {
+		t.Fatalf("compressed body is %d bytes, over the raw cap -- the test would "+
+			"pass for the wrong reason", body.Len())
+	}
+
+	pub := &fakePublisher{}
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", bytes.NewReader(body.Bytes()))
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.Header.Set("Content-Encoding", "gzip")
+	r.SetBasicAuth(testSystemID, testSecret)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d -- an unbounded gunzip is a memory-exhaustion "+
+			"path for any node with a valid credential", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if len(pub.published) != 0 {
+		t.Fatalf("published %d bundles, want 0", len(pub.published))
+	}
+}
+
+// The raw cap still applies to a body that is not compressed at all.
+func TestOversizedUncompressedBundleIsRejectedBySize(t *testing.T) {
+	pub := &fakePublisher{}
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
+
+	big := strings.NewReader(`{"schema_version":1,` + strings.Repeat(" ", maxCompressedBundleSize+1))
+	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", big)
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.SetBasicAuth(testSystemID, testSecret)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
 	}
 }

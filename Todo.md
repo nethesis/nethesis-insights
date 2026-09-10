@@ -203,7 +203,47 @@ Three issues, deliberately not 28. Full list with file:line in
       `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY=12`. Cheap insurance on a box that now
       has live reporters.
 
-## 5. Not started, from the original plan
+## 5. Decisions taken 2026-09-10, and what they leave open
+
+Four points were put to the operator and answered. Recorded here so none of
+them is re-proposed.
+
+- [x] **The gzip bound was on the wrong side.** All three ingest handlers
+      (`api/logs`, `api/threat`, `api/sizing`) limited the *compressed* body
+      and let gunzip expand without limit, so a node with a valid credential
+      could send a few tens of KiB that became gigabytes of JSON in the
+      decoder — the opposite of what spec §5.4 claims the code does. Fixed:
+      both sides are capped with `http.MaxBytesReader`, which reports the
+      overrun as `*http.MaxBytesError` (answered `413`) instead of truncating
+      into a confusing `400`. The **decoded** cap for bundles is **30 MiB** by
+      explicit decision, with the raw cap left at 8 MiB — 30 MiB of bundle
+      JSON is roughly 3 MiB gzipped, so that is ample headroom. Each handler
+      has a gzip-bomb test; reverting the fix turns the logs one red.
+- [ ] **The rest of spec §5.4 is still unimplemented.** Present:
+      `schema_version`, `window.end > window.start`, `templates ≤ 1000`.
+      Missing: a window in the future, `window.start` older than 6 hours (the
+      6-hour acceptance window is what lets the edge retry across failed
+      cycles — nothing enforces either end today), and at most 2 `samples` per
+      template. The compressed cap is 8 MiB where the spec says 1 MB.
+- **Postgres is dropped.** No `pgStore`, and none planned. The `golang-migrate`
+  work was built, reviewed and **discarded unmerged** — it lives on the local
+  branch `worktree-agent-aa929908ad783b794` (`6be051f`) if the decision is ever
+  reversed. Two things learned in building it are worth keeping even though the
+  code is gone:
+  - `modernc.org/sqlite` **rejects `#` as a comment token**
+    (`unrecognized token: "#"`), so this repo's "`#`-comment form for SQL" rule
+    would break any `.sql` file it is applied to. The rule has never been
+    exercised because the repo has no `.sql` files. Use `--` if that ever
+    changes.
+  - One shared migration directory cannot serve three independent databases:
+    three separate `schema_migrations` tables would give the same version
+    number three different meanings.
+- **`internal/version` is dropped.** The image's
+  `org.opencontainers.image.revision` label already answers "what is running",
+  and CI stamps every image. Not worth wiring through four binaries, two build
+  files and three `/status` pages.
+
+## 6. Not started, from the original plan
 
 - [x] Task 1's tooling: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`,
       `scripts/check-license-headers.sh`. Done 2026-09-10. The header script
@@ -220,8 +260,9 @@ Three issues, deliberately not 28. Full list with file:line in
       limit and nothing upstream bounded them, now `http.MaxBytesReader` at
       16 KiB each. Exclusions are per-file and commented; `bodyclose` and
       `sqlclosecheck` were at zero findings before the pass and still are.
-- [ ] `golang-migrate` in place of `CREATE TABLE IF NOT EXISTS`, now three times
-      over.
+- `golang-migrate` is **dropped** along with Postgres — see §5.
+  `CREATE TABLE IF NOT EXISTS` in each `store.Init` is now the permanent
+  design, not a shortcut awaiting replacement.
 - Distributed locking was considered and **dropped**, not deferred. Both the
   blocklist consensus pass and the sizing cohort pass are single-instance only,
   and that is now a documented constraint rather than a gap: run exactly one

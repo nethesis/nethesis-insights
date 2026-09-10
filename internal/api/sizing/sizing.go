@@ -6,6 +6,7 @@ package sizing
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -55,7 +56,17 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var reader = io.LimitReader(r.Body, maxSizingReportSize)
+	// The cap that matters is on the DECODED stream. A LimitReader on r.Body
+	// alone bounds only the compressed bytes: gunzip is then free to expand
+	// them without limit, and a few MiB of gzipped whitespace becomes
+	// gigabytes of JSON fed straight to the decoder before a single field is
+	// validated. So both sides are capped -- the raw body, which is what is
+	// read off the socket, and the decompressed stream the decoder actually
+	// reads. http.MaxBytesReader rather than io.LimitReader because it
+	// reports the overrun as *http.MaxBytesError instead of silently
+	// truncating into a confusing "invalid json body".
+	r.Body = http.MaxBytesReader(w, r.Body, maxSizingReportSize)
+	var reader io.Reader = r.Body
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		gz, err := gzip.NewReader(reader)
 		if err != nil {
@@ -63,11 +74,17 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer func() { _ = gz.Close() }()
-		reader = gz
+		reader = http.MaxBytesReader(w, io.NopCloser(gz), maxSizingReportSize)
 	}
 
 	var report model.SizingReport
 	if err := json.NewDecoder(reader).Decode(&report); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			reject(w, r, http.StatusRequestEntityTooLarge, "report too large",
+				"limit", tooBig.Limit, "content_length", r.ContentLength)
+			return
+		}
 		reject(w, r, http.StatusBadRequest, "invalid json body",
 			"error", err.Error(), "content_length", r.ContentLength)
 		return

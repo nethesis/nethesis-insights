@@ -368,3 +368,40 @@ func TestSizingIngestKeepsSiblingsOfABadNode(t *testing.T) {
 		t.Errorf("dropped_node = %d, want 1", resp.Dropped.DroppedNode)
 	}
 }
+
+// A gzip bomb must be refused by size rather than decompressed into memory.
+// The limiter used to sit on r.Body only, bounding the compressed bytes while
+// gunzip expanded them without limit; ~12 MiB of gzipped JSON whitespace
+// costs a few tens of KiB on the wire and is stopped only by the cap on the
+// decoded stream.
+func TestSizingIngestGzipBombIsRejectedBySize(t *testing.T) {
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	if _, err := gz.Write([]byte(`{"schema_version":1,`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Whitespace is valid JSON filler, so the decoder keeps reading instead
+	// of failing early on a syntax error -- this is a size test, not a
+	// parser test.
+	filler := bytes.Repeat([]byte(" "), 1<<20)
+	for range 12 {
+		if _, err := gz.Write(filler); err != nil {
+			t.Fatalf("write filler: %v", err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/reports", bytes.NewReader(body.Bytes()))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Content-Encoding", "gzip")
+	req.SetBasicAuth(testSystemID, testSecret)
+	rec := httptest.NewRecorder()
+	sizingServer(&fakeSizingStore{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 -- an unbounded gunzip is a memory-exhaustion "+
+			"path for any reporter with a valid credential", rec.Code)
+	}
+}
