@@ -471,3 +471,89 @@ func TestIngestRejectsTooManySamplesPerTemplate(t *testing.T) {
 		})
 	}
 }
+
+// The digest is the other unbounded array on the wire: UpsertBaselines runs
+// one SELECT plus one INSERT per entry inside a single transaction holding
+// the process-wide write mutex on a one-connection database, and prompt
+// renders every entry. Bounded here, at ingest, for the same reason the
+// module exclusions are: one place, so the gate, the prompt,
+// system_templates and module_baselines cannot disagree about what was
+// accepted.
+func TestIngestRejectsTooManyDigestEntries(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries int
+		want    int
+	}{
+		{"at the ceiling", maxDigestEntries, http.StatusAccepted},
+		{"one over the ceiling", maxDigestEntries + 1, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			digest := make([]model.DigestEntry, tc.entries)
+			for i := range digest {
+				digest[i] = model.DigestEntry{ModuleID: "loki1", Priority: i, Observed: 1}
+			}
+			pub := &fakePublisher{}
+			body, err := json.Marshal(model.Bundle{
+				SchemaVersion: model.SchemaVersion,
+				SystemID:      testSystemID,
+				Window:        testWindow,
+				Digest:        digest,
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			rec := postBundle(t, testServer(pub), string(body), true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			gotPublished := len(pub.published) != 0
+			wantPublished := tc.want == http.StatusAccepted
+			if gotPublished != wantPublished {
+				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
+			}
+		})
+	}
+}
+
+// Truncation records are the third such array, and the gate reads them
+// (a module both truncated and deviating is a gate reason), so an
+// unbounded list is unbounded work in gate.Evaluate as well as in prompt.
+func TestIngestRejectsTooManyTruncationRecords(t *testing.T) {
+	cases := []struct {
+		name    string
+		records int
+		want    int
+	}{
+		{"at the ceiling", maxTruncatedModules, http.StatusAccepted},
+		{"one over the ceiling", maxTruncatedModules + 1, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncated := make([]model.TruncatedModule, tc.records)
+			for i := range truncated {
+				truncated[i] = model.TruncatedModule{ModuleID: "loki1", Dropped: int64(i), Truncated: true}
+			}
+			pub := &fakePublisher{}
+			body, err := json.Marshal(model.Bundle{
+				SchemaVersion: model.SchemaVersion,
+				SystemID:      testSystemID,
+				Window:        testWindow,
+				Budget:        model.Budget{TruncatedModules: truncated},
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			rec := postBundle(t, testServer(pub), string(body), true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			gotPublished := len(pub.published) != 0
+			wantPublished := tc.want == http.StatusAccepted
+			if gotPublished != wantPublished {
+				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
+			}
+		})
+	}
+}

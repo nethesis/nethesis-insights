@@ -106,6 +106,26 @@ const (
 	maxBundleSize           = 30 << 20 // 30 MiB, decoded
 )
 
+// The per-array ceilings. The byte caps above bound the body but not the
+// work a body implies: ~700k digest entries fit inside 30 MiB of JSON and
+// compress to well under 8 MiB, and each one costs UpsertBaselines a SELECT
+// plus an INSERT inside a single transaction holding the process-wide write
+// mutex on a one-connection database, plus a line in the prompt. So every
+// repeated array is capped by count as well.
+//
+// All three share one number because there is no reason for them to differ:
+// a real multi-module node was measured at 587 digest buckets, so 1000 is
+// ample for each, and one ceiling is one thing to remember. A bundle over
+// any of them is rejected rather than truncated -- unlike threat and sizing
+// ingest, which truncate, because a rejected bundle is re-sent by an edge
+// that still holds the window, while a silently trimmed one would make the
+// gate reason about a window the server only partly received.
+const (
+	maxTemplates        = 1000
+	maxDigestEntries    = 1000
+	maxTruncatedModules = 1000
+)
+
 func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -192,8 +212,17 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(b.Templates) > 1000 {
+	if len(b.Templates) > maxTemplates {
 		reject(w, r, http.StatusBadRequest, "too many templates", "templates", len(b.Templates))
+		return
+	}
+	if len(b.Digest) > maxDigestEntries {
+		reject(w, r, http.StatusBadRequest, "too many digest entries", "digest_entries", len(b.Digest))
+		return
+	}
+	if len(b.Budget.TruncatedModules) > maxTruncatedModules {
+		reject(w, r, http.StatusBadRequest, "too many truncation records",
+			"truncated_modules", len(b.Budget.TruncatedModules))
 		return
 	}
 	for _, t := range b.Templates {

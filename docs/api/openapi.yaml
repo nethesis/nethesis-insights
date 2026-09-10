@@ -138,8 +138,9 @@ paths:
             Malformed JSON or gzip body, unsupported `schema_version`, missing
             `system_id`, `window.end` not greater than `window.start`,
             `window.end` in the future, `window.start` older than 6 hours,
-            more than 1000 templates, or more than 2 `samples` on one
-            template.
+            more than 1000 `templates`, more than 1000 `digest` entries,
+            more than 1000 `budget.truncated_modules` entries, or more than
+            2 `samples` on one template.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -816,6 +817,7 @@ components:
         truncated_modules:
           type: array
           items: { $ref: "#/components/schemas/TruncatedModule" }
+          maxItems: 1000
 
     Bundle:
       type: object
@@ -844,6 +846,7 @@ components:
         digest:
           type: array
           items: { $ref: "#/components/schemas/DigestEntry" }
+          maxItems: 1000
         templates:
           type: array
           items: { $ref: "#/components/schemas/Template" }

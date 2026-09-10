@@ -261,8 +261,15 @@ the body.
    authenticated identity, `window.end > window.start`, `window.end` not in
    the future, `window.start` no older than 6 hours (the room the edge needs
    to retry a bundle across several failed send cycles without the server
-   discarding data it eventually delivers), a 1000-template ceiling, and at
-   most 2 `samples` per template.
+   discarding data it eventually delivers), a 1000-entry ceiling on each of
+   `templates`, `digest` and `budget.truncated_modules`, and at most 2
+   `samples` per template. The byte caps bound the body; the count caps bound
+   the work the body implies — roughly 700k digest entries fit inside 30 MiB
+   of JSON, and each one costs `UpsertBaselines` a `SELECT` plus an `INSERT`
+   inside one transaction holding the write mutex, plus a line in the prompt.
+   An over-ceiling bundle is **rejected**, never trimmed: the edge still holds
+   the window and re-sends, whereas a silently trimmed bundle would have the
+   gate reason about a window the server only partly received.
 3. Modules named by `PIPELINE_EXCLUDE_MODULES` (default `crowdsec`) are
    stripped by `model.Bundle.ExcludeModules` — templates, digest entries and
    truncation records together. An entry matches an exact `module_id` **or**
