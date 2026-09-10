@@ -281,8 +281,10 @@ Never let a malformed bundle occupy a worker. Rejected with `400`, logged with
 - window in the future, or `window.start` older than 6 hours
 - `templates` longer than 1000
 - more than 2 `samples` per template
-- compressed body over 1 MB, or decompressed body over 8 MB (decompression is
-  bounded by `io.LimitReader`, so a zip bomb is rejected rather than buffered)
+- compressed body over 8 MiB, or decoded body over 30 MiB (both enforced with
+  `http.MaxBytesReader`, so a zip bomb is rejected rather than buffered). The
+  decoded cap is the one that bounds memory; the compressed cap only bounds
+  the socket read.
 
 The 6-hour acceptance window is what gives the edge room to retry across
 several failed cycles without the server rejecting recovered data.

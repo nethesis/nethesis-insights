@@ -75,8 +75,9 @@ paths:
         and that must never decide the fate of a window. Poll
         `GET /logs/v1/findings` for results.
 
-        Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
-        after decompression.
+        Body may be `Content-Encoding: gzip`. Capped at 8 MiB compressed and
+        30 MiB decoded -- the decoded cap is the one that bounds memory, the
+        compressed cap only bounds the socket read.
 
         Idempotency key is `(system_id, window_start)`: a duplicate window
         is a successful no-op, not an error, so a retried bundle is always
@@ -135,8 +136,10 @@ paths:
         "400":
           description: >-
             Malformed JSON or gzip body, unsupported `schema_version`, missing
-            `system_id`, `window.end` not greater than `window.start`, or more
-            than 1000 templates.
+            `system_id`, `window.end` not greater than `window.start`,
+            `window.end` in the future, `window.start` older than 6 hours,
+            more than 1000 templates, or more than 2 `samples` on one
+            template.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

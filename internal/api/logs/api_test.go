@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
@@ -62,15 +63,34 @@ func mustTrust(cidr string) httpx.TrustedProxies {
 	return t
 }
 
+// testNow is the fixed instant every test's clock reads, so window-age and
+// future-window assertions do not depend on wall-clock time (and so a valid
+// bundle's Window{1000, 2000} -- ancient by any real clock -- does not
+// spuriously fail the 6-hour-age rule).
+var testNow = time.UnixMilli(1_700_000_000_000)
+
+func fixedClock() time.Time { return testNow }
+
+// testWindow is comfortably inside the acceptance window: in the past, but
+// well within 6 hours of testNow.
+var testWindow = model.Window{
+	Start: testNow.Add(-2 * time.Minute).UnixMilli(),
+	End:   testNow.Add(-1 * time.Minute).UnixMilli(),
+}
+
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, &fakeStore{}, trustedProxy, Config{})
+	return NewServer(p, &fakeStore{}, trustedProxy, Config{Now: fixedClock})
 }
 
 func validBundle() string {
+	return bundleWithWindow(testWindow)
+}
+
+func bundleWithWindow(win model.Window) string {
 	b, _ := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
 		SystemID:      testSystemID,
-		Window:        model.Window{Start: 1000, End: 2000},
+		Window:        win,
 	})
 	return string(b)
 }
@@ -185,12 +205,13 @@ func TestIngestExcludesConfiguredModules(t *testing.T) {
 	pub := &fakePublisher{}
 	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
 		ExcludeModules: map[string]bool{"crowdsec1": true},
+		Now:            fixedClock,
 	})
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
 		SystemID:      testSystemID,
-		Window:        model.Window{Start: 1000, End: 2000},
+		Window:        testWindow,
 		Templates: []model.Template{
 			{Template: "keep", ModuleID: "loki1"},
 			{Template: "drop", ModuleID: "crowdsec1"},
@@ -231,7 +252,7 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
 		SystemID:      testSystemID,
-		Window:        model.Window{Start: 1000, End: 2000},
+		Window:        testWindow,
 		Templates: []model.Template{
 			{Template: "keep", ModuleID: "loki1"},
 			{Template: "also-keep", ModuleID: "crowdsec1"},
@@ -260,12 +281,13 @@ func TestIngestExcludesConfiguredServices(t *testing.T) {
 	pub := &fakePublisher{}
 	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
 		ExcludeServices: map[string]bool{"insights": true},
+		Now:             fixedClock,
 	})
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
 		SystemID:      testSystemID,
-		Window:        model.Window{Start: 1000, End: 2000},
+		Window:        testWindow,
 		Templates: []model.Template{
 			{Template: `<3> [insights] msg="gate decision"`, ModuleID: ""},
 			{Template: `<6> [sshd-session] Received disconnect from <IP>`, ModuleID: "", Category: "security"},
@@ -349,5 +371,103 @@ func TestOversizedUncompressedBundleIsRejectedBySize(t *testing.T) {
 
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// §5.4: "window in the future" is checked on window.end, since that is what
+// tells whether any part of a claimed-complete window has not happened yet.
+func TestIngestRejectsWindowInTheFuture(t *testing.T) {
+	cases := []struct {
+		name string
+		end  int64
+		want int
+	}{
+		{"ends exactly now", testNow.UnixMilli(), http.StatusAccepted},
+		{"ends one millisecond in the future", testNow.UnixMilli() + 1, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			win := model.Window{Start: tc.end - 1000, End: tc.end}
+			rec := postBundle(t, testServer(pub), bundleWithWindow(win), true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			gotPublished := len(pub.published) != 0
+			wantPublished := tc.want == http.StatusAccepted
+			if gotPublished != wantPublished {
+				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
+			}
+		})
+	}
+}
+
+// §5.4: window.start older than 6 hours is rejected. That 6 hours -- not 1 --
+// is deliberate: it is the room the edge needs to retry a bundle across
+// several failed send cycles (a network blip, a server restart, a queue at
+// capacity) without the server discarding data the edge eventually manages
+// to deliver. This test's job is to catch a future "tightening" of that
+// number as much as to prove the rule exists.
+func TestIngestRejectsWindowOlderThan6Hours(t *testing.T) {
+	cutoff := testNow.Add(-6 * time.Hour).UnixMilli()
+	cases := []struct {
+		name  string
+		start int64
+		want  int
+	}{
+		{"starts exactly at the 6-hour edge", cutoff, http.StatusAccepted},
+		{"starts one millisecond past the 6-hour edge", cutoff - 1, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			win := model.Window{Start: tc.start, End: tc.start + 1000}
+			rec := postBundle(t, testServer(pub), bundleWithWindow(win), true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			gotPublished := len(pub.published) != 0
+			wantPublished := tc.want == http.StatusAccepted
+			if gotPublished != wantPublished {
+				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
+			}
+		})
+	}
+}
+
+// §5.4: at most 2 samples per template.
+func TestIngestRejectsTooManySamplesPerTemplate(t *testing.T) {
+	cases := []struct {
+		name    string
+		samples []string
+		want    int
+	}{
+		{"exactly 2 samples", []string{"sample one", "sample two"}, http.StatusAccepted},
+		{"3 samples", []string{"sample one", "sample two", "sample three"}, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &fakePublisher{}
+			body, err := json.Marshal(model.Bundle{
+				SchemaVersion: model.SchemaVersion,
+				SystemID:      testSystemID,
+				Window:        testWindow,
+				Templates: []model.Template{
+					{Template: "tmpl", ModuleID: "loki1", Samples: tc.samples},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			rec := postBundle(t, testServer(pub), string(body), true)
+			if rec.Code != tc.want {
+				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			gotPublished := len(pub.published) != 0
+			wantPublished := tc.want == http.StatusAccepted
+			if gotPublished != wantPublished {
+				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
+			}
+		})
 	}
 }
