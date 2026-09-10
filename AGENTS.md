@@ -158,8 +158,36 @@ Threat Shield rules that are as load-bearing as the gate's:
   and the cross-site check stay in the app, because Traefik BasicAuth is still Basic
   auth, and a browser replays it on a forged cross-site POST exactly as it would
   replay credentials cached against the app directly.
-- **Allowlist prefixes wider than `/24` (v4) or `/48` (v6) need an explicit `force`.**
-  `0.0.0.0/0` on the allowlist silently disables the whole feed.
+- **Allowlist prefixes wider than `/24` (v4) or `/48` (v6) are refused, with no
+  override.** `0.0.0.0/0` on the allowlist silently disables the whole feed. The
+  `force` flag that used to override this is **gone** — from `ParseAllowlistEntry`,
+  from the operator UI form and from `POST /blocklist/v1/allowlist-requests`, which now
+  applies the floor at request time too since nothing downstream could ever
+  approve a wider prefix. Do not reintroduce it: an exemption that broad is
+  never what was meant, the one time it is it costs a handful of narrower
+  entries, and a flag on a form is one more thing a forged request can carry.
+  The floor guards *adding* an exemption, so the paths that merely name one —
+  deleting an entry, recording a decision on a request — call
+  `threat.NormalizeAllowlistCIDR` instead and skip it.
+- **A v4-mapped allowlist prefix is normalised to its v4 form, and an IPv6 zone
+  is stripped from any allowlist entry.** `attacker_ip` is stored unmapped and
+  unzoned, so `::ffff:203.0.113.0/120` stored verbatim would be an exemption that
+  matches nothing — fail-open, the same direction as a dropped row. Normalising
+  also measures such a prefix against the right floor: `::ffff:0.0.0.0/96` *is*
+  `0.0.0.0/0`, and weighing it against the v6 `/48` let the widest possible
+  exemption through.
+- **An IPv6 zone is refused at ingest and normalised away on every match.**
+  `netip.Prefix.Contains` is false for any address carrying a zone (a prefix has
+  none to compare) and `Addr.IsUnspecified` is an equality test against the
+  zone-less `::`, so a `%eth0` suffix used to slip every class `publicUnicast`
+  catches through `nonPublicPrefixes` or `IsUnspecified` — the 6to4 and NAT64
+  prefixes and `fec0::/10` — straight into storage and the published feed, and
+  it made *any* allowlist entry unmatchable. `IsPrivate`, `IsLoopback`,
+  `IsLinkLocalUnicast` and `IsMulticast` are zone-agnostic, which is why the
+  hole was only in the others. `publicUnicast` now rejects a zoned address
+  outright (a zone is a local interface scope; it cannot describe a remote
+  attacker), and `Allowlist.Contains` and `blocklist.promote` normalise anyway —
+  the second lock, on the side that reads addresses back out of the store.
 - **Every endpoint must appear in `docs/api/openapi.yaml`**, whose schemas mirror
   `internal/model` field-for-field. `docs/api/openapi_test.go` fails the build on a
   missing or stale path. The operator UI is deliberately not documented there.
@@ -615,7 +643,10 @@ successful no-op, not an error.
   site-local, loopback, unspecified, benchmark, IPv4-mapped, `0.0.0.0/8`,
   `192.0.0.0/24`, `240.0.0.0/4` with broadcast, 6to4 and NAT64 — the two
   prefixes embedding an IPv4 address verbatim — and the reporter's own
-  address), documentation ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
+  address), **each zoned as well as bare** (`fec0::1%eth0`, `::%eth0`,
+  `2002:c0a8:0101::1%eth0`), with `2001:db8::1%eth0` as the isolating case: the
+  bare form is a documentation address this sanitizer keeps, so only the zone
+  rule can drop it. Documentation ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".

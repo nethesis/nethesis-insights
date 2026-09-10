@@ -355,23 +355,53 @@ func TestWriteEnforcesThePrefixGuardrail(t *testing.T) {
 	w := &fakeWriter{}
 	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
 
-	req := writeReq("/blocklist/allowlist", url.Values{"cidr": {"0.0.0.0/0"}})
+	for _, cidr := range []string{"0.0.0.0/0", "203.0.113.0/16", "2001:db8::/32", "::ffff:0.0.0.0/96"} {
+		req := writeReq("/blocklist/allowlist", url.Values{"cidr": {cidr}})
+		req.SetBasicAuth("alice", testAdminKey)
+
+		if rec := do(h, req); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status got %d, want 400", cidr, rec.Code)
+		}
+		if len(w.upserted) != 0 {
+			t.Fatalf("%s: an over-broad prefix was written: %+v", cidr, w.upserted)
+		}
+	}
+}
+
+// There is no override, and in particular no form field that reinstates one.
+// A "force" parameter used to exist and was removed: an exemption wide enough
+// to disable the feed is never what an operator meant, and the flag was one
+// more thing a forged request could carry. A request still naming it must be
+// refused, not obeyed.
+func TestWriteIgnoresALingeringForceField(t *testing.T) {
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
+
+	req := writeReq("/blocklist/allowlist", url.Values{"cidr": {"0.0.0.0/0"}, "force": {"1"}})
 	req.SetBasicAuth("alice", testAdminKey)
 
 	if rec := do(h, req); rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", rec.Code)
 	}
 	if len(w.upserted) != 0 {
-		t.Fatalf("an over-broad prefix was written: %+v", w.upserted)
+		t.Fatalf("force was honoured: %+v", w.upserted)
 	}
+}
 
-	// ... and goes through when the operator says force.
-	forced := writeReq("/blocklist/allowlist", url.Values{"cidr": {"0.0.0.0/0"}, "force": {"1"}})
-	forced.SetBasicAuth("alice", testAdminKey)
-	if rec := do(h, forced); rec.Code != http.StatusSeeOther {
-		t.Fatalf("forced status: got %d, want 303", rec.Code)
+// Deleting is not adding: the caller must be able to name whatever is
+// actually stored, including an entry wider than the floor -- rows written
+// before the floor existed, or before the override was removed.
+func TestWriteAllowsDeletingAnOverBroadEntry(t *testing.T) {
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
+
+	req := writeReq("/blocklist/allowlist/delete", url.Values{"cidr": {"0.0.0.0/0"}})
+	req.SetBasicAuth("alice", testAdminKey)
+
+	if rec := do(h, req); rec.Code != http.StatusSeeOther {
+		t.Fatalf("status: got %d, want 303", rec.Code)
 	}
-	if len(w.upserted) != 1 {
-		t.Fatalf("forced write did not land: %+v", w.upserted)
+	if len(w.deleted) != 1 || w.deleted[0] != "0.0.0.0/0" {
+		t.Fatalf("deleted: got %+v, want [0.0.0.0/0]", w.deleted)
 	}
 }

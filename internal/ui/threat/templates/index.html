@@ -69,9 +69,9 @@ behind it are pruned long before anyone asks.</small></p>
 <h2>Allowlist</h2>
 <p><small>Applied at promotion, not at read &mdash; adding an entry unlists the
 address on the next pass; deleting one does not re-block anything until it is
-reported again. A prefix shorter than /24 (IPv4) or /48 (IPv6) is refused
-unless force is checked &mdash; 0.0.0.0/0 here would silently disable the
-entire feed.</small></p>
+reported again. A prefix wider than /24 (IPv4) or /48 (IPv6) is refused, with
+no override: 0.0.0.0/0 here would silently disable the entire feed. Say a
+broad exemption as several narrower entries instead.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
@@ -106,7 +106,6 @@ entire feed.</small></p>
 <fieldset role="group">
 <input type="text" name="cidr" placeholder="CIDR or bare address" required>
 <input type="text" name="reason" placeholder="reason">
-<label><input type="checkbox" name="force"> force</label>
 <button type="submit">Add to allowlist</button>
 </fieldset>
 </form>

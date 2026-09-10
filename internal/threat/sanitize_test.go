@@ -130,6 +130,22 @@ func TestSanitizeDropsNonPublicAddresses(t *testing.T) {
 		{"6to4 wrapping public", "2002:cb00:7112::1"},
 		{"NAT64 wrapping RFC1918", "64:ff9b::c0a8:101"},
 		{"NAT64 wrapping public", "64:ff9b::cb00:7112"},
+		// A zone defeats netip.Prefix.Contains and Addr.IsUnspecified, both
+		// of which compare against zone-less values -- so every class above
+		// that publicUnicast catches through nonPublicPrefixes or
+		// IsUnspecified would sail through if the zone were not refused.
+		// IsPrivate, IsLoopback, IsLinkLocalUnicast and IsMulticast are
+		// zone-agnostic, which is exactly why the hole was only in the
+		// others.
+		{"zoned deprecated IPv6 site-local", "fec0::1%eth0"},
+		{"zoned 6to4 wrapping RFC1918", "2002:c0a8:0101::1%eth0"},
+		{"zoned NAT64 wrapping RFC1918", "64:ff9b::c0a8:101%eth0"},
+		{"zoned unspecified v6", "::%eth0"},
+		{"zoned link-local v6", "fe80::1%eth0"},
+		// The isolating case: 2001:db8::1 is a documentation address, which
+		// this sanitizer deliberately keeps. Only the zone rule drops this.
+		{"zoned otherwise-acceptable v6", "2001:db8::1%eth0"},
+		{"zoned IPv4-mapped private v6", "::ffff:10.0.0.5%eth0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

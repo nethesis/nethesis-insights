@@ -925,6 +925,28 @@ htpasswd password; that layer is additive, not a replacement — see "Operator
 UI" above for why the app-level check has to stay regardless.
 
 Three tables sit behind it, and `/audit` is the only reader of the third.
+**A prefix wider than `/24` (v4) or `/48` (v6) is refused, and there is no
+override.** `0.0.0.0/0` on the allowlist disables the whole feed, silently:
+nothing anywhere reports that promotion had quietly stopped. The `force` flag
+that used to override the floor is gone from `threat.ParseAllowlistEntry`,
+from the operator UI form and from `POST /v1/allowlist-requests` — which now
+applies the floor at request time too, since nothing downstream could ever
+approve a wider prefix and queueing one only puts an undecidable row in front
+of an admin. An exemption that broad is never what was meant; the rare time it
+is, it costs a handful of narrower entries. The floor also guards *adding* an
+exemption and nothing else, so the two routes that merely name one — deleting
+an entry, recording a decision on a request — call
+`threat.NormalizeAllowlistCIDR`, which canonicalises identically but skips the
+floor, because a caller has to be able to name whatever is actually stored.
+
+Canonicalisation is part of the same rule. `attacker_ip` is stored unmapped
+and unzoned, so an entry stored as `::ffff:203.0.113.0/120` or with a `%eth0`
+suffix would be an exemption that matches nothing — fail-open, the same
+direction as a row that was quietly dropped. A v4-mapped prefix therefore
+reduces to its v4 form, which also weighs it against the right floor:
+`::ffff:0.0.0.0/96` *is* `0.0.0.0/0`, and measuring it against the v6 `/48`
+used to let the widest possible exemption through the guardrail.
+
 `threat_allowlist_requests` is keyed
 `(cidr, system_id)` so one system counts once, mirroring the blocklist's
 distinct-system rule; `threat_allowlist_reviews` records the latest human
@@ -1037,6 +1059,21 @@ logged. The request logger never reads the `Authorization` header — it records
 only whether one was present. An authentication failure names the presented
 `system_id` and never the secret. `LLM_API_KEY` appears in a log line only as
 `llm_api_key_set=true`, and each operator UI status page builds its
+
+  **A zoned address is refused before any of that, and the order is the
+  point.** `netip.Prefix.Contains` is false for an address carrying an IPv6
+  zone, because a prefix has no zone to compare, and `Addr.IsUnspecified` is
+  an equality test against the zone-less `::` — so every class caught through
+  `nonPublicPrefixes` or `IsUnspecified`, which is exactly the two transition
+  prefixes above plus `fec0::/10`, used to sail through on a `%eth0` suffix
+  and reach the published feed, while `IsPrivate`, `IsLoopback`,
+  `IsLinkLocalUnicast` and `IsMulticast` (all zone-agnostic) kept working. A
+  zone names a local interface scope, so it cannot describe a remote
+  attacker: refusing it costs nothing and no reporter has business sending
+  one. `Allowlist.Contains` and `blocklist.promote` normalise the zone away
+  as well — the second lock, on the side that reads addresses back out of the
+  store, where a false negative means publishing an address someone
+  explicitly exempted.
 configuration table from an explicit field list rather than iterating
 `os.Environ()`, so a secret added to the process environment later cannot
 appear on an unauthenticated page by accident.

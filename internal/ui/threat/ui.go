@@ -128,8 +128,8 @@ var pages = []string{
 }
 
 // maxAllowlistFormSize bounds a writable route's request body. None of the
-// four routes below carry more than a CIDR, a "force" flag and a free-text
-// reason/note already capped at model.MaxAllowlistReasonLen (512 bytes), but
+// four routes below carry more than a CIDR and a free-text reason/note
+// already capped at model.MaxAllowlistReasonLen (512 bytes), but
 // nothing in front of these handlers bounds the body otherwise -- Traefik's
 // dynamic.yaml has no buffering middleware, and chrome does not size-limit
 // either -- so each handler calls http.MaxBytesReader(w, r.Body, ...) on
@@ -506,13 +506,15 @@ func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, acto
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	force := r.FormValue("force") != ""
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), force)
+	// PostFormValue, not FormValue: a write must take its parameters from
+	// the body it was submitted with, never from the query string. See
+	// route() for the method gate that makes that more than a preference.
+	cidr, _, err := threat.ParseAllowlistEntry(r.PostFormValue("cidr"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	reason := threat.CleanText(r.FormValue("reason"), model.MaxAllowlistReasonLen)
+	reason := threat.CleanText(r.PostFormValue("reason"), model.MaxAllowlistReasonLen)
 	now := time.Now().UnixMilli()
 
 	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), threatstore.AllowlistRow{
@@ -533,9 +535,10 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	// force=true: breadth guards adding an exemption, not removing one --
-	// the caller must be able to remove whatever is actually stored.
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), true)
+	// NormalizeAllowlistCIDR, not ParseAllowlistEntry: the breadth floor
+	// guards adding an exemption, not removing one, and the caller must be
+	// able to name whatever is actually stored.
+	cidr, _, err := threat.NormalizeAllowlistCIDR(r.PostFormValue("cidr"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -567,12 +570,12 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	cidr, _, err := threat.ParseAllowlistEntry(r.FormValue("cidr"), false)
+	cidr, _, err := threat.ParseAllowlistEntry(r.PostFormValue("cidr"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
+	note := threat.CleanText(r.PostFormValue("note"), model.MaxAllowlistReasonLen)
 	reason := note
 	if reason == "" {
 		reason = "approved via operator UI"
@@ -607,17 +610,19 @@ func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, act
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	raw := strings.TrimSpace(r.FormValue("cidr"))
+	raw := strings.TrimSpace(r.PostFormValue("cidr"))
 	if raw == "" {
 		http.Error(w, "cidr is required", http.StatusBadRequest)
 		return
 	}
-	cidr, _, err := threat.ParseAllowlistEntry(raw, true) // no entry is created; breadth is irrelevant
+	// No entry is created here, so the breadth floor is irrelevant; the
+	// decision still has to name the CIDR the customer asked about.
+	cidr, _, err := threat.NormalizeAllowlistCIDR(raw)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	note := threat.CleanText(r.FormValue("note"), model.MaxAllowlistReasonLen)
+	note := threat.CleanText(r.PostFormValue("note"), model.MaxAllowlistReasonLen)
 	now := time.Now().UnixMilli()
 
 	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, threatstore.AllowlistReviewRejected, actor, note, now); err != nil {

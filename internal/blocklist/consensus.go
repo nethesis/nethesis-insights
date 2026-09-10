@@ -167,7 +167,13 @@ func (r *Runner) promote(rows []threatstore.ThreatCandidateRow, allow threat.All
 		if err != nil {
 			continue
 		}
-		addr = addr.Unmap()
+		// Unmapped and unzoned before it is used as a map key, so two
+		// spellings of one address cannot fold into two candidates and so
+		// the allowlist check below -- netip.Prefix.Contains, which is false
+		// for any zoned address -- cannot be evaded by a "%1" suffix. Ingest
+		// already refuses both spellings; this is the second lock, on the
+		// side that reads them back out of the store.
+		addr = addr.Unmap().WithZone("")
 		c, seen := folded[addr]
 		if !seen {
 			c = &candidate{addr: addr, systems: map[string]bool{}, scenarios: map[string]bool{}}

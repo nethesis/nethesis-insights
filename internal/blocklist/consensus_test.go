@@ -274,6 +274,34 @@ func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 	}
 }
 
+// The second lock, on the side that reads addresses back out of the store.
+// netip.Prefix.Contains is false for any address carrying an IPv6 zone,
+// because a prefix has none to compare -- so an attacker_ip stored as
+// "2001:db8::9%eth0" would clear an allowlist entry that plainly covers it.
+// Ingest refuses a zoned address outright (see threat.publicUnicast), which
+// is why such a row should never exist; promote normalizes anyway, because
+// the cost of being wrong here is publishing an address someone explicitly
+// exempted, under a spelling the operator UI does not show.
+func TestAllowlistCoversZonedAddresses(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+		CIDR: "2001:db8::/48", Reason: "customer range", CreatedBy: "ops", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		report(t, s, sys, "2001:db8::9%eth0", "ssh_bruteforce", 5*minute)
+		report(t, s, sys, "2001:db8::9", "ssh_bruteforce", 5*minute)
+	}
+
+	runPass(t, s, testConfig())
+
+	if got := listed(t, s); len(got) != 0 {
+		t.Fatalf("got %v, want nothing -- both spellings fall inside 2001:db8::/48", got)
+	}
+}
+
 // A malformed allowlist row must stop the pass, not be skipped: skipping it
 // would publish an address someone had explicitly excluded.
 func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {

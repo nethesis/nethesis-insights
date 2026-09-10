@@ -167,7 +167,9 @@ Applied in this order; each drop increments exactly one counter.
    `240.0.0.0/4` (broadcast `255.255.255.255` included), the 6to4 prefix
    `2002::/16` and the NAT64 prefix `64:ff9b::/96` — both of which carry an
    IPv4 address verbatim in their low bits, so `2002:c0a8:0101::1` is
-   `192.168.1.1` in disguise — and the reporter's own observed source address. That
+   `192.168.1.1` in disguise — any address carrying an IPv6 zone (`fec0::1%eth0`),
+   because a zone describes a local interface and so cannot describe a remote
+   attacker — and the reporter's own observed source address. That
    address is the `X-Forwarded-For` value Traefik sets, trusted only because
    the request reached `threatd` from Traefik's own address
    (`TRUSTED_PROXY_CIDRS`) — never the bare TCP peer address, which behind a

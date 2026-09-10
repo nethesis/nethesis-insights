@@ -163,6 +163,9 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 			res.Counters.DroppedBadIP++
 			continue
 		}
+		// Unmap only: a zone is not stripped here but refused by
+		// publicUnicast, so a scoped address is dropped as evidence rather
+		// than quietly rewritten into an address nobody reported.
 		addr = addr.Unmap()
 		if !publicUnicast(addr) || (opts.SourceIP.IsValid() && addr == opts.SourceIP.Unmap()) {
 			res.Counters.DroppedPrivateIP++
@@ -231,6 +234,18 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 // transition prefixes, which embed a v4 address verbatim. See
 // nonPublicPrefixes for the ones Go's own predicates miss.
 //
+// An address carrying an IPv6 zone is refused before any of that, and the
+// order is the whole point. netip.Prefix.Contains is false for a zoned
+// address, because a prefix has no zone to compare, and Addr.IsUnspecified
+// is an equality test against the zone-less "::" -- so every class caught
+// through nonPublicPrefixes or IsUnspecified, which is precisely the two
+// transition prefixes above plus the deprecated site-local range, would sail
+// through on a "%eth0" suffix while IsPrivate, IsLoopback,
+// IsLinkLocalUnicast and IsMulticast (all zone-agnostic) kept working. A
+// zone is a local interface scope in any case: it cannot describe a remote
+// attacker, so refusing it costs nothing and no reporter has business
+// sending one.
+//
 // The documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
 // 2001:db8::/32) are deliberately NOT rejected: they are not private
 // addressing, they never appear in real traffic, and both the design document
@@ -238,6 +253,7 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 func publicUnicast(a netip.Addr) bool {
 	switch {
 	case !a.IsValid(),
+		a.Zone() != "",
 		a.IsUnspecified(),
 		a.IsLoopback(),
 		a.IsPrivate(),

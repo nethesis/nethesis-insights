@@ -876,6 +876,14 @@ something it shouldn't? One exclusion runs before anything is published.
   the list is read, so adding an entry actually *removes* the address on the
   next pass rather than just hiding it.
 
+  A range wider than a `/24` (IPv4) or a `/48` (IPv6) is **refused**, and there
+  is no way to override it. An exemption that wide is almost never what someone
+  meant, and the extreme case — `0.0.0.0/0`, "exempt everything" — would switch
+  the whole feed off with nothing anywhere saying so. If you genuinely need to
+  exempt a lot of address space, say it as several narrower entries; that also
+  leaves a readable record of what was exempted and why. Removing an entry has
+  no such limit: whatever is on the list can always be taken off it.
+
 An earlier design also automatically excluded the address each reporting node
 connects from ("fleet self-protection"), so a misconfigured appliance
 reporting the fleet's own gateway could not get the fleet to block itself.

@@ -545,10 +545,10 @@ paths:
         "400":
           description: >-
             Unparseable `cidr`, a prefix broader than the `/24` (v4) or
-            `/48` (v6) floor (this endpoint never accepts a `force`
-            override -- that only exists on the admin add endpoint, because
-            broadening a request never bypasses human review anyway), or
-            `reason` missing/too long/non-printable.
+            `/48` (v6) floor (there is no override anywhere any more, so a
+            prefix this wide could never be approved and queueing it would
+            only put an undecidable row in front of an admin), or `reason`
+            missing/too long/non-printable.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1232,7 +1232,7 @@ components:
       properties:
         cidr:
           type: string
-          description: A bare address or CIDR. Normalises to /32 or /128 if bare. Rejected if broader than /24 (v4) / /48 (v6) -- no force override on this endpoint.
+          description: A bare address or CIDR. Normalises to /32 or /128 if bare; a v4-mapped form and an IPv6 zone are normalised away. Rejected if broader than /24 (v4) / /48 (v6) -- there is no force override anywhere.
         reason:
           type: string
           description: Free text from a customer. Length-capped, rendered escaped, never trusted.

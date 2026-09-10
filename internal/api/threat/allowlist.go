@@ -49,11 +49,12 @@ func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// force=true: the over-broad-prefix guardrail protects promotion, not a
-	// request for review -- a human decides at approval time, and rejecting
-	// a customer's request over breadth here would just be a confusing
-	// error for something that does no damage by itself.
-	cidr, _, err := threat.ParseAllowlistEntry(body.CIDR, true)
+	// The breadth floor applies here, to the request, not only at approval.
+	// A prefix wider than the floor can never be approved -- there is no
+	// override anywhere any more -- so queueing one would only put a row in
+	// front of an admin that they have no way to say yes to, and the useful
+	// answer to the customer is the 400 that says why.
+	cidr, _, err := threat.ParseAllowlistEntry(body.CIDR)
 	if err != nil {
 		reject(w, r, http.StatusBadRequest, "invalid cidr", "error", err.Error())
 		return

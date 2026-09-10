@@ -102,13 +102,17 @@ func TestAllowlistRequestNormalizesABareAddress(t *testing.T) {
 	}
 }
 
-// The over-broad-prefix guardrail does NOT apply to a request -- it is a
-// review queue, not a promotion, and a human decides at approval time.
-func TestAllowlistRequestAcceptsAnOverBroadCIDR(t *testing.T) {
+// The over-broad-prefix guardrail applies to a request too. There is no
+// override at approval time any more, so a prefix this wide could never
+// become an entry -- queueing it would only put a row in front of an admin
+// that they have no way to say yes to.
+func TestAllowlistRequestRejectsAnOverBroadCIDR(t *testing.T) {
 	h := allowlistServer(newAllowlistTestStore(t))
-	rec := postAllowlistRequest(t, h, `{"cidr":"0.0.0.0/0","reason":"please"}`, true)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status: got %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	for _, cidr := range []string{"0.0.0.0/0", "203.0.113.0/16", "2001:db8::/32", "::ffff:0.0.0.0/96"} {
+		rec := postAllowlistRequest(t, h, `{"cidr":"`+cidr+`","reason":"please"}`, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d, want 400 (body %s)", cidr, rec.Code, rec.Body.String())
+		}
 	}
 }
 
