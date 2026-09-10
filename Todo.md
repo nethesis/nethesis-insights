@@ -200,5 +200,8 @@ Three issues, deliberately not 28. Full list with file:line in
       `sqlclosecheck` were at zero findings before the pass and still are.
 - [ ] `golang-migrate` in place of `CREATE TABLE IF NOT EXISTS`, now three times
       over.
-- [ ] Distributed locking: both the blocklist consensus pass and the sizing
-      cohort pass are single-instance only.
+- Distributed locking was considered and **dropped**, not deferred. Both the
+  blocklist consensus pass and the sizing cohort pass are single-instance only,
+  and that is now a documented constraint rather than a gap: run exactly one
+  `threatd` and one `sizingd` against a given database. Do not reintroduce this
+  as a planned item without a multi-instance deployment that actually needs it.

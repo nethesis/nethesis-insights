@@ -1016,8 +1016,10 @@ reimplements the query.
 
 - **Single instance, per pipeline.** Neither the consensus pass (`threatd`) nor
   the cohort pass (`sizingd`) takes a distributed lock, so two processes of
-  either against one database would both generate. The lock question returns
-  with multi-instance deployment.
+  either against one database would both generate. This is a **constraint, not
+  a gap**: locking was considered and dropped, so the supported deployment is
+  exactly one `threatd` and one `sizingd` per database. Nothing enforces that
+  at runtime — it is an operator responsibility.
 - **No organization identity.** Promotion counts distinct systems only; the
   design's cross-organization requirement (D5) cannot be expressed until the
   authenticator returns a tenant. Three systems in one fleet therefore count
