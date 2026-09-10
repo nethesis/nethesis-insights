@@ -187,9 +187,12 @@ the body.
 2. The body is decoded (gzip-aware, size-capped at 8 MiB) into a
    `model.Bundle` and validated: schema version, `system_id` matches the
    authenticated identity, a sane window, a template-count ceiling.
-3. Modules named by `PIPELINE_EXCLUDE_MODULES` (default `crowdsec1`) are
+3. Modules named by `PIPELINE_EXCLUDE_MODULES` (default `crowdsec`) are
    stripped by `model.Bundle.ExcludeModules` — templates, digest entries and
-   truncation records together. This happens here, before the queue, so that
+   truncation records together. An entry matches an exact `module_id` **or**
+   its `model.ModuleFamily`, and the family is what belongs in configuration:
+   NS8 instance numbers vary per cluster, so an exclusion written `crowdsec1`
+   stops working on a node running `crowdsec3`, with no error to say so. This happens here, before the queue, so that
    the gate, the prompt, `system_templates` and `module_baselines` all read
    the same filtered bundle and cannot disagree about which modules are in
    scope. CrowdSec is excluded by default because it already has its own

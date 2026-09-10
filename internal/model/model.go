@@ -204,13 +204,35 @@ func (b Bundle) CategoryOf(template string) string {
 	return ""
 }
 
+// moduleExcluded reports whether moduleID is excluded, by exact id or by
+// module family. See ExcludeModules for why the family is the spelling that
+// belongs in configuration.
+func moduleExcluded(excluded map[string]bool, moduleID string) bool {
+	return excluded[moduleID] || excluded[ModuleFamily(moduleID)]
+}
+
 // ExcludeModules returns a copy of b with every template, digest entry and
-// truncation record whose ModuleID is in excluded removed.
+// truncation record whose module is in excluded removed.
 //
 // A module that owns a dedicated pipeline must not also be analysed by the LLM
 // one. CrowdSec is the case this exists for: its decisions already travel
 // through /blocklist/v1/events into the blocklist, so shipping its log lines to the
 // model pays twice for the same signal and floods the gate with novelty churn.
+//
+// An entry matches either the module id exactly or its ModuleFamily, and the
+// family is the spelling to configure. NS8 module ids carry an instance
+// number nobody can predict from the outside -- the CrowdSec module is
+// crowdsec1 on one cluster and crowdsec3 on the next -- so an exclusion
+// written as an instance id silently stops excluding anything the moment a
+// node numbers its instance differently, and the pipeline quietly starts
+// paying twice for that node's CrowdSec signal. Configuring "crowdsec"
+// covers every instance of it. The exact-id match is kept so a single
+// misbehaving instance can still be singled out.
+//
+// ModuleFamily is deliberately the same function that keys system_templates
+// and the fingerprint: one definition of what module a record belongs to,
+// because two that disagreed would exclude a record from the prompt while
+// still counting it as novel.
 //
 // All three collections are filtered together. Dropping only Templates would
 // leave the digest firing deviation reasons for a module the prompt never
@@ -218,7 +240,8 @@ func (b Bundle) CategoryOf(template string) string {
 //
 // An empty or nil excluded set returns b unchanged. The empty module id is the
 // host bucket (sshd, systemd, runagent) and is an ordinary module here: it is
-// excluded only if the caller explicitly lists it.
+// excluded only if the caller explicitly lists it -- ModuleFamily("") is ""
+// too, so listing "" still reaches exactly that bucket and nothing else.
 func (b Bundle) ExcludeModules(excluded map[string]bool) Bundle {
 	if len(excluded) == 0 {
 		return b
@@ -228,14 +251,14 @@ func (b Bundle) ExcludeModules(excluded map[string]bool) Bundle {
 
 	out.Templates = make([]Template, 0, len(b.Templates))
 	for _, t := range b.Templates {
-		if !excluded[t.ModuleID] {
+		if !moduleExcluded(excluded, t.ModuleID) {
 			out.Templates = append(out.Templates, t)
 		}
 	}
 
 	out.Digest = make([]DigestEntry, 0, len(b.Digest))
 	for _, e := range b.Digest {
-		if !excluded[e.ModuleID] {
+		if !moduleExcluded(excluded, e.ModuleID) {
 			out.Digest = append(out.Digest, e)
 		}
 	}
@@ -243,7 +266,7 @@ func (b Bundle) ExcludeModules(excluded map[string]bool) Bundle {
 	out.Budget = b.Budget
 	out.Budget.TruncatedModules = make([]TruncatedModule, 0, len(b.Budget.TruncatedModules))
 	for _, tm := range b.Budget.TruncatedModules {
-		if !excluded[tm.ModuleID] {
+		if !moduleExcluded(excluded, tm.ModuleID) {
 			out.Budget.TruncatedModules = append(out.Budget.TruncatedModules, tm)
 		}
 	}

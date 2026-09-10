@@ -486,9 +486,14 @@ the dev fleet, zero gated out. It also made spec §9.4's spend-cap degrade path
 unconditional form.
 
 **Modules with their own pipeline are excluded at ingest**, via
-`PIPELINE_EXCLUDE_MODULES` (default `crowdsec1`) and
+`PIPELINE_EXCLUDE_MODULES` (default `crowdsec`) and
 `model.Bundle.ExcludeModules`, applied in `api.handleBundles` before
-`queue.Publish`. One place, so gate, prompt, `system_templates` and
+`queue.Publish`. **Configure the module family, not an instance id.** An entry
+matches either an exact `module_id` or its `model.ModuleFamily`, and the family
+is the spelling that belongs in configuration: NS8 numbers instances per
+cluster, so `crowdsec1` excludes nothing on a node whose instance is
+`crowdsec3` — silently, and that node then pays twice for its CrowdSec signal.
+The exact-id form stays so one misbehaving instance can be singled out. One place, so gate, prompt, `system_templates` and
 `module_baselines` cannot disagree about scope. The filter drops from
 `Templates`, `Digest` **and** `Budget.TruncatedModules` together — filtering
 only templates leaves the digest firing deviation reasons for a module the

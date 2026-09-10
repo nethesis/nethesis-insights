@@ -443,7 +443,8 @@ cadence, 2700 systems calling the LLM on every bundle is ~$16,000/month on
 `gpt-4o-mini` (§11). Steady-state systems must cost approximately zero.
 
 Modules that own a dedicated pipeline are excluded from this one before the
-gate ever sees them (`PIPELINE_EXCLUDE_MODULES`, default `crowdsec1`). CrowdSec
+gate ever sees them (`PIPELINE_EXCLUDE_MODULES`, default `crowdsec` — the
+module family, since instance numbers vary per cluster). CrowdSec
 decisions already travel through §7's `POST /v1/threat-events` into the
 blocklist; analysing its log lines as well pays twice for one signal, and its
 templates were 982 of 1678 on the dev fleet.

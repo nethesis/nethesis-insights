@@ -201,3 +201,73 @@ func TestExcludeServicesDoesNotMutateInput(t *testing.T) {
 		t.Fatalf("input bundle was mutated: %+v", in)
 	}
 }
+
+// The configured spelling is the module family, because an NS8 instance
+// number is not knowable in advance: the CrowdSec module is crowdsec1 on one
+// cluster and crowdsec3 on the next. An exclusion that only matched the exact
+// id would silently stop excluding anything on a differently-numbered node,
+// and that node would pay twice for its CrowdSec signal with nothing to show
+// why.
+func TestExcludeModulesMatchesEveryInstanceOfAFamily(t *testing.T) {
+	b := Bundle{
+		Templates: []Template{
+			{ModuleID: "crowdsec1", Template: "a"},
+			{ModuleID: "crowdsec3", Template: "b"},
+			{ModuleID: "crowdsec", Template: "c"},
+			{ModuleID: "loki1", Template: "d"},
+		},
+		Digest: []DigestEntry{
+			{ModuleID: "crowdsec42", Observed: 1},
+			{ModuleID: "loki1", Observed: 2},
+		},
+		Budget: Budget{TruncatedModules: []TruncatedModule{
+			{ModuleID: "crowdsec7"},
+			{ModuleID: "loki1"},
+		}},
+	}
+
+	got := b.ExcludeModules(map[string]bool{"crowdsec": true})
+
+	if len(got.Templates) != 1 || got.Templates[0].ModuleID != "loki1" {
+		t.Fatalf("templates = %+v, want only loki1 -- every crowdsec instance must go", got.Templates)
+	}
+	if len(got.Digest) != 1 || got.Digest[0].ModuleID != "loki1" {
+		t.Fatalf("digest = %+v, want only loki1", got.Digest)
+	}
+	if len(got.Budget.TruncatedModules) != 1 || got.Budget.TruncatedModules[0].ModuleID != "loki1" {
+		t.Fatalf("truncated = %+v, want only loki1", got.Budget.TruncatedModules)
+	}
+}
+
+// The exact-id match survives alongside the family one, so a single
+// misbehaving instance can still be singled out without excluding its
+// siblings.
+func TestExcludeModulesStillMatchesOneExactInstance(t *testing.T) {
+	b := Bundle{Templates: []Template{
+		{ModuleID: "nethvoice2", Template: "a"},
+		{ModuleID: "nethvoice7", Template: "b"},
+	}}
+
+	got := b.ExcludeModules(map[string]bool{"nethvoice2": true})
+
+	if len(got.Templates) != 1 || got.Templates[0].ModuleID != "nethvoice7" {
+		t.Fatalf("templates = %+v, want nethvoice7 kept -- an exact id must not widen to the family", got.Templates)
+	}
+}
+
+// The host bucket is "" and ModuleFamily("") is "" too, so the family match
+// must not turn an unrelated exclusion into a host-bucket exclusion, nor
+// stop "" from reaching it.
+func TestExcludeModulesHostBucketIsUnaffectedByFamilyMatching(t *testing.T) {
+	b := Bundle{Templates: []Template{
+		{ModuleID: "", Template: "sshd line"},
+		{ModuleID: "crowdsec1", Template: "b"},
+	}}
+
+	if got := b.ExcludeModules(map[string]bool{"crowdsec": true}); len(got.Templates) != 1 || got.Templates[0].ModuleID != "" {
+		t.Fatalf("templates = %+v, want the host bucket kept", got.Templates)
+	}
+	if got := b.ExcludeModules(map[string]bool{"": true}); len(got.Templates) != 1 || got.Templates[0].ModuleID != "crowdsec1" {
+		t.Fatalf("templates = %+v, want only the host bucket dropped", got.Templates)
+	}
+}

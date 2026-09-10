@@ -206,7 +206,7 @@ func main() {
 	llmDailySpendCapUSD := getenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
 	// CrowdSec has its own pipeline (threatd's /v1/events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
-	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec1")
+	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec")
 	// Host records name their unit, e.g. "<3> [insights] ...". Excluding this
 	// server's own identifier stops a co-located deployment (the dev machine)
 	// from analysing its own log output and re-firing the gate forever.

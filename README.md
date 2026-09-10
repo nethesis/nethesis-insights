@@ -221,7 +221,7 @@ The forward-auth cache Traefik calls before any pipeline sees a request. See
 | `LLM_MAX_CONCURRENCY` | LLM calls in flight at once (default `4`) |
 | `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-system ceiling, UTC day (default `12`); over-cap windows are recorded with `suppressed_by` and cost nothing |
 | `LLM_DAILY_SPEND_CAP_USD` | fleet spend ceiling for the UTC day (default `0` — off); on breach the gate narrows to security-only rather than stopping |
-| `PIPELINE_EXCLUDE_MODULES` | comma-separated modules dropped from every bundle before analysis (default `crowdsec1`, which has its own pipeline); empty value analyses everything |
+| `PIPELINE_EXCLUDE_MODULES` | comma-separated modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline); matches a module **family** or an exact instance id, so `crowdsec` covers `crowdsec1`, `crowdsec3`, …; empty value analyses everything |
 | `PIPELINE_EXCLUDE_SERVICES` | comma-separated syslog identifiers dropped the same way, matched against the `[service]` tag on host records (default `insights`, so a co-located server does not analyse its own logs) |
 | `STALE_AFTER` | finding staleness threshold (default `24h`) |
 | `EWMA_ALPHA` | server-side baseline smoothing factor (default `0.3`) |
