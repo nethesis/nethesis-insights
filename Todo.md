@@ -150,11 +150,19 @@ Three issues, deliberately not 28. Full list with file:line in
       byte-identical; only how it lands changed. The rename also had to carry
       the destination's mode, since `rename(2)` takes the *source's* and
       `mktemp` creates 0600.
-      - [ ] Left: the duplicated `runPassLoop`/env helpers in `cmd/threatd`
-            and `cmd/sizingd`. Cosmetic. Note `internal/maint` now has a third
-            loop, deliberately kept in the package rather than copied a third
-            time, so a shared helper has more callers to justify it than it
-            did.
+      - [x] The duplicated `runPassLoop`/env helpers in `cmd/threatd` and
+            `cmd/sizingd` are gone, shared as `internal/platform/svc`. The
+            copies were **byte-for-byte identical**, doc comments included,
+            which settled the question the other way round from how it was
+            framed: nothing had been kept separate for a reason, there had
+            simply been nowhere to put shared code until `internal/platform`
+            existed. `internal/maint.RunLoop` is now a one-line wrapper too.
+            `docs/architecture.md` had claimed the loops "cannot share"; that
+            was never the real constraint and it has been corrected.
+            - [ ] `cmd/authd` and `cmd/insightsd` still carry their own copies
+                  of the same env helpers (insightsd adds `getenvFloat` and
+                  `getenvModuleSet`). Out of scope for that task; `svc` is
+                  already exactly what they would call.
 
 ## 4. Known operational sharp edges
 
