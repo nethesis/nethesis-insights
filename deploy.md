@@ -21,6 +21,34 @@
 > motivated the gate fix. It was not re-captured against the split deployment:
 > doing so would mean deploying to a live host, which is out of scope for the
 > task that added this notice.
+>
+> **Decommissioned, 2026-09-10.** rl1 no longer runs an insights server at all.
+> `insights.service` was stopped and `/etc/containers/systemd/insights.container`
+> moved to `/root/insights.container.disabled.orig`; a quadlet unit is generated
+> from that file, so removing the file *is* the disable — there is no
+> `systemctl disable` for a generated unit. Neither `127.0.0.1:19595` nor
+> `0.0.0.0:9596` listens any more, and the `9596/tcp` firewall opening this file
+> documents as a deviation is gone from both the runtime and the permanent
+> configuration (removed without a `firewall-cmd --reload`, so nothing else on
+> that shared cluster was re-applied).
+>
+> Kept on the box: the `insights-data` volume, and `/etc/insights.env`, which
+> still holds a live OpenAI key — it is `0600 root`, and deleting the file
+> destroys the key rather than an exposure. Still present and now pointing at a
+> dead backend: the `insights` route on `traefik1`
+> (`controller.gs.nethserver.net/insights`), which answers 502. It was left in
+> place because removing it means reconfiguring another module's service on a
+> shared live cluster, which this project's rules forbid doing casually.
+>
+> rl1 is now a **reporter only**, against the central deployment at
+> `insights.gs.nethserver.net`: `loki1` has `base_url` =
+> `https://insights.gs.nethserver.net` with `verify_tls` on, and `crowdsec1` has
+> `INSIGHTS_SERVER_URL` set to the same value. Both take the **bare server
+> root** and append their own prefix (`/logs/v1/bundles`,
+> `/blocklist/v1/events`). crowdsec1's previous value was
+> `https://controller.gs.nethserver.net/insights` — a prefix baked into
+> configuration, which is exactly the shape the split clients no longer accept.
+> Sizing sends nothing: `ns8-core` has no reporter yet.
 
 Snapshot of what is **actually** running on
 `root@rl1.leader.default.gs.nethserver.net`, taken read-only on 2026-09-01 while

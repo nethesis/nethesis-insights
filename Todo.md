@@ -8,33 +8,47 @@ order it is worth doing.
 
 ## 1. Point rl1 at the server
 
-Blocked on two things I could not do from here: SSH to `rl1` and to
-`insights.gs.nethserver.net` is denied by the permission classifier, and no
-NethServer subscription credential was available.
+Done 2026-09-10, and neither module needed a release: the images already
+deployed on rl1 turned out to carry the two commits below, verified by diffing
+the running collector and `threat_shield.py` against them before anything was
+changed. rl1 is now a reporter only — its own pre-split insights server is
+decommissioned (see `deploy.md`'s 2026-09-10 notice).
 
-### Threat Shield — ready, needs a release
+### Threat Shield — done, no release needed
 
 `ns8-crowdsec` commit `fcda90c` moves all three calls to the prefixed paths
 (`/blocklist/v1/events`, `/blocklist/v1/feed`,
 `/blocklist/v1/allowlist-requests`). `insights_url` stays the server root.
 
-- [ ] Release `ns8-crowdsec` and update `crowdsec1` on rl1 — the module runs a
-      released image, so the commit alone changes nothing on the node.
-- [ ] Set `INSIGHTS_SERVER_URL=https://insights.gs.nethserver.net` (default is
-      `https://insights.nethesis.it`, `threat_shield.py:64`).
-- [ ] Confirm a real ban reaches the server: it should appear on
-      `/blocklist/threat-events` in the operator UI.
+- [x] Release `ns8-crowdsec` and update `crowdsec1` on rl1 — not needed, the
+      deployed image already matched `fcda90c`.
+- [x] Set `INSIGHTS_SERVER_URL=https://insights.gs.nethserver.net` (default is
+      `https://insights.nethesis.it`, `threat_shield.py:64`). Set with
+      `agent.set_env`; no action wires this variable. The previous value was
+      `https://controller.gs.nethserver.net/insights` — a prefix baked into
+      configuration, the exact shape the split clients no longer accept.
+- [x] Confirm a real ban reaches the server. Two `POST /v1/events` → `202`, the
+      event visible on threatd's `/events`, and the second delivery deduped
+      against the first on the `(system_id, attacker_ip, scenario,
+      observed_at)` index. Worth knowing for the next test: the reporter is
+      CrowdSec's own `http` notification plugin with `group_wait: 30s`, alert-
+      driven, **not** a timer — `cscli decisions add` alone does not push, and
+      `cscli notifications reinject <alert-id>` is what forces it.
 
-### Logs — ready, needs a release
+### Logs — done on rl1, no release needed
 
 `ns8-loki` commit `9050874` moves the collector to `/logs/v1/bundles` and
 leaves `base_url` as the server root, matching `ns8-crowdsec`. Both modules
 read `INSIGHTS_SERVER_URL` and both now take the same value; before this they
 read it to mean different things, one wanting the prefix baked in and one not.
 
-- [ ] Release `ns8-loki` and update `loki1` on rl1.
-- [ ] `api-cli run module/loki1/set-insights --data '{"active":true,"base_url":"https://insights.gs.nethserver.net"}'`
-- [ ] Confirm a bundle lands: `/logs/systems` in the operator UI.
+- [x] Release `ns8-loki` and update `loki1` on rl1 — not needed, the deployed
+      collector was byte-identical to `9050874`.
+- [x] `api-cli run module/loki1/set-insights --data '{"active":true,"base_url":"https://insights.gs.nethserver.net","verify_tls":true}'`
+- [x] Confirm a bundle lands. `202`, then gate → LLM → fingerprint in 2.9 s:
+      one call, `$0.000202`, three findings inserted. The real subscription
+      credential validated through `authd` → `my.nethesis.it` on the first
+      try, which is the live proof the forward-auth chain works end to end.
 
 ### Sizing — cannot be configured
 
@@ -49,6 +63,10 @@ someone writes it.
 Both modules take the bare server root now, so one value configures both:
 
     INSIGHTS_SERVER_URL=https://insights.gs.nethserver.net
+
+- [ ] Repeat the `loki1` configuration on the manually deployed nodes. Same
+      three steps as rl1, per node; the collector must already carry `9050874`
+      or the new `base_url` merely 404s.
 
 Note for whoever writes the sizing reporter: follow the same rule. The server
 root goes in configuration, the pipeline prefix belongs to the endpoint, and
