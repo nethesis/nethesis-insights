@@ -96,19 +96,26 @@ doing once, since that path exercises `my.nethesis.it` rather than a stub.
 Three issues, deliberately not 28. Full list with file:line in
 `.superpowers/sdd/2026-09-09-pipeline-split/deferred-minors.md`.
 
-- [ ] **Platform test coverage.** `ParseTrustedProxies`' error branch and
-      bare-address promotion; `logging.go`/`health.go` untested, including the
-      "the logger never touches Authorization" constraint, which now has two
-      implementations and no coverage; `sqlitex`'s mutex (deleting `Lock`/`Unlock`
-      leaves the suite green); authd's `default` branch, its deliberate absence
-      of `WWW-Authenticate`, and the pepper fallback; `newUIServer("") == nil`
-      for threatd and sizingd, which `cmd/insightsd/main_test.go` calls "a
-      security property, not a convenience".
-- [ ] **Doc-comment sweep.** Stale `internal/ui` / `internal/store` references at
-      `analyzer.go:32`, `api/threat/api.go:28`, `api/sizing/api.go:30`,
-      `store/sizing/store.go:385`, `ui/chrome/chrome_test.go:47`,
-      `store/threat/ui.go:10-12`; `queue.go:54-57` claiming immutability where
-      the real property is call ordering.
+- [x] **Platform test coverage.** Done 2026-09-10, 461 lines over eight files.
+      Every property was verified non-vacuous by breaking it and recording the
+      failure. The `Authorization` test asserts the raw value absent, the
+      decoded credential absent, **and** `has_authorization=true` present, so
+      it cannot pass by the logger never reading the header. `sqlitex`'s mutex
+      uses the race detector as the primary signal with a bounded blocking
+      check as corroboration — a fully deterministic exclusion test is not
+      possible, and the test says so.
+      - [ ] One gap left open deliberately: authd's `AUTH_PEPPER`-unset →
+            ephemeral-pepper *decision* is inline in `main()` and unreachable
+            from a test file. `randomPepper()` itself is covered. Closing it
+            needs `resolvePepper(getenv) (pepper, source string)` — a
+            production change, so it was not made from a test-only task.
+- [x] **Doc-comment sweep.** Done 2026-09-10. Five of the seven triaged
+      locations were **already correct**: `5937ce9` fixed them and the triage
+      doc's line numbers had drifted, so the entry overstated the work. What
+      remained: two `internal/store/threat` comments naming `threat.go`, a file
+      the split renamed to `store.go`, and `queue.go`'s claim that the lockless
+      `Workers()` read is safe because the field is immutable — the real
+      property is call ordering, verified against both call sites.
 - [ ] **Deploy tooling.** GHA cache unscoped across the matrix (four jobs
       overwrite each other's `mode=max` export); `render.sh` writing straight
       into the directory Traefik watches; the duplicated `runPassLoop`/env
@@ -176,10 +183,21 @@ Three issues, deliberately not 28. Full list with file:line in
 
 ## 5. Not started, from the original plan
 
-- [ ] Task 1's tooling: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`,
-      `scripts/check-license-headers.sh` — which must learn the two new comment
-      forms and the vendored-file exemption under
-      `internal/ui/chrome/static/`.
+- [x] Task 1's tooling: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`,
+      `scripts/check-license-headers.sh`. Done 2026-09-10. The header script
+      distinguishes "missing" from "present in the wrong comment form", checks
+      a Go header precedes the `package` clause, fails closed on an
+      unrecognised extension, and **asserts the vendored Pico files do not
+      carry our SPDX line** — the exemption is enforced in both directions, so
+      nobody can "fix" them into a misattribution. The plan's draft pinned
+      golangci-lint v1.62 against what is now a v2 config schema, which would
+      have silently ignored the config; CI pins v2.11.3 to match.
+      Landing it took a second pass to clear 38 lint findings, so CI's first
+      run is green rather than red-on-arrival. One was a real defect:
+      threatd's four allowlist write handlers parsed forms with no body-size
+      limit and nothing upstream bounded them, now `http.MaxBytesReader` at
+      16 KiB each. Exclusions are per-file and commented; `bodyclose` and
+      `sqlclosecheck` were at zero findings before the pass and still are.
 - [ ] `golang-migrate` in place of `CREATE TABLE IF NOT EXISTS`, now three times
       over.
 - [ ] Distributed locking: both the blocklist consensus pass and the sizing
