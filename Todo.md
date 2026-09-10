@@ -61,7 +61,10 @@ branch was never observed live, because `threatd` had already completed a pass
 by the time the feed was called — it correctly returned a non-blank document
 with `entries: 0`. Covered by its unit test only.
 
-- [ ] Catch it on a genuinely cold start, if the volume is ever rebuilt.
+- [ ] Catch it on a genuinely cold start, if the volume is ever rebuilt. Still
+      open after the 2026-09-10 image redeploy: restarting the containers does
+      not rebuild the volumes, so `threatd` came back to an existing database
+      and completed a pass as before.
 
 The credential-dependent tests were closed against a local reproduction using
 the real images, the real rendered Traefik config and the real pod topology,
@@ -113,11 +116,24 @@ Three issues, deliberately not 28. Full list with file:line in
 - [x] **Lower `LOG_LEVEL` for production.** All four units now ship `info`; the
       runbook says how and when to raise it to `debug` for §4.3 and smoke
       test 3.
-- [ ] **Deploy the above.** The three fixes are in the repository, not on the
-      box: the units and the journald drop-in have to be reinstalled there, and
-      `authd` rebuilt from a new image.
+- [x] **Deploy the above.** Done 2026-09-10: `insights.gs.nethserver.net` now
+      runs the four `:latest` images built from `240412f` (all four carry
+      `org.opencontainers.image.revision=240412f`), the ten quadlet units and
+      `/etc/systemd/journald.conf.d/insights.conf` were reinstalled from the
+      committed tree, and `systemd-analyze cat-config systemd/journald.conf`
+      confirms `SystemMaxUse=200M` / `SystemMaxFileSize=20M`. All four
+      containers `healthy`, Traefik `Up`, `ss -tlnp` still 80/443 only, the
+      Let's Encrypt certificate untouched, and every route 401s without a
+      credential. The four containers now report `LOG_LEVEL=info`.
 - [ ] **Back up the volumes.** Three fresh databases means nothing to lose now
       and everything to lose later.
+- [ ] **`insightsd` has no LLM credentials on the box.**
+      `/etc/insights/insightsd.env` is empty, so `LLM_BASE_URL`, `LLM_MODEL` and
+      `LLM_API_KEY` are all unset and every gated bundle would fail its call.
+      Harmless only for as long as nothing ships bundles — this blocks the
+      `ns8-loki` step in §1 and must be set before it, together with
+      `LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK` (the cost ledger
+      reads zero without them) and `LLM_DAILY_SPEND_CAP_USD` as insurance.
 
 ## 5. Not started, from the original plan
 
