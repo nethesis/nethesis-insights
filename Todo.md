@@ -58,7 +58,10 @@ the server side is live, but nothing sends. `sizingd` will stay idle until
 someone writes it.
 
 - [ ] Write the `ns8-core` cluster reporter (leader-only, three sends a day,
-      byte-identical restatements of a complete UTC day).
+      byte-identical restatements of a complete UTC day). **Postponed
+      2026-09-10** — deliberately, not forgotten. Until it exists `sizingd`
+      stores nothing, and everything downstream of it (the pressure scores,
+      the cohort pass, the three UI pages) is exercised only by its tests.
 
 Both modules take the bare server root now, so one value configures both:
 
@@ -197,7 +200,14 @@ Three issues, deliberately not 28. Full list with file:line in
 - [x] **`insightsd` has no LLM credentials on the box.** Set 2026-09-10:
       `api.openai.com/v1`, `gpt-4o-mini`, and both price knobs. Proven live by
       rl1's first bundle — one call, `$0.000202`, three findings.
-- [ ] **`PIPELINE_EXCLUDE_MODULES` on the box matches nothing.** It is set to
+- [x] **`PIPELINE_EXCLUDE_MODULES` on the box matched nothing.** Fixed
+      2026-09-10 to `crowdsec1,insights` in `/etc/insights/insightsd.env` and
+      restarted. This is a **server-side** setting — it is applied in
+      `api.handleBundles` before `queue.Publish`, so one place governs gate,
+      prompt, `system_templates` and `module_baselines` together; nothing on
+      the reporting node configures it. The `insights` entry in it is inert
+      (a service, not a module id) but harmless, and the service axis is
+      correct by default. The original defect, for the record: It is set to
       `crowdsec,insights`, but `model.ExcludeModules` compares `module_id`
       exactly and the id is `crowdsec1` — NS8 module ids carry an instance
       number. So the exclusion is inert: crowdsec1's log lines are gated,
@@ -222,9 +232,11 @@ Three issues, deliberately not 28. Full list with file:line in
       rollup table for this pipeline, so `/cost` silently truncates its spend
       history at the cutoff. Not yet on the box — it ships with the next
       `insightsd` image.
-- [ ] **`LLM_DAILY_SPEND_CAP_USD` is unset**, so the only ceiling is
-      `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY=12`. Cheap insurance on a box that now
-      has live reporters.
+- [x] **`LLM_DAILY_SPEND_CAP_USD` is unset.** Set to `10` on 2026-09-10 and
+      confirmed live in the running container. Worth remembering for next
+      time: quadlet passes `/etc/insights/*.env` with `--env-file` at
+      container creation, so editing one of those files changes nothing until
+      `systemctl restart` — this bit twice in one day.
 
 ## 5. Decisions taken 2026-09-10, and what they leave open
 
