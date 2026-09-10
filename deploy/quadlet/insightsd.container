@@ -17,6 +17,17 @@ Wants=authd.service
 
 [Container]
 Image=ghcr.io/nethesis/nethesis-insights-insightsd:latest
+# The tag is mutable but podman does not re-resolve it: with no Pull= line it
+# reuses whatever :latest already points at in local container storage, so a
+# `systemctl restart` after a CI build silently keeps the old image while
+# looking like it did something -- observed on the live host, three of four
+# services running an image older than the one already cached beside it.
+# `newer` compares the registry digest on every start and pulls only when it
+# differs, falling back to the cached image when the registry is unreachable,
+# so a boot with no network still starts. AutoUpdate=registry is not
+# equivalent: it updates on podman-auto-update.timer, not on the restart an
+# operator just ran.
+Pull=newer
 ContainerName=insightsd
 # No PublishPort: this container has no port of its own. It shares the pod's
 # network namespace, so Traefik reaches it over real loopback and it sees

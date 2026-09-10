@@ -34,6 +34,7 @@ see `docs/api/openapi.yaml`.
   - [Read by no service](#read-by-no-service)
 - [Authentication](#authentication)
 - [Connecting nodes](#connecting-nodes)
+- [Upgrading the server](#upgrading-the-server)
 - [Removing the server](#removing-the-server)
 - [The operator UI](#the-operator-ui)
   - [Before exposing a dashboard](#before-exposing-a-dashboard)
@@ -129,7 +130,10 @@ This is host-wide. It is the reason the host must be dedicated.
     podman pull docker.io/library/traefik:v3.3
 
 The images are public and multi-arch (`linux/amd64`, `linux/arm64`); no
-registry login is needed. To build them on the host instead, use
+registry login is needed. The four `ghcr.io` pulls are a warm-up rather than a
+prerequisite: those units carry `Pull=newer`, so the first `systemctl start`
+fetches them anyway. The `traefik` pull is required — that unit is pinned to a
+fixed tag and has no `Pull=` line. To build them on the host instead, use
 `podman build --build-arg SERVICE=<service> -t localhost/insights-<service> .`
 and change each unit's `Image=` line to match.
 
@@ -430,6 +434,38 @@ Do not bake a path prefix into either value. A root with `/logs` or
 `/blocklist` already in it produces a doubled prefix and a 404.
 
 The fleet-sizing reporter does not exist yet — see "Fleet sizing" below.
+
+## Upgrading the server
+
+    systemctl restart authd insightsd threatd sizingd
+
+That is the whole upgrade. The four units carry `Pull=newer`, so each start
+compares its `:latest` tag against the registry and pulls when the digest has
+moved; when it has not, the check costs about half a second per container.
+When the registry is unreachable the cached image is used, so a boot with no
+network still comes up.
+
+Restart them together, and expect a few seconds of proxy errors while the
+containers come back: `authd` goes first, because each pipeline unit carries
+`After=authd.service`, and a request arriving while it is down is answered by
+a Traefik-generated `500` — never let through unauthenticated. A node treats
+both that and a `503` as retryable, so nothing is lost.
+
+`traefik` is deliberately excluded: it is pinned to `docker.io/library/traefik:v3.3`,
+so a restart would re-check Docker Hub on every start for a tag that does not
+move. Upgrading it is a deliberate two-step — `podman pull` the new tag, edit
+`Image=` in `/etc/containers/systemd/traefik.container`, `systemctl daemon-reload`,
+then restart it.
+
+To confirm what is actually running:
+
+    for s in authd insightsd threatd sizingd; do
+      printf '%s ' "$s"
+      podman inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$s"
+    done
+
+Nothing needs to be stopped first and no volume is touched, so no data is at
+risk in an upgrade. Each pipeline re-creates its own schema on start.
 
 ## Removing the server
 
