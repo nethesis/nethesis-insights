@@ -21,6 +21,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 )
 
 // Reader is the slice of logsstore.Store this pass needs. Declared here,
@@ -105,31 +107,14 @@ func (r *Runner) prune(ctx context.Context, table string, fn func(context.Contex
 // unpruned until the first tick, the same reason blocklist's and baseline's
 // loops run their first pass before waiting.
 //
-// This is the same shape as threatd's and sizingd's own private
-// runPassLoop, each binary's unexported copy of an identical ticker loop --
-// docs/architecture.md notes the two cannot share that helper, since
-// neither binary may import the other, so only the shape is shared, not the
-// code. insightsd's copy lives here, on maint.Runner, instead of becoming a
-// third private copy inside cmd/insightsd/main.go: unlike blocklist.Runner
-// and baseline.Runner, Runner already lives in a package with exactly one
-// caller (cmd/insightsd), so there is no cross-binary sharing concern to
-// keep this private against, and cmd/insightsd/main.go simply calls it.
+// This used to be a third byte-for-byte copy of the ticker loop threatd and
+// sizingd each kept privately, unexported, in their own main.go: no package
+// under internal/platform existed yet that every binary could import, so
+// each pass loop's owner carried its own. internal/platform/svc now holds
+// that loop (svc.RunPassLoop), so RunLoop is a thin wrapper over it: *Runner
+// already satisfies svc.Pass, and there is nothing left for this method to
+// do but supply the log line's name. cmd/insightsd/main.go is unaffected --
+// it still just calls maintRunner.RunLoop(ctx, interval).
 func (r *Runner) RunLoop(ctx context.Context, interval time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("background pass failed", "pass", "log maintenance", "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return done
+	return svc.RunPassLoop(ctx, "log maintenance", r, interval)
 }

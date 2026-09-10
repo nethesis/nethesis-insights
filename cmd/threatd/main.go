@@ -26,36 +26,12 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
+	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 	threatui "github.com/nethesis/nethesis-insights/internal/ui/threat"
 )
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func getenvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
 
 // setupLogger honours LOG_LEVEL=debug|info|warn|error.
 func setupLogger(level string) {
@@ -128,39 +104,39 @@ func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w
 func main() {
 	startedAt := time.Now().UnixMilli()
 
-	logLevel := getenv("LOG_LEVEL", "info")
+	logLevel := svc.Getenv("LOG_LEVEL", "info")
 	setupLogger(logLevel)
 
-	listenAddr := getenv("LISTEN_ADDR", ":9595")
+	listenAddr := svc.Getenv("LISTEN_ADDR", ":9595")
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
 	// enabling it is one explicit operator act, never a default.
-	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
-	uiBasePath := getenv("UI_BASE_PATH", "")
-	dbPath := getenv("DB_PATH", "/var/lib/threat/threat.db")
-	trustedProxyCIDRs := getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
+	uiListenAddr := svc.Getenv("UI_LISTEN_ADDR", "")
+	uiBasePath := svc.Getenv("UI_BASE_PATH", "")
+	dbPath := svc.Getenv("DB_PATH", "/var/lib/threat/threat.db")
+	trustedProxyCIDRs := svc.Getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
 	// Off by default: writing the allowlist is the one operation that can
 	// stop the fleet blocking an address, so it stays off until an operator
 	// turns it on explicitly.
-	adminAPIKey := getenv("ADMIN_API_KEY", "")
+	adminAPIKey := svc.Getenv("ADMIN_API_KEY", "")
 
 	// Threat Shield. Every one has a default, so an existing deployment
 	// picks the pipeline up without being reconfigured.
-	consensusInterval := getenvDuration("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
-	blocklistWindow := getenvDuration("BLOCKLIST_WINDOW", time.Hour)
-	blocklistMinSystems := getenvInt("BLOCKLIST_MIN_SYSTEMS", 3)
-	blocklistTTL := getenvDuration("BLOCKLIST_TTL", 24*time.Hour)
-	blocklistMaxEntries := getenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
-	threatRetention := getenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
-	threatMaxDecisions := getenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
+	consensusInterval := svc.GetenvDuration("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
+	blocklistWindow := svc.GetenvDuration("BLOCKLIST_WINDOW", time.Hour)
+	blocklistMinSystems := svc.GetenvInt("BLOCKLIST_MIN_SYSTEMS", 3)
+	blocklistTTL := svc.GetenvDuration("BLOCKLIST_TTL", 24*time.Hour)
+	blocklistMaxEntries := svc.GetenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
+	threatRetention := svc.GetenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
+	threatMaxDecisions := svc.GetenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
 
 	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
 	// plus the store's write mutex already do that -- it bounds how many
 	// decoded, sanitized reports can be waiting on that single writer at once,
 	// so a burst of reporters sheds load at the edge with a 503 instead of
 	// growing the process until it dies.
-	threatQueueSize := getenvInt("THREAT_QUEUE_SIZE", 256)
-	threatQueueWorkers := getenvInt("THREAT_QUEUE_WORKERS", 2)
-	threatQueueTimeout := getenvDuration("THREAT_QUEUE_TIMEOUT", 30*time.Second)
+	threatQueueSize := svc.GetenvInt("THREAT_QUEUE_SIZE", 256)
+	threatQueueWorkers := svc.GetenvInt("THREAT_QUEUE_WORKERS", 2)
+	threatQueueTimeout := svc.GetenvDuration("THREAT_QUEUE_TIMEOUT", 30*time.Second)
 
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
@@ -281,7 +257,7 @@ func main() {
 	// interval in, so a restart does not leave the feed answering 503 for
 	// five minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
-	consensusDone := runPassLoop(consensusCtx, "blocklist consensus", consensus, consensusInterval)
+	consensusDone := svc.RunPassLoop(consensusCtx, "blocklist consensus", consensus, consensusInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -310,33 +286,4 @@ func main() {
 	stopConsensus()
 	<-consensusDone
 	slog.Info("consensus loop stopped")
-}
-
-// pass is a periodic background job. The Threat Shield consensus pass
-// satisfies it.
-type pass interface {
-	Run(ctx context.Context, now int64) error
-}
-
-// runPassLoop runs a pass immediately and then every interval until ctx is
-// cancelled. A failed pass is logged and the loop continues: whatever it did
-// not replace keeps being served, which is the designed degradation.
-func runPassLoop(ctx context.Context, name string, r pass, interval time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("background pass failed", "pass", name, "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return done
 }

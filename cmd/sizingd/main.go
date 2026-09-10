@@ -28,36 +28,12 @@ import (
 	sizingapi "github.com/nethesis/nethesis-insights/internal/api/sizing"
 	"github.com/nethesis/nethesis-insights/internal/baseline"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 	sizingui "github.com/nethesis/nethesis-insights/internal/ui/sizing"
 )
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func getenvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
 
 // setupLogger honours LOG_LEVEL=debug|info|warn|error.
 func setupLogger(level string) {
@@ -120,28 +96,28 @@ func newUIServer(addr, basePath string, r sizingui.Reader, info chrome.Info) *ht
 func main() {
 	startedAt := time.Now().UnixMilli()
 
-	logLevel := getenv("LOG_LEVEL", "info")
+	logLevel := svc.Getenv("LOG_LEVEL", "info")
 	setupLogger(logLevel)
 
-	listenAddr := getenv("LISTEN_ADDR", ":9595")
+	listenAddr := svc.Getenv("LISTEN_ADDR", ":9595")
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
 	// enabling it is one explicit operator act, never a default.
-	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
-	uiBasePath := getenv("UI_BASE_PATH", "")
-	dbPath := getenv("DB_PATH", "/var/lib/sizing/sizing.db")
-	trustedProxyCIDRs := getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
+	uiListenAddr := svc.Getenv("UI_LISTEN_ADDR", "")
+	uiBasePath := svc.Getenv("UI_BASE_PATH", "")
+	dbPath := svc.Getenv("DB_PATH", "/var/lib/sizing/sizing.db")
+	trustedProxyCIDRs := svc.Getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
 
 	// Fleet sizing. Every one has a default, so an existing deployment picks
 	// the pipeline up without being reconfigured. The pass interval is an
 	// hour because the inputs are whole days: running it faster cannot
 	// produce a different answer.
-	sizingRetention := getenvDuration("SIZING_RETENTION", 100*24*time.Hour)
-	sizingPassInterval := getenvDuration("SIZING_PASS_INTERVAL", time.Hour)
-	sizingWindowDays := getenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
-	sizingMinDistinctSystems := getenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
-	sizingMinNodes := getenvInt("SIZING_MIN_NODES", 30)
-	sizingMinDaysPresent := getenvInt("SIZING_MIN_DAYS_PRESENT", sizing.MinDaysPresent)
-	sizingMaxNodesPerReport := getenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
+	sizingRetention := svc.GetenvDuration("SIZING_RETENTION", 100*24*time.Hour)
+	sizingPassInterval := svc.GetenvDuration("SIZING_PASS_INTERVAL", time.Hour)
+	sizingWindowDays := svc.GetenvInt("SIZING_WINDOW_DAYS", sizing.VerdictWindowDays)
+	sizingMinDistinctSystems := svc.GetenvInt("SIZING_MIN_DISTINCT_SYSTEMS", 20)
+	sizingMinNodes := svc.GetenvInt("SIZING_MIN_NODES", 30)
+	sizingMinDaysPresent := svc.GetenvInt("SIZING_MIN_DAYS_PRESENT", sizing.MinDaysPresent)
+	sizingMaxNodesPerReport := svc.GetenvInt("SIZING_MAX_NODES_PER_REPORT", sizing.DefaultMaxNodes)
 
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
@@ -241,7 +217,7 @@ func main() {
 	// stale pressure_version rows and must still run before cohorts are
 	// built -- see baseline.Runner.Run.
 	sizingCtx, stopSizing := context.WithCancel(context.Background())
-	sizingDone := runPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
+	sizingDone := svc.RunPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -265,33 +241,4 @@ func main() {
 	stopSizing()
 	<-sizingDone
 	slog.Info("sizing cohort loop stopped")
-}
-
-// pass is a periodic background job. The fleet-sizing cohort pass satisfies
-// it.
-type pass interface {
-	Run(ctx context.Context, now int64) error
-}
-
-// runPassLoop runs a pass immediately and then every interval until ctx is
-// cancelled. A failed pass is logged and the loop continues: whatever it did
-// not replace keeps being served, which is the designed degradation.
-func runPassLoop(ctx context.Context, name string, r pass, interval time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if err := r.Run(ctx, time.Now().UnixMilli()); err != nil && ctx.Err() == nil {
-				slog.Error("background pass failed", "pass", name, "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return done
 }
