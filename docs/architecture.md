@@ -847,9 +847,11 @@ Consequences worth knowing:
 
 ### Local origin only
 
-`origin` must be `crowdsec` or `cscli` — a decision the reporting node made
-from what it observed itself. Decisions carrying CrowdSec's CAPI or community
-origin are dropped at ingest.
+`origin` must be `crowdsec` or `cscli` (a CrowdSec instance) or `banip` (a
+NethSecurity firewall reporting what its banIP log service blocked) — in every
+case a decision the reporting node made from what it observed itself.
+Decisions carrying CrowdSec's CAPI, `lists` or console origin are dropped at
+ingest. `threat.localOrigins` is the single definition.
 
 The reason is that consensus is the whole product here. CrowdSec's central API
 already distributes a community blocklist to every node that subscribes; if a

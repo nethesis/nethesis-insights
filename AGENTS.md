@@ -65,10 +65,12 @@ Threat Shield rules that are as load-bearing as the gate's:
   reason: it decides whether a third party's IP address is stored and published, so a
   bug there is a data-protection incident. Non-public addresses are dropped **at
   ingest**, never merely at read.
-- **Local-origin only.** `origin` must be `crowdsec` or `cscli`. Re-reporting CrowdSec's
+- **Local-origin only.** `origin` must be `crowdsec`/`cscli` (a CrowdSec instance)
+  or `banip` (a NethSecurity firewall reporting its own banIP blocks) —
+  `threat.localOrigins` is the single definition. Re-reporting CrowdSec's
   CAPI/community list would manufacture agreement between systems that never
   independently observed anything, and consensus over manufactured agreement is
-  worthless (spec §7.2).
+  worthless.
 - **Every CrowdSec scenario is accepted — never add an allowlist.** There is no
   category map and no known-scenario list; the design's D3 category set was removed
   during implementation. The hub grows continuously and nodes run third-party and local
