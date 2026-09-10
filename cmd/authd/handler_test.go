@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,5 +97,62 @@ func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
 	}
 	if strings.Contains(body, encoded) {
 		t.Errorf("response body leaked the encoded credential: %q", body)
+	}
+}
+
+// The switch in newHandler recognizes exactly three outcomes from the
+// validator (nil, ErrInvalidCredentials, ErrUnavailable); anything else --
+// an error this package does not know how to interpret -- must fail closed
+// through the default branch, the same 503 as ErrUnavailable, rather than
+// being treated as success or leaking an internal error to the caller.
+func TestAuthEndpointFailsClosedOnAnUnrecognizedValidatorError(t *testing.T) {
+	v := &fakeValidator{err: errors.New("boom: this is not one of the sentinel errors")}
+	h := newHandler(v)
+	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
+	r.SetBasicAuth("sys-1", "secret")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed on an unrecognized error)", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// unauthorized deliberately sends a bare 401 with no WWW-Authenticate
+// challenge: Traefik passes this status straight back to the caller of
+// /v1/bundles etc, which is a reporter with a configured credential, not a
+// browser to prompt -- a challenge header would only cost a round trip (see
+// the doc comment on unauthorized in handler.go). Assert the absence
+// explicitly on both paths that produce a 401, so nobody "fixes" this into a
+// spec-compliant challenge by reflex.
+func TestAuthEndpoint401OmitsWWWAuthenticate(t *testing.T) {
+	cases := []struct {
+		name    string
+		v       *fakeValidator
+		setAuth bool
+	}{
+		{name: "missing Authorization header", v: &fakeValidator{systemID: "sys-1"}, setAuth: false},
+		{name: "invalid credential", v: &fakeValidator{err: auth.ErrInvalidCredentials}, setAuth: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(tc.v)
+			r := httptest.NewRequest(http.MethodGet, "/auth", nil)
+			if tc.setAuth {
+				r.SetBasicAuth("sys-1", "secret")
+			}
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want it absent from a 401 to a reporter", got)
+			}
+		})
 	}
 }

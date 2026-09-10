@@ -62,3 +62,45 @@ func TestEmptyTrustedProxiesTrustsNoHeader(t *testing.T) {
 		t.Errorf("ClientIP = %q, want the remote address", got)
 	}
 }
+
+// A bare address (no "/bits") in TRUSTED_PROXY_CIDRS must be promoted to a
+// single-host prefix, not silently dropped and not widened to its subnet --
+// an operator who configured "the proxy's one address" must not end up
+// trusting its whole /24 or /64 by accident.
+func TestParseTrustedProxiesPromotesABareAddressToASingleHost(t *testing.T) {
+	trusted, err := ParseTrustedProxies("203.0.113.5")
+	if err != nil {
+		t.Fatalf("ParseTrustedProxies: %v", err)
+	}
+	if !trusted.Contains("203.0.113.5:1234") {
+		t.Error("the bare address itself must be trusted")
+	}
+	if trusted.Contains("203.0.113.6:1234") {
+		t.Error("a neighboring address must not be trusted -- a bare address must be a /32, not a widened subnet")
+	}
+
+	trustedV6, err := ParseTrustedProxies("2001:db8::1")
+	if err != nil {
+		t.Fatalf("ParseTrustedProxies (v6): %v", err)
+	}
+	if !trustedV6.Contains("[2001:db8::1]:1234") {
+		t.Error("the bare IPv6 address itself must be trusted")
+	}
+	if trustedV6.Contains("[2001:db8::2]:1234") {
+		t.Error("a neighboring IPv6 address must not be trusted -- a bare address must be a /128, not a widened subnet")
+	}
+}
+
+// A value that is neither a CIDR prefix nor a bare address must fail the
+// parse rather than being silently dropped: a dropped entry in a
+// comma-separated list could mask a config typo that was meant to name a
+// real, different proxy, and TRUSTED_PROXY_CIDRS is the whole trust
+// boundary for reading system_id and X-Forwarded-For.
+func TestParseTrustedProxiesRejectsAnUnparseableEntry(t *testing.T) {
+	if _, err := ParseTrustedProxies("not-an-address"); err == nil {
+		t.Fatal("ParseTrustedProxies(garbage) returned a nil error")
+	}
+	if _, err := ParseTrustedProxies("127.0.0.1/8,not-an-address"); err == nil {
+		t.Fatal("ParseTrustedProxies with one bad entry among good ones returned a nil error")
+	}
+}
