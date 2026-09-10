@@ -10,35 +10,39 @@ the server gates each bundle against novelty and deviation, calls an LLM **only*
 when the gate fires, and stores findings keyed by a server-computed fingerprint so
 the same problem is never re-raised.
 
-## Design documents (authoritative)
+This is a DEVELOPMENT project, no real machine have been pushed to production.
+Forget old changes, old choices are not important.
+Break backword compatibility whenever is convenient, do not write any migration code.
 
-Both live in this repository:
+## Documentation (authoritative)
 
-- Spec: `docs/specs/2026-08-05-nethesis-insights-design.md`
-- Plan: `docs/plans/2026-08-05-nethesis-insights.md` (Tasks 1–10)
+The dated specs and plans are **gone**. What they held that still constrains
+the code was folded into the two documents below; the rest was build history.
+Do not look for `docs/specs/` or `docs/plans/`, and do not recreate them.
 
-Two more docs describe the system as it stands today, not just why it was
-designed this way, and **must be kept up to date as part of every change that
-affects what they describe** — package boundaries, the analyzer's step order,
-the wire protocol, storage schema, the gate/fingerprint formulas, or the
-operator UI's pages:
+Four documents, and **each must be kept up to date as part of every change
+that affects what it describes**:
 
-- `docs/architecture.md` — package layout, request flow, storage, and the
-  correctness invariants, for engineers working on the code.
-- `docs/user-guide.md` — plain-language explanation of the system for anyone
-  who isn't reading Go: what a finding/analysis/template/baseline is, and how
-  to use the operator UI.
+- `docs/architecture.md` — package layout, request flow, storage, the
+  gate/fingerprint formulas, data protection, the degradation ladder and the
+  correctness invariants. For engineers changing the code. **Read it before
+  changing gating, fingerprinting, the wire protocol or the analyzer's step
+  order** — it explains why each rule exists, and the reasons are not
+  reconstructible from the code.
+- `docs/admin-guide.md` — plain language, for anyone not reading Go: install
+  and remove, every environment variable, what a
+  finding/analysis/template/baseline/cohort is, and how to use the operator
+  UI.
+- `docs/api/openapi.yaml` — every endpoint at its public prefixed path.
+- `docs/api/{threat-events,sizing}-ingest.md` — the two wire contracts the NS8
+  modules build against.
 
-Read the spec before changing gating, fingerprinting, the wire protocol, or the analyzer's step
-order — those sections explain *why* each rule exists, and the reasons are not
-reconstructible from the code.
+Neither prose doc carries agent instructions or a "keep this in sync" notice —
+that obligation lives here, in this file, and nowhere else.
 
-A related, separate feature also lives here and is **implemented**:
-`docs/specs/2026-07-28-threat-shield-design.md` (rules),
-`docs/plans/2026-08-07-threat-shield-server.md` (this repo's flavour) and
-`docs/specs/2026-08-07-threat-events-ingest-contract.md` (the wire contract
-`ns8-crowdsec` builds against — keep it in step with
-`internal/threat/sanitize.go`'s drop rules). Server-side fleet-wide CrowdSec ban sharing:
+A related, separate feature also lives here and is **implemented**. Its wire
+contract is `docs/api/threat-events-ingest.md`, which `ns8-crowdsec` builds
+against — keep it in step with `internal/threat/sanitize.go`'s drop rules. Server-side fleet-wide CrowdSec ban sharing:
 `POST /blocklist/v1/events` in, `GET /blocklist/v1/feed` out. It is **not** part of the
 ingest/gate/LLM pipeline above and changes no rule in this section — no LLM call, no
 gate, no fingerprint. Treat it as a distinct pipeline — its own binary,
@@ -158,12 +162,10 @@ Threat Shield rules that are as load-bearing as the gate's:
   `internal/model` field-for-field. `docs/api/openapi_test.go` fails the build on a
   missing or stale path. The operator UI is deliberately not documented there.
 
-A **third** separate pipeline also lives here and is **implemented server-side**:
-`docs/plans/2026-09-02-fleet-sizing-server.md` (the *why*, including everything
-the source draft got wrong) and
-`docs/specs/2026-09-02-sizing-ingest-contract.md` (the wire contract `ns8-core`
-builds against — keep it in step with `internal/sizing/sanitize.go`'s drop
-rules). NS8 cluster leaders post one complete-UTC-day workload and performance
+A **third** separate pipeline also lives here and is **implemented
+server-side**. Its wire contract is `docs/api/sizing-ingest.md`, which
+`ns8-core` builds against — keep it in step with
+`internal/sizing/sanitize.go`'s drop rules. NS8 cluster leaders post one complete-UTC-day workload and performance
 report per cluster; the server scores each node, folds a multi-day verdict, and
 publishes cohort hardware baselines. `POST /sizing/v1/reports` in, three operator
 UI pages out. It is its own binary, `sizingd`, with its own SQLite file, sharing
@@ -272,33 +274,29 @@ Fleet-sizing rules that are as load-bearing as the gate's:
   and `censored` are the stored names and stay; the two sizing pages translate
   them (`axisLabel`, "Capped", "Nodes running only this module") because a page
   that prints `io` and `censored` at an operator is not documentation. Page
-  descriptions are one or two plain sentences — the reasoning behind a rule lives
-  in the Go doc comments and in `docs/plans/2026-09-02-fleet-sizing-server.md`,
-  never as an essay on the page.
+  descriptions are one or two plain sentences — the reasoning behind a rule
+  lives in the Go doc comments and in `docs/architecture.md`, never as an essay
+  on the page.
 
-`docs/runbooks/dev-machine-rl1.md` rebuilds the dev machine (see "Dev machine" below) from
-scratch when it has been torn down — start there instead of re-deriving the NS8 cluster
-setup from memory.
+## Current state
 
-## Current state: prototype, not the designed system
+The log pipeline does a full round trip — authenticated ingest → queue → gate →
+LLM → fingerprint → read API. Know what is **not** built, and what was decided
+against, before assuming a bug:
 
-The prototype does a full round trip — authenticated ingest → queue → gate →
-LLM → fingerprint → read API — but takes deliberate shortcuts. Know which parts
-of the spec are **not** built before assuming a bug:
-
-| Area | Prototype (built) | Design (Task 11+) |
+| Area | Built | Not built / decided otherwise |
 |---|---|---|
 | Ingest → analysis | asynchronous: `internal/queue`, an in-memory bounded channel — this is the permanent design | same |
 | Auth | moved to the proxy: `cmd/authd` is a caching forward-auth service (`internal/platform/auth.ForwardAuth`) that Traefik calls as a `forwardAuth` middleware — forwards to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design. Each pipeline no longer validates a credential itself: it reads `system_id` from the already-forwarded Basic username via `httpx.SystemID`, trusting it only when the request arrived from `TRUSTED_PROXY_CIDRS` — that check is the whole security boundary, so a pipeline reached directly (bypassing authd/Traefik) accepts any password | same |
-| Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` | `golang-migrate`, one dialect-agnostic SQL dir, dual-dialect CI test |
-| Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | per-pipeline `Store` iface already in place; `pgStore` added later |
+| Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` — **this is now the permanent design**. `golang-migrate` was built and discarded with Postgres (see Backends) |
+| Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | **Postgres was dropped as a goal** 2026-09-10. There is no `pgStore` and none is planned; the per-pipeline `Store` interfaces stay because each consumer's narrow interface is what makes the tests run with nothing running, not because a second backend is coming |
 | Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |
-| Missing packages | — | `ingest` (rate limit, full §5.4 validation), `maint`, `version` |
-| Missing tooling | — | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml` |
-| Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's enumerated `POST` routes additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | same; the spec's §2 non-goal covers a *consumer* dashboard, not this |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings` and `analyses` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
+| Tooling | built: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `scripts/check-license-headers.sh` | — |
+| Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's enumerated `POST` routes additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | a *consumer* dashboard is a non-goal; these three are not that |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
 | Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
-| Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Single-instance only — the consensus pass takes no distributed lock | multi-instance locking; cross-org promotion (D5) once auth returns a tenant |
+| Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.
@@ -318,8 +316,7 @@ go test ./internal/gate/ -run TestKnownSecurityTemplateAloneNoCall -v  # one pac
 go test ./internal/prompt/ -update                                    # regenerate prompt goldens
 ```
 
-Once Task 1's tooling lands, prefer `make check` (license headers + lint + tests),
-`make test`, `make build`. Lint is `golangci-lint run` with `bodyclose`,
+Prefer `make check` (license headers + lint + tests), `make test`, `make build`. Lint is `golangci-lint run` with `bodyclose`,
 `sqlclosecheck`, `rowserrcheck` and `gosec` enabled — HTTP bodies and DB rows are
 where the real leaks are in this codebase.
 
@@ -358,8 +355,8 @@ replaces the old `scripts/insights-sql.sh`, which needed `sqlite3`, root on the
 node and the podman volume path (it is still in git history if the deleted
 `sql "SELECT …"` escape hatch is ever needed offline).
 
-Environment variables are documented in `README.md` — do not duplicate that table
-here.
+Environment variables are documented in `docs/admin-guide.md` § Configuration —
+do not duplicate that table here.
 
 ## Architecture
 
@@ -440,7 +437,8 @@ rejected as a duplicate and the window is lost. On a **permanent** error
 ### Finding identity is server-computed
 
 `fingerprint.Compute(systemID, modules, evidence, category)` — sha256 over
-length-prefixed fields, sorted/deduped lists, `"v2"` prefix. Never a `strings.Join`
+length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
+(currently `"v3"`). Never a `strings.Join`
 (a separator is forgeable). Consequences to preserve:
 
 - The LLM cites templates by **ID** (`T1`, `T2`, … from `prompt.TemplateID`); the
@@ -559,11 +557,15 @@ byte-for-byte and must **never** receive the Nethesis GPL header: we did not
 write them, and MIT requires the original notice ship intact. MIT is
 GPL-3.0-compatible, so combining is fine; misattributing is not.
 
-`scripts/check-license-headers.sh` fails the build on any miss (Task 1, still
-unwritten) and must therefore learn both the two new comment forms and this
-vendored-file exemption.
+`scripts/check-license-headers.sh` fails the build on any miss, and asserts the
+vendored Pico files do **not** carry our SPDX line — the exemption is enforced
+in both directions, so nobody can "fix" them into a misattribution.
 
-**Schema portability** — SQLite today, Postgres later, so from day one:
+**Schema portability** — Postgres was dropped as a goal on 2026-09-10, so these
+four rules are no longer load-bearing. **Keep following them anyway**: the whole
+schema already satisfies them, they cost nothing to obey in new code, and
+rewriting working DDL to `AUTOINCREMENT` or `INSERT OR REPLACE` would be a large
+diff that buys nothing. They are conventions now, not portability requirements:
 
 - IDs generated in Go as ULID. Never `AUTOINCREMENT` / `SERIAL`.
 - Timestamps as `INTEGER` unix-millis. Never native date types.
@@ -640,17 +642,14 @@ successful no-op, not an error.
 - [Conventional Commits](https://www.conventionalcommits.org/) for every commit.
 - **Never put an issue reference in an individual commit message.** Issue refs go
   in the merge/squash commit body only.
-- Work on a branch, never commit directly to `main`. Stage explicit paths, not
-  `git add .`.
+- This is a dev project, work and commit on main. 
 - GPL-3.0-or-later
 
 ## Dev machine
 
-The plan runs all work on `root@rl1.leader.default.gs.nethserver.net` (Rocky 9),
-under `/root/nethesis-insights`, because the operator has a local bandwidth limit
-and this project pulls a Go module cache plus a Postgres image.
-`rl1` is a **shared live NS8 cluster** — other modules (`nethvoice2`, `crowdsec1`,
-`samba2`, `metrics1`, `traefik1`) run on it. Never restart another module's
-services; bind containers to high ports. If the machine has been torn down,
-`docs/runbooks/dev-machine-rl1.md` rebuilds it end to end.
+There is no dedicated dev machine documented here any more, and no runbook for
+one. Use the `accessing-nethserver-test-vps` skill when a NethServer test node
+is needed.
 
+If you do work on a shared live NS8 cluster: never restart another module's
+services, and bind containers to high ports.

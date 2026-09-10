@@ -11,8 +11,8 @@
 #                  entrypoint; each command supplies its own /logs, /blocklist
 #                  or /sizing prefix)
 #   INSIGHTS_CRED  system_id:secret  (required for everything except `health`)
-#   INSIGHTS_CURL  extra curl flags  (default none; pass -k for a self-signed
-#                  route like the one in docs/runbooks/2026-09-09-insights-test-deploy.md)
+#   INSIGHTS_CURL  extra curl flags  (default none; pass -k for a route
+#                  serving a self-signed certificate)
 #
 # Talking to one binary directly instead (no Traefik in front), e.g. during
 # development -- see README.md's manual round trip -- set INSIGHTS_URL to
@@ -130,7 +130,7 @@ raw)
     echo "          allowlist-request <cidr> [reason] | raw <path>"
     echo
     echo "There is no admin API any more -- allowlist writes go through the"
-    echo "blocklist dashboard's own write routes (see README.md)."
+    echo "blocklist dashboard's own write routes (see docs/admin-guide.md)."
     exit 2
     ;;
 esac

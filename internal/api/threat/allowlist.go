@@ -26,8 +26,8 @@ const maxAllowlistRequestSize = 8 << 10 // 8 KiB
 // else -- there is no path anywhere in this codebase from a client request,
 // however many systems make it, to a live threat_allowlist entry. Only an
 // explicit admin approval (internal/ui/threat's write routes) creates one.
-// See the "no automatic promotion" decision in
-// docs/plans/2026-08-28-allowlist-management.md.
+// See "The two consensus rules are not symmetric" in docs/architecture.md for
+// why the blocklist can afford an automatic rule and this cannot.
 func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

@@ -39,8 +39,8 @@ info:
     to live on a separate bearer-key-protected admin plane -- has no stable
     contract, and documenting it would invite someone to script against it.
 
-    See `docs/plans/2026-08-28-allowlist-management.md` for the allowlist
-    review workflow that `/blocklist/v1/allowlist-requests` feeds.
+    See `docs/admin-guide.md` for the allowlist review workflow that
+    `/blocklist/v1/allowlist-requests` feeds.
 servers:
   - url: https://insights.nethesis.it
     description: >-
