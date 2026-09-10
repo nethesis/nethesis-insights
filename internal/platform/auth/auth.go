@@ -138,8 +138,22 @@ func ParseBasic(authHeader string) (systemID, secret string, err error) {
 		return "", "", fmt.Errorf("%w: no Authorization header", ErrInvalidCredentials)
 	}
 	if !strings.HasPrefix(authHeader, prefix) {
-		scheme, _, _ := strings.Cut(authHeader, " ")
-		return "", "", fmt.Errorf("%w: scheme is %q, want Basic", ErrInvalidCredentials, scheme)
+		// No header content is interpolated, not even the "scheme". This
+		// error is logged at slog.Info by cmd/authd -- the default level --
+		// and a credential must never reach a log line. The tempting
+		// strings.Cut(authHeader, " ") is exactly what broke that rule:
+		// Cut returns the WHOLE string as the first value when the
+		// separator is absent, so a reporter sending its credential with
+		// no scheme, or with a tab where the space belongs, wrote its live
+		// fleet secret into journald on every request.
+		//
+		// The delimiter is reported instead, because it is derived rather
+		// than copied: it separates "sent a Bearer token" from "sent bare
+		// base64", which is the whole diagnostic value the scheme had.
+		if !strings.Contains(authHeader, " ") {
+			return "", "", fmt.Errorf("%w: Authorization header has no scheme delimiter, want Basic", ErrInvalidCredentials)
+		}
+		return "", "", fmt.Errorf("%w: Authorization scheme is not Basic", ErrInvalidCredentials)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authHeader, prefix))
 	if err != nil {

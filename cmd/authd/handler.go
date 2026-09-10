@@ -43,9 +43,15 @@ func newHandler(v validator) http.Handler {
 			// err, not a system_id: every ErrInvalidCredentials path in
 			// internal/platform/auth returns "" as the first value, so
 			// logging system_id here would read as an empty id on every
-			// rejection. err carries the actual reason and never the
-			// secret -- every format string in that package interpolates
-			// only the system id and the auth scheme.
+			// rejection. err carries the reason and never the secret --
+			// no format string in that package interpolates any part of
+			// the Authorization header. It once interpolated the "scheme",
+			// which strings.Cut reports as the entire header when there is
+			// no delimiter, and this line therefore logged live fleet
+			// credentials in plaintext; auth.ParseBasic now names the
+			// failure without copying header content, and
+			// TestParseBasicErrorNeverCarriesTheCredential fails loudly if
+			// anyone reintroduces the interpolation.
 			slog.Info("authd: rejected", "err", err, "remote_addr", r.RemoteAddr)
 			unauthorized(w)
 		case errors.Is(err, auth.ErrUnavailable):

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -152,6 +153,42 @@ func TestMalformedHeaderNeverReachesTheValidator(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&v.calls); got != 0 {
 		t.Fatalf("validator called %d times, want 0 -- malformed headers must be rejected locally", got)
+	}
+}
+
+// ParseBasic's error is logged at slog.Info by cmd/authd -- the default
+// level -- so it must be safe to log whatever the header contains. AGENTS.md
+// makes this a rule: a credential is never logged. A header with no
+// delimiter at all is the case that broke it, because strings.Cut hands back
+// the WHOLE string when the separator is absent, so an interpolated "scheme"
+// was the live fleet credential.
+func TestParseBasicErrorNeverCarriesTheCredential(t *testing.T) {
+	const secret = "sup3r-s3cret-fleet-token"
+	creds := base64.StdEncoding.EncodeToString([]byte("sys-1:" + secret))
+
+	cases := []struct {
+		name string
+		hdr  string
+	}{
+		{"no space at all", creds},
+		{"tab instead of space", "Basic\t" + creds},
+		{"empty scheme", " " + creds},
+		{"lowercase scheme", "basic " + creds},
+		{"wrong scheme", "Bearer " + creds},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := ParseBasic(tc.hdr)
+			if !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatalf("error %v, want ErrInvalidCredentials", err)
+			}
+			msg := err.Error()
+			for _, leak := range []string{secret, creds, tc.hdr} {
+				if strings.Contains(msg, leak) {
+					t.Fatalf("error %q leaks %q -- ParseBasic must never interpolate header content", msg, leak)
+				}
+			}
+		})
 	}
 }
 
