@@ -1,0 +1,23 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+version: "2"
+
+linters:
+  # The five default linters (errcheck, govet, ineffassign, staticcheck,
+  # unused) stay on; these four are added because CLAUDE.md calls them out
+  # specifically for this codebase: it is mostly HTTP clients and database
+  # rows, and leaking either is the most likely real bug.
+  enable:
+    - bodyclose
+    - sqlclosecheck
+    - rowserrcheck
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        - G404 # math/rand is never used for a security purpose in this codebase
+
+run:
+  timeout: 5m
