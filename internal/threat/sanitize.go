@@ -52,17 +52,30 @@ const maxClockSkew = 24 * time.Hour
 // but still genuinely private addressing, and still configured on real
 // networks, so it belongs with fc00::/7 rather than in a historical footnote.
 //
-// sixToFour and nat64 are the two transition prefixes that embed an IPv4
-// address verbatim in their low bits: 2002:c0a8:0101::1 is 192.168.1.1
-// wearing a v6 hat, and it published as a perfectly ordinary global address
-// before these entries existed. Both are rejected WHOLESALE rather than
-// unwrapped and re-tested against the v4 rules, deliberately. Unwrapping
-// would mean storing and publishing a v6 address whose only meaning is the
-// v4 address inside it -- useless to a feed consumer's firewall -- and it
-// would open a second, subtler route into the store for exactly the
-// addresses this function exists to keep out. These are transition
-// mechanisms, not addresses a CrowdSec instance has any business banning, so
-// dropping the prefix costs no real evidence.
+// sixToFour, nat64, nat64LocalUse, ipv4Compatible and teredo are the
+// prefixes that embed an IPv4 address verbatim in their low bits:
+// 2002:c0a8:0101::1 and ::192.168.1.1 are both 192.168.1.1 wearing a v6 hat,
+// and each published as a perfectly ordinary global address before its entry
+// existed. They are rejected WHOLESALE rather than unwrapped and re-tested
+// against the v4 rules, deliberately. Unwrapping would mean storing and
+// publishing a v6 address whose only meaning is the v4 address inside it --
+// useless to a feed consumer's firewall -- and it would open a second,
+// subtler route into the store for exactly the addresses this function
+// exists to keep out. These are transition mechanisms, not addresses a
+// CrowdSec instance has any business banning, so dropping the prefix costs
+// no real evidence.
+//
+// There is no width rule that reaches any of them, and that is the point:
+// ::169.254.169.254 is a single address, so a cap on how broad a reported or
+// exempted prefix may be leaves it untouched. Only the classification here
+// decides, which is why this list is the whole control and why an omission
+// from it is a data-protection bug rather than a cosmetic one.
+//
+// benchmarkIPv6, discardOnly and sixToFourRelay have nothing to do with v4
+// embedding; they are simply the v6 halves and the retired relay address
+// whose v4 counterparts (198.18.0.0/15 and the 6to4 prefix) were already
+// here. A CrowdSec instance reporting one of them is reporting a
+// misconfiguration, not an attacker.
 var (
 	cgnat               = netip.MustParsePrefix("100.64.0.0/10")
 	ula                 = netip.MustParsePrefix("fc00::/7")
@@ -73,6 +86,12 @@ var (
 	siteLocal           = netip.MustParsePrefix("fec0::/10")
 	sixToFour           = netip.MustParsePrefix("2002::/16")
 	nat64               = netip.MustParsePrefix("64:ff9b::/96")
+	nat64LocalUse       = netip.MustParsePrefix("64:ff9b:1::/48")
+	ipv4Compatible      = netip.MustParsePrefix("::/96")
+	teredo              = netip.MustParsePrefix("2001::/32")
+	benchmarkIPv6       = netip.MustParsePrefix("2001:2::/48")
+	discardOnly         = netip.MustParsePrefix("100::/64")
+	sixToFourRelay      = netip.MustParsePrefix("192.88.99.0/24")
 )
 
 // nonPublicPrefixes is every prefix above, checked in one loop so adding a
@@ -80,7 +99,8 @@ var (
 var nonPublicPrefixes = []netip.Prefix{
 	cgnat, ula, benchmark,
 	thisNetwork, protocolAssignments, reservedIPv4,
-	siteLocal, sixToFour, nat64,
+	siteLocal, sixToFour, nat64, nat64LocalUse, ipv4Compatible, teredo,
+	benchmarkIPv6, discardOnly, sixToFourRelay,
 }
 
 // localOrigins are the decision origins this server accepts: what the
@@ -227,20 +247,25 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 // not merely never reaches the feed (spec §5.2).
 //
 // What that covers: the unspecified address, loopback, RFC1918, link-local
-// (v4 and v6, which is what makes the IMDS address 169.254.169.254
-// unreachable here), every multicast scope, CGNAT, the IPv6 ULA and
-// deprecated site-local prefixes, the benchmark range, 0.0.0.0/8,
-// 192.0.0.0/24, 240.0.0.0/4 (broadcast included), and the 6to4 and NAT64
-// transition prefixes, which embed a v4 address verbatim. See
-// nonPublicPrefixes for the ones Go's own predicates miss.
+// (v4 and v6), every multicast scope, CGNAT, the IPv6 ULA and deprecated
+// site-local prefixes, both benchmark ranges, 0.0.0.0/8, 192.0.0.0/24,
+// 240.0.0.0/4 (broadcast included), 192.88.99.0/24, the discard-only prefix,
+// and the four transition prefixes that embed a v4 address verbatim (6to4,
+// both NAT64 prefixes, IPv4-compatible) plus Teredo. See nonPublicPrefixes
+// for the ones Go's own predicates miss.
+//
+// 169.254.169.254 is unreachable here twice over: IsLinkLocalUnicast catches
+// the bare address, and ipv4Compatible catches ::169.254.169.254, which is
+// the same address in a v6 hat and which IsLinkLocalUnicast says nothing
+// about.
 //
 // An address carrying an IPv6 zone is refused before any of that, and the
 // order is the whole point. netip.Prefix.Contains is false for a zoned
 // address, because a prefix has no zone to compare, and Addr.IsUnspecified
 // is an equality test against the zone-less "::" -- so every class caught
-// through nonPublicPrefixes or IsUnspecified, which is precisely the two
-// transition prefixes above plus the deprecated site-local range, would sail
-// through on a "%eth0" suffix while IsPrivate, IsLoopback,
+// through nonPublicPrefixes or IsUnspecified -- which is precisely every
+// prefix listed above -- would sail through on a "%eth0" suffix while
+// IsPrivate, IsLoopback,
 // IsLinkLocalUnicast and IsMulticast (all zone-agnostic) kept working. A
 // zone is a local interface scope in any case: it cannot describe a remote
 // attacker, so refusing it costs nothing and no reporter has business

@@ -130,6 +130,25 @@ func TestSanitizeDropsNonPublicAddresses(t *testing.T) {
 		{"6to4 wrapping public", "2002:cb00:7112::1"},
 		{"NAT64 wrapping RFC1918", "64:ff9b::c0a8:101"},
 		{"NAT64 wrapping public", "64:ff9b::cb00:7112"},
+		// 6to4 and NAT64 are not the only prefixes carrying a v4 address
+		// verbatim in their low bits: ::/96 (RFC 4291 IPv4-compatible) is a
+		// third, and RFC 8215 added a second NAT64 prefix outside
+		// 64:ff9b::/96. Each of these is one address, so no width rule
+		// reaches them -- the classification is what has to.
+		{"IPv4-compatible wrapping RFC1918", "::10.0.0.1"},
+		{"IPv4-compatible wrapping 192.168", "::192.168.1.1"},
+		{"IPv4-compatible wrapping IMDS", "::169.254.169.254"},
+		{"IPv4-compatible wrapping public", "::203.0.113.5"},
+		{"NAT64 local-use wrapping RFC1918", "64:ff9b:1::10.0.0.1"},
+		{"NAT64 local-use wrapping public", "64:ff9b:1::cb00:7112"},
+		// The v4 counterparts of these are already rejected above; the v6
+		// halves and the retired relay anycast address were missing.
+		{"Teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2"},
+		{"benchmark v6", "2001:2::1"},
+		{"discard-only", "100::1"},
+		{"6to4 relay anycast", "192.88.99.1"},
+		{"zoned IPv4-compatible wrapping IMDS", "::169.254.169.254%eth0"},
+		{"zoned NAT64 local-use", "64:ff9b:1::10.0.0.1%eth0"},
 		// A zone defeats netip.Prefix.Contains and Addr.IsUnspecified, both
 		// of which compare against zone-less values -- so every class above
 		// that publicUnicast catches through nonPublicPrefixes or

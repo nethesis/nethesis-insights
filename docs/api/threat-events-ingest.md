@@ -164,10 +164,14 @@ Applied in this order; each drop increments exactly one counter.
    RFC1918, loopback, unspecified, CGNAT `100.64.0.0/10`, link-local including
    IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, IPv6 site-local
    `fec0::/10`, benchmark `198.18.0.0/15`, `0.0.0.0/8`, `192.0.0.0/24`,
-   `240.0.0.0/4` (broadcast `255.255.255.255` included), the 6to4 prefix
-   `2002::/16` and the NAT64 prefix `64:ff9b::/96` — both of which carry an
-   IPv4 address verbatim in their low bits, so `2002:c0a8:0101::1` is
-   `192.168.1.1` in disguise — any address carrying an IPv6 zone (`fec0::1%eth0`),
+   `240.0.0.0/4` (broadcast `255.255.255.255` included), the retired 6to4
+   relay anycast address `192.88.99.0/24`, the IPv6 benchmark range
+   `2001:2::/48`, the discard-only prefix `100::/64`, Teredo `2001::/32`, and
+   the four prefixes that carry an IPv4 address verbatim in their low bits —
+   6to4 `2002::/16`, NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, and
+   IPv4-compatible `::/96` — so that `2002:c0a8:0101::1` and `::192.168.1.1`
+   are both `192.168.1.1` in disguise and both refused — any address carrying
+   an IPv6 zone (`fec0::1%eth0`),
    because a zone describes a local interface and so cannot describe a remote
    attacker — and the reporter's own observed source address. That
    address is the `X-Forwarded-For` value Traefik sets, trusted only because
