@@ -18,6 +18,36 @@ linters:
     gosec:
       excludes:
         - G404 # math/rand is never used for a security purpose in this codebase
+        # G706 (log injection via taint analysis) flags any tainted value
+        # reaching a log/slog call, but every logging call in this codebase
+        # goes through slog's structured key/value API -- never string
+        # concatenation or fmt.Sprintf into a message. A value passed as a
+        # slog attribute is encoded as its own field, not interpolated into
+        # the message text, so it cannot forge a fake log line or inject
+        # control characters into one; G706 does not distinguish structured
+        # from unstructured logging APIs and is a false positive here.
+        - G706
+  exclusions:
+    rules:
+      # Deliberately-named decoy secrets, not real ones: each test asserts
+      # that this exact value never leaks (into logs, into a rendered page).
+      # Renaming it to satisfy gosec would defeat the point of the test.
+      - path: internal/platform/httpx/logging_test.go
+        linters: [gosec]
+        text: "G101"
+      - path: internal/ui/logs/ui_test.go
+        linters: [gosec]
+        text: "G101"
+      # Test-helper file I/O, not attacker-reachable: openAPIPath and
+      # "testdata"/golden are package-level constants fixed at compile time,
+      # never request or environment input, and the golden file is only
+      # written under `go test -update`, a developer-invoked mode.
+      - path: docs/api/openapi_test.go
+        linters: [gosec]
+        text: "G304"
+      - path: internal/prompt/prompt_test.go
+        linters: [gosec]
+        text: "G301|G304|G306"
 
 run:
   timeout: 5m

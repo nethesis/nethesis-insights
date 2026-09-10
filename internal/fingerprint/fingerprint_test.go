@@ -48,7 +48,7 @@ func TestAllHexChars(t *testing.T) {
 		t.Fatalf("expected 64 chars for empty input, got %d", len(a))
 	}
 	for _, c := range a {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("non-hex char in fingerprint: %q", a)
 		}
 	}

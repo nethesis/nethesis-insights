@@ -794,7 +794,7 @@ func (s *Store) StaleSizingScores(ctx context.Context, version, limit int) ([]Si
 	if err != nil {
 		return nil, fmt.Errorf("store: stale sizing scores: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingNodeDayRow{}
 	for rows.Next() {
@@ -887,7 +887,7 @@ func (s *Store) SizingWindow(ctx context.Context, fromDay, toDay int64) ([]Sizin
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing window: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingWindowRow{}
 	for rows.Next() {
@@ -936,7 +936,7 @@ func (s *Store) SizingWindowFamilies(ctx context.Context, fromDay, toDay int64) 
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing window families: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingNodeFamilyRow{}
 	for rows.Next() {
@@ -967,7 +967,7 @@ func (s *Store) SizingWindowMetrics(ctx context.Context, fromDay, toDay int64) (
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing window metrics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingFamilyMetricRow{}
 	for rows.Next() {
@@ -992,7 +992,7 @@ func (s *Store) SizingVerdictStates(ctx context.Context) (map[string]string, err
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing verdict states: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := map[string]string{}
 	for rows.Next() {
@@ -1227,7 +1227,7 @@ func (s *Store) readSizingMonthly(ctx context.Context, month string, fromDay, to
 	if err != nil {
 		return nil, fmt.Errorf("store: rollup sizing monthly: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := []sizingMonthlyRow{}
 	for rows.Next() {

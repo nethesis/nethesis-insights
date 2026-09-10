@@ -43,7 +43,7 @@ func (s *Store) ListThreatEvents(ctx context.Context, systemID, attackerIP strin
 	if err != nil {
 		return nil, fmt.Errorf("store: list threat events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []ThreatEventRow{}
 	for rows.Next() {
@@ -74,7 +74,7 @@ func (s *Store) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyR
 	if err != nil {
 		return nil, fmt.Errorf("store: threat daily stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []ThreatDailyRow{}
 	for rows.Next() {
@@ -101,7 +101,7 @@ func (s *Store) ThreatIngestStats(ctx context.Context, limit int) ([]ThreatInges
 	if err != nil {
 		return nil, fmt.Errorf("store: threat ingest stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []ThreatIngestRow{}
 	for rows.Next() {
@@ -170,7 +170,7 @@ func (s *Store) ListThreatSystems(ctx context.Context) ([]ThreatSystemRow, error
 	if err != nil {
 		return nil, fmt.Errorf("store: list threat systems: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []ThreatSystemRow{}
 	for rows.Next() {

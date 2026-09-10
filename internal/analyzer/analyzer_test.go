@@ -27,7 +27,7 @@ func newTestStore(t *testing.T) *logsstore.Store {
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

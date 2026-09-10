@@ -211,7 +211,9 @@ func TestSizingIngestAcceptsGzip(t *testing.T) {
 	if _, err := gz.Write([]byte(validReport("2026-09-01"))); err != nil {
 		t.Fatalf("gzip: %v", err)
 	}
-	gz.Close()
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
 
 	st := &fakeSizingStore{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/reports", &buf)

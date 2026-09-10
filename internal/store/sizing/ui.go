@@ -128,7 +128,7 @@ func (s *Store) ListSizingNodes(ctx context.Context, systemID string, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("store: list sizing nodes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingNodeUIRow{}
 	for rows.Next() {
@@ -206,7 +206,7 @@ func (s *Store) ListSizingModules(ctx context.Context, systemID string, limit in
 	result := []SizingModuleUIRow{}
 	index := map[string]int{}
 	err = func() error {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var (
 				r         SizingModuleUIRow
@@ -253,7 +253,7 @@ func (s *Store) ListSizingModules(ctx context.Context, systemID string, limit in
 	if err != nil {
 		return nil, fmt.Errorf("store: list sizing metrics: %w", err)
 	}
-	defer metrics.Close()
+	defer func() { _ = metrics.Close() }()
 
 	folded := map[int][]string{}
 	for metrics.Next() {
@@ -306,7 +306,7 @@ func (s *Store) ListSizingCohorts(ctx context.Context, kind string, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("store: list sizing cohorts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingCohortRow{}
 	for rows.Next() {
@@ -340,7 +340,7 @@ func (s *Store) SizingIngestStats(ctx context.Context, limit int) ([]SizingInges
 	if err != nil {
 		return nil, fmt.Errorf("store: sizing ingest stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SizingIngestRow{}
 	for rows.Next() {

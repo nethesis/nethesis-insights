@@ -180,7 +180,7 @@ func main() {
 		slog.Error("failed to open store", "error", err)
 		os.Exit(1)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 	if err := s.Init(ctx); err != nil {

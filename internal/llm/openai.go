@@ -127,7 +127,7 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 		// httpReq or o.apiKey directly into any error string.
 		return Response{}, fmt.Errorf("llm: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	slog.Debug("llm response headers",
 		"status", resp.StatusCode,
