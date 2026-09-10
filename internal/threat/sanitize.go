@@ -40,12 +40,48 @@ const DefaultMaxDecisions = 500
 // never expire it.
 const maxClockSkew = 24 * time.Hour
 
-// cgnat, ula and benchmark are the ranges Go's netip predicates do not cover.
+// The ranges Go's netip predicates do not cover, all of them non-public and
+// therefore all of them dropped at ingest by publicUnicast.
+//
+// thisNetwork, protocolAssignments and reservedIPv4 are IANA special-purpose
+// v4 blocks that IsPrivate and friends say nothing about; reservedIPv4
+// (240.0.0.0/4) also swallows the broadcast address 255.255.255.255, so that
+// needs no rule of its own.
+//
+// siteLocal is the deprecated IPv6 site-local prefix. Deprecated by RFC 3879
+// but still genuinely private addressing, and still configured on real
+// networks, so it belongs with fc00::/7 rather than in a historical footnote.
+//
+// sixToFour and nat64 are the two transition prefixes that embed an IPv4
+// address verbatim in their low bits: 2002:c0a8:0101::1 is 192.168.1.1
+// wearing a v6 hat, and it published as a perfectly ordinary global address
+// before these entries existed. Both are rejected WHOLESALE rather than
+// unwrapped and re-tested against the v4 rules, deliberately. Unwrapping
+// would mean storing and publishing a v6 address whose only meaning is the
+// v4 address inside it -- useless to a feed consumer's firewall -- and it
+// would open a second, subtler route into the store for exactly the
+// addresses this function exists to keep out. These are transition
+// mechanisms, not addresses a CrowdSec instance has any business banning, so
+// dropping the prefix costs no real evidence.
 var (
-	cgnat     = netip.MustParsePrefix("100.64.0.0/10")
-	ula       = netip.MustParsePrefix("fc00::/7")
-	benchmark = netip.MustParsePrefix("198.18.0.0/15")
+	cgnat               = netip.MustParsePrefix("100.64.0.0/10")
+	ula                 = netip.MustParsePrefix("fc00::/7")
+	benchmark           = netip.MustParsePrefix("198.18.0.0/15")
+	thisNetwork         = netip.MustParsePrefix("0.0.0.0/8")
+	protocolAssignments = netip.MustParsePrefix("192.0.0.0/24")
+	reservedIPv4        = netip.MustParsePrefix("240.0.0.0/4")
+	siteLocal           = netip.MustParsePrefix("fec0::/10")
+	sixToFour           = netip.MustParsePrefix("2002::/16")
+	nat64               = netip.MustParsePrefix("64:ff9b::/96")
 )
+
+// nonPublicPrefixes is every prefix above, checked in one loop so adding a
+// range is one line and cannot be forgotten by a hand-written conjunction.
+var nonPublicPrefixes = []netip.Prefix{
+	cgnat, ula, benchmark,
+	thisNetwork, protocolAssignments, reservedIPv4,
+	siteLocal, sixToFour, nat64,
+}
 
 // localOrigins are the decision origins this server accepts: what the
 // reporter observed itself, either through CrowdSec ("crowdsec", "cscli") or
@@ -187,6 +223,14 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 // here, at ingest, so private addressing never reaches the store at all --
 // not merely never reaches the feed (spec §5.2).
 //
+// What that covers: the unspecified address, loopback, RFC1918, link-local
+// (v4 and v6, which is what makes the IMDS address 169.254.169.254
+// unreachable here), every multicast scope, CGNAT, the IPv6 ULA and
+// deprecated site-local prefixes, the benchmark range, 0.0.0.0/8,
+// 192.0.0.0/24, 240.0.0.0/4 (broadcast included), and the 6to4 and NAT64
+// transition prefixes, which embed a v4 address verbatim. See
+// nonPublicPrefixes for the ones Go's own predicates miss.
+//
 // The documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
 // 2001:db8::/32) are deliberately NOT rejected: they are not private
 // addressing, they never appear in real traffic, and both the design document
@@ -203,7 +247,12 @@ func publicUnicast(a netip.Addr) bool {
 		a.IsMulticast():
 		return false
 	}
-	return !cgnat.Contains(a) && !ula.Contains(a) && !benchmark.Contains(a)
+	for _, p := range nonPublicPrefixes {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // observedAt parses a CrowdSec RFC3339 timestamp into unix millis, clamping a

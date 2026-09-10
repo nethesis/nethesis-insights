@@ -609,9 +609,11 @@ successful no-op, not an error.
   later recurrence reopens with `reopened_at`; an LLM failure leaves templates
   unrecorded so the retry still sees them as novel.
 - `threat`: the deepest table in the repo, because a bug here is a data-protection
-  incident — every IP class (RFC1918, CGNAT, IMDS, multicast, IPv6 ULA, loopback,
-  unspecified, benchmark, IPv4-mapped, the reporter's own address), documentation
-  ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
+  incident — every IP class (RFC1918, CGNAT, IMDS, multicast, IPv6 ULA, IPv6
+  site-local, loopback, unspecified, benchmark, IPv4-mapped, `0.0.0.0/8`,
+  `192.0.0.0/24`, `240.0.0.0/4` with broadcast, 6to4 and NAT64 — the two
+  prefixes embedding an IPv4 address verbatim — and the reporter's own
+  address), documentation ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".

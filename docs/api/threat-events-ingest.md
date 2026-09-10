@@ -162,8 +162,12 @@ Applied in this order; each drop increments exactly one counter.
 5. **`value`** must parse as a single IP address (`dropped_bad_ip`; a CIDR
    lands here) and must be public unicast (`dropped_private_ip`). Rejected:
    RFC1918, loopback, unspecified, CGNAT `100.64.0.0/10`, link-local including
-   IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, benchmark
-   `198.18.0.0/15`, and the reporter's own observed source address. That
+   IMDS `169.254.169.254`, multicast, IPv6 ULA `fc00::/7`, IPv6 site-local
+   `fec0::/10`, benchmark `198.18.0.0/15`, `0.0.0.0/8`, `192.0.0.0/24`,
+   `240.0.0.0/4` (broadcast `255.255.255.255` included), the 6to4 prefix
+   `2002::/16` and the NAT64 prefix `64:ff9b::/96` — both of which carry an
+   IPv4 address verbatim in their low bits, so `2002:c0a8:0101::1` is
+   `192.168.1.1` in disguise — and the reporter's own observed source address. That
    address is the `X-Forwarded-For` value Traefik sets, trusted only because
    the request reached `threatd` from Traefik's own address
    (`TRUSTED_PROXY_CIDRS`) — never the bare TCP peer address, which behind a

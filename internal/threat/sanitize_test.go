@@ -118,6 +118,18 @@ func TestSanitizeDropsNonPublicAddresses(t *testing.T) {
 		{"IPv6 ULA", "fd00::1"},
 		{"benchmark", "198.18.0.1"},
 		{"IPv4-mapped private v6", "::ffff:10.0.0.5"},
+		{"this-network", "0.1.2.3"},
+		{"this-network top", "0.255.255.255"},
+		{"IETF protocol assignments", "192.0.0.1"},
+		{"reserved class E", "240.0.0.1"},
+		{"reserved class E top", "255.255.255.254"},
+		{"broadcast", "255.255.255.255"},
+		{"deprecated IPv6 site-local", "fec0::1"},
+		{"deprecated IPv6 site-local top", "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"},
+		{"6to4 wrapping RFC1918", "2002:c0a8:0101::1"},
+		{"6to4 wrapping public", "2002:cb00:7112::1"},
+		{"NAT64 wrapping RFC1918", "64:ff9b::c0a8:101"},
+		{"NAT64 wrapping public", "64:ff9b::cb00:7112"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -981,11 +981,19 @@ What each pipeline keeps:
 Three rules do the work:
 
 - **Non-public addresses are dropped at ingest, not at read.** Private,
-  loopback, CGNAT, link-local, multicast, ULA, IMDS, benchmark, unspecified
-  and IPv4-mapped addresses never reach the database, so no later query, no
-  export and no bug in a read path can publish one. Documentation ranges are
-  deliberately kept — they are valid public space for this purpose and a live
-  fleet reports them.
+  loopback, CGNAT, link-local, multicast, ULA, deprecated IPv6 site-local
+  (`fec0::/10`), IMDS, benchmark, unspecified, IPv4-mapped, `0.0.0.0/8`,
+  `192.0.0.0/24`, `240.0.0.0/4` (broadcast
+  included) and the two IPv4-embedding transition prefixes — 6to4
+  (`2002::/16`) and NAT64 (`64:ff9b::/96`) — never reach the database, so no
+  later query, no export and no bug in a read path can publish one. The
+  transition prefixes matter because they carry a v4 address verbatim in
+  their low bits: `2002:c0a8:0101::1` *is* `192.168.1.1`. Both are rejected
+  wholesale rather than unwrapped and re-tested, because a v6 address whose
+  only meaning is the v4 inside it is useless to a feed consumer's firewall,
+  and unwrapping would be a second route into the store for the addresses the
+  rule exists to keep out. Documentation ranges are deliberately kept — they
+  are valid public space for this purpose and a live fleet reports them.
 - **The threat metadata allowlist is a fixed, typed set of one field.**
   `threat.metadata` returns `duration_seconds` and nothing else. No
   free-text field but the scenario itself reaches the store: no usernames (a
