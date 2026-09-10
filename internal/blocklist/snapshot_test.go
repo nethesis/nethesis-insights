@@ -162,7 +162,7 @@ func TestGzipRoundTripsToTheBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gzip reader: %v", err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	got, err := io.ReadAll(zr)
 	if err != nil {
 		t.Fatalf("read gzip: %v", err)

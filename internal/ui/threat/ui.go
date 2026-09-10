@@ -127,6 +127,21 @@ var pages = []string{
 	"allowlist-requests.html", "audit.html", "status.html",
 }
 
+// maxAllowlistFormSize bounds a writable route's request body. None of the
+// four routes below carry more than a CIDR, a "force" flag and a free-text
+// reason/note already capped at model.MaxAllowlistReasonLen (512 bytes), but
+// nothing in front of these handlers bounds the body otherwise -- Traefik's
+// dynamic.yaml has no buffering middleware, and chrome does not size-limit
+// either -- so each handler calls http.MaxBytesReader(w, r.Body, ...) on
+// itself, right before r.ParseForm(), which buffers the whole body in
+// memory. Each handler wraps its own r.Body rather than route() wrapping it
+// once before dispatch: gosec's G120 check can't see across the dispatch, so
+// a single wrap in route() left every handler's ParseForm/FormValue call
+// still flagged. 16 KiB is generous headroom over the few-hundred-byte real
+// payload while still refusing an attempt to exhaust memory with an
+// oversized POST.
+const maxAllowlistFormSize = 16 << 10 // 16 KiB
+
 // writableRoutes is the small, explicit, enumerated set of paths that also
 // answer POST. Every one authenticates against ADMIN_API_KEY and refuses a
 // cross-site request first: Traefik's BasicAuth in front of this subtree is
@@ -486,6 +501,7 @@ func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
 // a form, and the useful response is the updated page, not a status code.
 
 func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAllowlistFormSize)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
@@ -512,6 +528,7 @@ func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, acto
 }
 
 func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, actor string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAllowlistFormSize)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
@@ -545,6 +562,7 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 // authenticated human submitted this form -- see the "no automatic
 // promotion" rule in CLAUDE.md.
 func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, actor string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAllowlistFormSize)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
@@ -584,6 +602,7 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 // handleRejectRequest creates no allowlist entry -- there is nothing here
 // that could auto-promote anything.
 func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, actor string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAllowlistFormSize)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return

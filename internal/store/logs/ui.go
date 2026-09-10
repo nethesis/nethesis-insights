@@ -190,7 +190,7 @@ func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: list systems: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []SystemRow{}
 	for rows.Next() {
@@ -222,7 +222,7 @@ func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("store: list analyses: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []AnalysisRow{}
 	for rows.Next() {
@@ -280,7 +280,7 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 	if err != nil {
 		return nil, fmt.Errorf("store: gate rollup: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Grouping on the raw stored string is otherwise sound (gate reasons are
 	// sorted before storage, so identical reason sets produce identical
@@ -347,7 +347,7 @@ func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: cost rollup: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []CostRow{}
 	for rows.Next() {
@@ -420,7 +420,7 @@ func (s *Store) ListTemplates(ctx context.Context, systemID string, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("store: list templates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []TemplateRow{}
 	for rows.Next() {
@@ -450,7 +450,7 @@ func (s *Store) ListBaselines(ctx context.Context, systemID string) ([]BaselineR
 	if err != nil {
 		return nil, fmt.Errorf("store: list baselines: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []BaselineRow{}
 	for rows.Next() {

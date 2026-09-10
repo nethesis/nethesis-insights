@@ -87,7 +87,11 @@ func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, maxEntri
 	// list on every poll, which is precisely what the ETag exists to avoid.
 	// A client caches on the entry set; that is what the tag must identify.
 	h := sha256.New()
-	fmt.Fprintf(h, "v1\n%s\n", rule)
+	// hash.Hash.Write never returns an error (it's documented not to), but
+	// fmt.Fprintf's own signature always returns one regardless of the
+	// Writer passed in, so errcheck can't see through to that guarantee --
+	// discard it explicitly rather than leaving it unchecked.
+	_, _ = fmt.Fprintf(h, "v1\n%s\n", rule)
 	for _, a := range addrs {
 		s := a.String()
 		buf.WriteString(s)

@@ -208,7 +208,7 @@ func (s *Store) KnownTemplates(ctx context.Context, systemID string) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("store: known templates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// The key the gate looks up joins the module and the canonical text. The
 	// two are stored in separate columns and joined here rather than stored
@@ -233,7 +233,7 @@ func (s *Store) UpsertTemplates(ctx context.Context, systemID string, ts []model
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for _, t := range ts {
 		firstSeen := t.FirstSeen
@@ -268,7 +268,7 @@ func (s *Store) Baselines(ctx context.Context, systemID string) (map[gate.Baseli
 	if err != nil {
 		return nil, fmt.Errorf("store: baselines: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := map[gate.BaselineKey]float64{}
 	for rows.Next() {
@@ -291,7 +291,7 @@ func (s *Store) UpsertBaselines(ctx context.Context, systemID string, d []model.
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	now := nowMillis()
 
@@ -544,7 +544,7 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	if err != nil {
 		return nil, fmt.Errorf("store: query findings: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []model.Finding
 	for rows.Next() {

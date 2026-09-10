@@ -24,7 +24,7 @@ func newTestStore(t *testing.T) *Store {
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -191,7 +191,7 @@ func TestSamplesNeverStoredInSystemTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -212,6 +212,9 @@ func TestSamplesNeverStoredInSystemTemplates(t *testing.T) {
 				t.Fatalf("column %s contains sample text: %s", cols[i], str)
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
 	}
 
 	known, err := s.KnownTemplates(ctx, "sys1")

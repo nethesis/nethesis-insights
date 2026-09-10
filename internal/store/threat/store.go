@@ -387,7 +387,7 @@ func (s *Store) ConsensusCandidates(ctx context.Context, since int64) ([]ThreatC
 	if err != nil {
 		return nil, fmt.Errorf("store: consensus candidates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []ThreatCandidateRow{}
 	for rows.Next() {
@@ -461,7 +461,7 @@ func (s *Store) queryAllowlist(ctx context.Context, query string, args ...any) (
 	if err != nil {
 		return nil, fmt.Errorf("store: threat allowlist: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []AllowlistRow{}
 	for rows.Next() {
@@ -570,7 +570,7 @@ func (s *Store) queryBlocklist(ctx context.Context, query string, args ...any) (
 	if err != nil {
 		return nil, fmt.Errorf("store: list blocklist: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []BlocklistRow{}
 	for rows.Next() {
@@ -611,7 +611,7 @@ func (s *Store) RollupThreatDailyStats(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("store: rollup threat stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type bucket struct {
 		day, scenario string

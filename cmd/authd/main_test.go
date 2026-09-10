@@ -11,7 +11,7 @@ import (
 )
 
 func TestGetenvFallsBackToDefaultWhenUnset(t *testing.T) {
-	os.Unsetenv("AUTHD_TEST_GETENV_UNSET")
+	_ = os.Unsetenv("AUTHD_TEST_GETENV_UNSET")
 	if got := getenv("AUTHD_TEST_GETENV_UNSET", "fallback"); got != "fallback" {
 		t.Errorf("getenv = %q, want %q", got, "fallback")
 	}
@@ -25,7 +25,7 @@ func TestGetenvPrefersTheEnvironment(t *testing.T) {
 }
 
 func TestGetenvIntFallsBackOnUnsetOrUnparseable(t *testing.T) {
-	os.Unsetenv("AUTHD_TEST_GETENVINT")
+	_ = os.Unsetenv("AUTHD_TEST_GETENVINT")
 	if got := getenvInt("AUTHD_TEST_GETENVINT", 7); got != 7 {
 		t.Errorf("getenvInt(unset) = %d, want fallback 7", got)
 	}
@@ -42,7 +42,7 @@ func TestGetenvIntFallsBackOnUnsetOrUnparseable(t *testing.T) {
 }
 
 func TestGetenvDurationFallsBackOnUnsetOrUnparseable(t *testing.T) {
-	os.Unsetenv("AUTHD_TEST_GETENVDUR")
+	_ = os.Unsetenv("AUTHD_TEST_GETENVDUR")
 	if got := getenvDuration("AUTHD_TEST_GETENVDUR", 3*time.Second); got != 3*time.Second {
 		t.Errorf("getenvDuration(unset) = %v, want fallback 3s", got)
 	}

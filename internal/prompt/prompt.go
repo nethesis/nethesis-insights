@@ -318,7 +318,10 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 		if sel.DeviatingModules[e.ModuleID] {
 			mark = " *"
 		}
-		sb.WriteString(fmt.Sprintf("%s %d %d %s %s%s\n", e.ModuleID, e.Priority, e.Observed, expectedStr, ratioStr, mark))
+		// strings.Builder.Write never returns an error, but fmt.Fprintf's own
+		// signature always returns one regardless of the Writer passed in --
+		// discard it explicitly rather than leaving it unchecked.
+		_, _ = fmt.Fprintf(&sb, "%s %d %d %s %s%s\n", e.ModuleID, e.Priority, e.Observed, expectedStr, ratioStr, mark)
 	}
 	sb.WriteString("\n")
 
@@ -338,14 +341,14 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 		if l.Variants > 1 {
 			variants = fmt.Sprintf(" variants=%d", l.Variants)
 		}
-		sb.WriteString(fmt.Sprintf("[%s] count=%d module=%s priority=%d category=%s%s\n    %s\n",
-			TemplateID(i), t.Count, mod, t.Priority, cat, variants, t.Template))
+		_, _ = fmt.Fprintf(&sb, "[%s] count=%d module=%s priority=%d category=%s%s\n    %s\n",
+			TemplateID(i), t.Count, mod, t.Priority, cat, variants, t.Template)
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("SAMPLING\n")
-	sb.WriteString(fmt.Sprintf("lines_seen=%d lines_kept=%d max_lines=%d\n",
-		b.Budget.LinesSeen, b.Budget.LinesKept, b.Budget.MaxLines))
+	_, _ = fmt.Fprintf(&sb, "lines_seen=%d lines_kept=%d max_lines=%d\n",
+		b.Budget.LinesSeen, b.Budget.LinesKept, b.Budget.MaxLines)
 	sb.WriteString("under_sampled (module dropped)\n")
 	truncated := make([]model.TruncatedModule, len(b.Budget.TruncatedModules))
 	copy(truncated, b.Budget.TruncatedModules)
@@ -353,7 +356,7 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 		return truncated[i].ModuleID < truncated[j].ModuleID
 	})
 	for _, tm := range truncated {
-		sb.WriteString(fmt.Sprintf("%s %d\n", tm.ModuleID, tm.Dropped))
+		_, _ = fmt.Fprintf(&sb, "%s %d\n", tm.ModuleID, tm.Dropped)
 	}
 	sb.WriteString("\n")
 
@@ -386,7 +389,7 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 		}
 
 		for _, f := range known {
-			sb.WriteString(fmt.Sprintf("[%s] %s\n", f.Severity, f.Title))
+			_, _ = fmt.Fprintf(&sb, "[%s] %s\n", f.Severity, f.Title)
 			// A template the finding was raised from may be absent this
 			// window. Omit it rather than invent an identifier the model
 			// could cite back into ResolveEvidence as unknown.
@@ -400,14 +403,14 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 			}
 			if len(ids) > 0 {
 				sort.Strings(ids)
-				sb.WriteString(fmt.Sprintf("    evidence: %s\n", strings.Join(ids, ", ")))
+				_, _ = fmt.Fprintf(&sb, "    evidence: %s\n", strings.Join(ids, ", "))
 			}
 		}
 	}
 
 	sb.WriteString("\nWINDOW\n")
-	sb.WriteString(fmt.Sprintf("start_ms=%d end_ms=%d collector=%s masking=%d\n",
-		b.Window.Start, b.Window.End, b.CollectorVersion, b.MaskingVersion))
+	_, _ = fmt.Fprintf(&sb, "start_ms=%d end_ms=%d collector=%s masking=%d\n",
+		b.Window.Start, b.Window.End, b.CollectorVersion, b.MaskingVersion)
 
 	return sb.String()
 }

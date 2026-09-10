@@ -99,7 +99,7 @@ func (s *Store) PendingAllowlistRequests(ctx context.Context, limit int) ([]Allo
 	if err != nil {
 		return nil, fmt.Errorf("store: pending allowlist requests: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Folded in Go rather than aggregated in SQL for the same reason
 	// ConsensusCandidates is: COUNT(DISTINCT ...) alone cannot also hand back
@@ -258,7 +258,7 @@ func (s *Store) ListAllowlistAudit(ctx context.Context, limit int) ([]AllowlistA
 	if err != nil {
 		return nil, fmt.Errorf("store: list allowlist audit: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := []AllowlistAuditRow{}
 	for rows.Next() {

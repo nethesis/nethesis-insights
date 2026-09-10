@@ -58,14 +58,14 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var reader io.Reader = io.LimitReader(r.Body, maxThreatReportSize)
+	var reader = io.LimitReader(r.Body, maxThreatReportSize)
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		gz, err := gzip.NewReader(reader)
 		if err != nil {
 			reject(w, r, http.StatusBadRequest, "invalid gzip body", "error", err.Error())
 			return
 		}
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		reader = gz
 	}
 
