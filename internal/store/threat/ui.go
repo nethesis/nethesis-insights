@@ -10,10 +10,11 @@ import (
 	"fmt"
 )
 
-// Threat Shield cross-system reads for the operator UI, split out of
-// threat.go for the same reason ui.go is split out of store.go: none of these
-// take the write mutex, every one is bounded, and none of them is on the
-// ingest or consensus path.
+// Threat Shield cross-system reads for the operator UI, kept in a separate
+// file so store.go, the write path used by ingest and consensus, does not
+// balloon -- the same split as internal/store/logs's store.go/ui.go. None of
+// these take the write mutex, every one is bounded, and none of them is on
+// the ingest or consensus path.
 
 // ListBlocklistEntries returns the promoted entries including expired ones
 // not yet swept, newest listing first -- the operator wants to see what just
