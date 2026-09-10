@@ -54,8 +54,11 @@ type Queue struct {
 	inflight map[window]bool
 
 	// workers records what Start was called with, for the operator UI's queue
-	// status -- it never changes after Start, so reading it concurrently with
-	// Depth/Cap needs no lock, the same as those two.
+	// status. No lock guards it, the same as Depth/Cap: what makes that safe
+	// is not that the field is immutable but call ordering -- Start is always
+	// called synchronously in main(), and returns (so the write here has
+	// happened) before the HTTP server that reads Workers() is even
+	// constructed, let alone serving the request goroutines that call it.
 	workers int
 }
 

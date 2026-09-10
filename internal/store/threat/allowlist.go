@@ -13,7 +13,7 @@ import (
 // Allowlist management: the client-facing request queue and its audit
 // trail, layered on top of the threat_allowlist table declared in store.go.
 // There is deliberately no method here that turns a request into a
-// threat_allowlist row by itself -- UpsertThreatAllowlistEntry (threat.go)
+// threat_allowlist row by itself -- UpsertThreatAllowlistEntry (store.go)
 // is the only writer of that table, and every caller of it in this codebase
 // is a human decision (an admin API call or an operator UI form submit).
 
