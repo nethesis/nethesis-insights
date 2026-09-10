@@ -76,24 +76,36 @@ func randomPepper() string {
 	return hex.EncodeToString(b)
 }
 
+// resolvePepper decides the forward-auth pepper the way main() used to
+// inline: AUTH_PEPPER verbatim when set, otherwise a fresh randomPepper()
+// for this process's lifetime. It takes getenv as a parameter -- rather than
+// calling the package-level getenv directly, as main()'s other settings do
+// -- purely so a test can supply a fake without mutating the real
+// environment; production code always calls it as resolvePepper(getenv).
+//
+// A pepper is only defense in depth -- the cache it keys never leaves
+// memory -- so an unset AUTH_PEPPER gets a random one rather than refusing
+// to start. But it must never default to empty: with an empty HMAC key the
+// cache key is computable offline by anyone, and after the pipeline split
+// this process holds the whole fleet's credential cache. The two source
+// values ("configured", "ephemeral") are logged and reported in the
+// effective-config output; preserve them verbatim.
+func resolvePepper(getenv func(string, string) string) (pepper, source string) {
+	if p := getenv("AUTH_PEPPER", ""); p != "" {
+		return p, "configured"
+	}
+	return randomPepper(), "ephemeral"
+}
+
 func main() {
 	setupLogging(getenv("LOG_LEVEL", "info"))
 
 	listenAddr := getenv("AUTH_LISTEN_ADDR", ":9590")
 	validateURL := getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
-	pepper := getenv("AUTH_PEPPER", "")
 	timeout := getenvDuration("AUTH_TIMEOUT", 5*time.Second)
 
-	pepperSource := "configured"
-	if pepper == "" {
-		// A pepper is only defense in depth -- the cache it keys never
-		// leaves memory -- so an unset AUTH_PEPPER gets a random one for
-		// this process's lifetime rather than refusing to start. But it
-		// must never default to empty: with an empty HMAC key the cache
-		// key is computable offline by anyone, and after the pipeline
-		// split this process holds the whole fleet's credential cache.
-		pepper = randomPepper()
-		pepperSource = "ephemeral"
+	pepper, pepperSource := resolvePepper(getenv)
+	if pepperSource == "ephemeral" {
 		slog.Info("AUTH_PEPPER not set, generated an ephemeral one for this process")
 	}
 

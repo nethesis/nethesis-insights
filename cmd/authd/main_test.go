@@ -58,21 +58,14 @@ func TestGetenvDurationFallsBackOnUnsetOrUnparseable(t *testing.T) {
 	}
 }
 
-// randomPepper is what main() falls back to when AUTH_PEPPER is unset,
-// instead of defaulting to an empty (and therefore offline-computable) HMAC
-// key -- see the comment in main() explaining why an unset pepper must not
-// mean "no pepper". Pin the two properties that fallback depends on: a real
-// 32-byte key every time, and a fresh one every call, matching the promise
-// "ephemeral... for this process's lifetime" rather than a second fixed
-// constant that would be exactly as guessable as an empty one.
-//
-// main()'s branch that decides *whether* to call randomPepper (AUTH_PEPPER
-// == "") is inline in main() itself and not exposed as a separate function,
-// so it is not reachable from a _test.go file without a production-code
-// change (factoring pepper selection into something like
-// `resolvePepper(getenv string) (pepper, source string)`); this test covers
-// the unit main() delegates to, which is as much of the fallback as can be
-// exercised without that change.
+// randomPepper is what resolvePepper falls back to when AUTH_PEPPER is
+// unset, instead of defaulting to an empty (and therefore offline-computable)
+// HMAC key -- see the comment on resolvePepper explaining why an unset
+// pepper must not mean "no pepper". Pin the two properties that fallback
+// depends on: a real 32-byte key every time, and a fresh one every call,
+// matching the promise "ephemeral... for this process's lifetime" rather
+// than a second fixed constant that would be exactly as guessable as an
+// empty one.
 func TestRandomPepperIsFreshAndCorrectLength(t *testing.T) {
 	a := randomPepper()
 	b := randomPepper()
@@ -86,5 +79,59 @@ func TestRandomPepperIsFreshAndCorrectLength(t *testing.T) {
 	}
 	if a == b {
 		t.Error("two calls to randomPepper returned the same value -- it must be fresh per process, not a fixed fallback")
+	}
+}
+
+// fakeGetenv builds a getenv func(string, string) string, the same shape as
+// the package-level getenv, backed by a map instead of the real environment
+// -- so resolvePepper can be tested without t.Setenv (which would mutate
+// process state a parallel package test could observe).
+func fakeGetenv(vars map[string]string) func(string, string) string {
+	return func(key, def string) string {
+		if v, ok := vars[key]; ok {
+			return v
+		}
+		return def
+	}
+}
+
+// When AUTH_PEPPER is set, resolvePepper must use that exact value --
+// verbatim, not rehashed or truncated -- and report it as "configured". This
+// is the branch that keeps the validation cache warm across a restart: if
+// resolvePepper silently ignored a configured pepper and generated a random
+// one instead, every deployment that believes it configured AUTH_PEPPER
+// would in fact run ephemeral, invisibly.
+func TestResolvePepperUsesTheConfiguredValueVerbatim(t *testing.T) {
+	getenv := fakeGetenv(map[string]string{"AUTH_PEPPER": "my-configured-pepper"})
+
+	pepper, source := resolvePepper(getenv)
+
+	if pepper != "my-configured-pepper" {
+		t.Errorf("pepper = %q, want the configured value verbatim", pepper)
+	}
+	if source != "configured" {
+		t.Errorf("source = %q, want %q", source, "configured")
+	}
+}
+
+// When AUTH_PEPPER is unset, resolvePepper must report "ephemeral" and, more
+// importantly, must actually generate a fresh pepper each call -- not a
+// fixed fallback constant. A fixed fallback would satisfy a naive test (it
+// is non-empty, it is "ephemeral") while defeating the entire point: the
+// validation cache's HMAC key would be the same across every authd process
+// that ever ran unconfigured, i.e. computable offline by anyone, exactly the
+// empty-key failure this mechanism exists to avoid.
+func TestResolvePepperGeneratesAFreshPepperWhenUnset(t *testing.T) {
+	getenv := fakeGetenv(map[string]string{})
+
+	pepperA, sourceA := resolvePepper(getenv)
+	pepperB, sourceB := resolvePepper(getenv)
+
+	if sourceA != "ephemeral" || sourceB != "ephemeral" {
+		t.Errorf("source = (%q, %q), want (%q, %q)", sourceA, sourceB, "ephemeral", "ephemeral")
+	}
+	if pepperA == pepperB {
+		t.Error("two calls to resolvePepper with AUTH_PEPPER unset returned the same pepper -- " +
+			"it must be fresh per call, not a fixed fallback, or the cache key becomes offline-computable")
 	}
 }
