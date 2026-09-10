@@ -110,11 +110,10 @@ Three issues, deliberately not 28. Full list with file:line in
       `store/threat/ui.go:10-12`; `queue.go:54-57` claiming immutability where
       the real property is call ordering.
 - [ ] **Deploy tooling.** GHA cache unscoped across the matrix (four jobs
-      overwrite each other's `mode=max` export); `After=` without `Wants=` on the
-      four units, so if authd fails at boot every `/v1` request 500s on a valid
-      credential; `render.sh` writing straight into the directory Traefik
-      watches; the duplicated `runPassLoop`/env helpers in `cmd/threatd` and
-      `cmd/sizingd`.
+      overwrite each other's `mode=max` export); `render.sh` writing straight
+      into the directory Traefik watches; the duplicated `runPassLoop`/env
+      helpers in `cmd/threatd` and `cmd/sizingd`. (The `After=`-without-`Wants=`
+      item from this list is done — see §4.)
 
 ## 4. Known operational sharp edges
 
@@ -154,15 +153,26 @@ Three issues, deliberately not 28. Full list with file:line in
       containers `healthy`, Traefik `Up`, `ss -tlnp` still 80/443 only, the
       Let's Encrypt certificate untouched, and every route 401s without a
       credential. The four containers now report `LOG_LEVEL=info`.
-- [ ] **Back up the volumes.** Three fresh databases means nothing to lose now
-      and everything to lose later.
-- [ ] **`insightsd` has no LLM credentials on the box.**
-      `/etc/insights/insightsd.env` is empty, so `LLM_BASE_URL`, `LLM_MODEL` and
-      `LLM_API_KEY` are all unset and every gated bundle would fail its call.
-      Harmless only for as long as nothing ships bundles — this blocks the
-      `ns8-loki` step in §1 and must be set before it, together with
-      `LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK` (the cost ledger
-      reads zero without them) and `LLM_DAILY_SPEND_CAP_USD` as insurance.
+- Backing up the volumes was considered and **dropped**: that host is a dev
+  machine, its three databases hold nothing worth preserving, and
+  `docs/runbooks/2026-09-09-insights-test-deploy.md` rebuilds it from scratch.
+- [x] **`insightsd` has no LLM credentials on the box.** Set 2026-09-10:
+      `api.openai.com/v1`, `gpt-4o-mini`, and both price knobs. Proven live by
+      rl1's first bundle — one call, `$0.000202`, three findings.
+- [ ] **`PIPELINE_EXCLUDE_MODULES` on the box matches nothing.** It is set to
+      `crowdsec,insights`, but `model.ExcludeModules` compares `module_id`
+      exactly and the id is `crowdsec1` — NS8 module ids carry an instance
+      number. So the exclusion is inert: crowdsec1's log lines are gated,
+      prompted and billed on the LLM path while the same signal already
+      arrives on `/blocklist/v1/events`, which is the double-pay the setting
+      exists to prevent. Two `crowdsec1` rows are already in
+      `module_baselines`. `insights` in that list is a second mistake of the
+      same kind: it is a *service*, not a module, and its own axis
+      (`PIPELINE_EXCLUDE_SERVICES`) is already correct by default. Fix is
+      `PIPELINE_EXCLUDE_MODULES=crowdsec1` and a restart.
+- [ ] **`LLM_DAILY_SPEND_CAP_USD` is unset**, so the only ceiling is
+      `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY=12`. Cheap insurance on a box that now
+      has live reporters.
 
 ## 5. Not started, from the original plan
 
