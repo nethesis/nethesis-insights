@@ -1078,7 +1078,7 @@ It fires (returns `Call: true`) if any of:
 - a digest entry's observed/expected ratio exceeds `GATE_TOLERANCE` **and** the
   bucket clears both absolute floors, `GATE_MIN_EXPECTED` (default 10) and
   `GATE_MIN_OBSERVED` (default 20). A ratio is not evidence when the
-  denominator is 2: on the dev fleet the median bucket baseline was 3.1 lines
+  denominator is 2: measured on a live fleet the median bucket baseline was 3.1 lines
   per window, 207 of 587 buckets were under 2, and the buckets that fired most
   often were the smallest ones. `expected` is the edge-supplied value if
   present, otherwise the server's own EWMA baseline, and the floors apply
@@ -1088,7 +1088,7 @@ It fires (returns `Call: true`) if any of:
   assigned by the edge, never computed server-side. Mere presence does not
   fire: `sshd` auth failures arrive continuously on any internet-facing node,
   so the earlier unconditional form made the gate a no-op — 352 LLM calls out
-  of 352 windows on the dev fleet — and made the spend-cap degrade path
+  of 352 windows on a live node — and made the spend-cap degrade path
   (`SystemState.SecurityOnly`) cost exactly as much as not degrading;
 - a module is both truncated (the edge dropped lines to stay under its line
   budget) **and** deviating — truncation alone never fires.

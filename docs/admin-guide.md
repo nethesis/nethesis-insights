@@ -645,7 +645,7 @@ one problem into ten findings either. The full, unmodified line is still what
 you see in the UI and on the finding — only the comparison is collapsed.
 
 **Modules are counted by kind, not by copy.** A machine can run many copies of
-one application — a hosting node in the dev fleet runs 82 `nethvoice` and 71
+one application — a measured hosting node runs 82 `nethvoice` and 71
 `openldap` instances, named `nethvoice1`, `nethvoice2` and so on. Every copy
 runs the same software and therefore says the same things, so the server groups
 them by *kind*: `nethvoice5` and `nethvoice39` are both `nethvoice`. Without
@@ -667,7 +667,7 @@ Note the shape of the security rule: *new or surging*, not merely *present*.
 Any machine reachable from the internet gets a constant trickle of failed SSH
 logins, so "there is a security-tagged line in this window" is true of
 essentially every window forever. Treating that as a reason to call the AI
-made the gate stop gating — measured on the dev machine, 352 AI calls out of
+made the gate stop gating — measured on a live node, 352 AI calls out of
 352 windows, not one gated out. Steady background noise is not news; a new
 kind of attack, or a sudden spike in a familiar one, is.
 
