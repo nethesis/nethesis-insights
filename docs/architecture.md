@@ -83,6 +83,10 @@ internal/platform/ingestq                generic bounded queue; threatd's
                                           ingest bound. Not shared with
                                           internal/queue (below) -- that one
                                           carries logs-only window-claim logic
+internal/platform/svc                    Getenv/GetenvInt/GetenvDuration and
+                                          RunPassLoop -- the binary-startup
+                                          helpers threatd, sizingd and (via
+                                          internal/maint) insightsd all need
 
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
@@ -115,6 +119,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
 | `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. |
+| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
@@ -278,11 +283,13 @@ system's findings (optionally filtered by `since`/`status`), sorted by
 Driven by a ticker in `cmd/insightsd` at `MAINT_INTERVAL` (default 10m), with
 one pass run immediately at startup so a restart does not leave months of
 unpruned backlog sitting until the first tick — the same reasoning as
-`blocklist.Runner`'s and `baseline.Runner`'s own immediate-first-pass loops.
-insightsd had no housekeeping at all before this: `internal/store/logs`
-carried zero `DELETE` statements, so with the fleet feeding it every 15
-minutes, `system_templates`, `findings` and `analyses` all grew without
-bound.
+`blocklist.Runner`'s and `baseline.Runner`'s own immediate-first-pass loops,
+and now the same code: `maint.Runner.RunLoop(ctx, interval)` is a one-line
+wrapper over `svc.RunPassLoop`, the same helper the consensus and cohort
+passes drive directly from their `cmd/*` binaries. insightsd had no
+housekeeping at all before this: `internal/store/logs` carried zero `DELETE`
+statements, so with the fleet feeding it every 15 minutes,
+`system_templates`, `findings` and `analyses` all grew without bound.
 
 Unlike the consensus and cohort passes, its three prunes have **no ordering
 constraint** between them — neither dictates the other's correctness, because
@@ -533,10 +540,14 @@ The contract clients build against is
 
 Runs every `SIZING_PASS_INTERVAL` (default 1h — the inputs are whole days, so
 faster cannot produce a different answer), started after the listeners, first
-pass immediately, in `cmd/sizingd`. Same shape as the consensus pass's loop in
-`cmd/threatd`: each binary's own `runPassLoop` takes an
-`interface{ Run(context.Context, int64) error }`, which both runners satisfy —
-the two binaries cannot share the unexported helper, only the shape.
+pass immediately, in `cmd/sizingd`, via `svc.RunPassLoop(ctx, "sizing cohort",
+cohortPass, sizingPassInterval)`. Same call, with a different `svc.Pass` and
+name, drives the consensus loop in `cmd/threatd` and (through
+`maint.Runner.RunLoop`) insightsd's housekeeping pass — see
+`internal/platform/svc` in "Package layering". The two `cmd/*` copies of this
+loop were byte-for-byte identical (confirmed by diff before extracting
+`svc.RunPassLoop`), which is why they moved rather than staying "the same
+shape, different code": there was no shape difference to preserve.
 
 ```
 1. recompute pressure where pressure_version is stale (bounded batch)

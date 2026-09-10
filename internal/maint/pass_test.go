@@ -58,7 +58,7 @@ func testConfig() Config {
 
 // A prune pass has no published artifact behind it (unlike blocklist's feed
 // or baseline's cohorts), so a failure anywhere must still be logged, not
-// returned -- otherwise runPassLoop-shaped callers would treat every
+// returned -- otherwise svc.RunPassLoop-shaped callers would treat every
 // transient store error as "the whole pass failed" when two of the three
 // tables were pruned just fine.
 func TestRunAlwaysReturnsNilEvenWhenEveryPruneFails(t *testing.T) {
