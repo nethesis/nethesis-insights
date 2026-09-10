@@ -184,9 +184,16 @@ the body.
    when the request arrived from `TRUSTED_PROXY_CIDRS` — the credential itself
    was validated upstream by Traefik's `forwardAuth` call to `authd`, not here.
    See "Authentication" below.
-2. The body is decoded (gzip-aware, size-capped at 8 MiB) into a
-   `model.Bundle` and validated: schema version, `system_id` matches the
-   authenticated identity, a sane window, a template-count ceiling.
+2. The body is decoded (gzip-aware) into a `model.Bundle`, with two size caps
+   enforced by `http.MaxBytesReader`: the compressed body at 8 MiB (a bound on
+   the socket read) and the decoded JSON at 30 MiB (the one that actually
+   bounds memory — a compressed-only cap is defeated by a gzip bomb). The
+   bundle is then validated: schema version, `system_id` matches the
+   authenticated identity, `window.end > window.start`, `window.end` not in
+   the future, `window.start` no older than 6 hours (the room the edge needs
+   to retry a bundle across several failed send cycles without the server
+   discarding data it eventually delivers), a 1000-template ceiling, and at
+   most 2 `samples` per template.
 3. Modules named by `PIPELINE_EXCLUDE_MODULES` (default `crowdsec`) are
    stripped by `model.Bundle.ExcludeModules` — templates, digest entries and
    truncation records together. An entry matches an exact `module_id` **or**

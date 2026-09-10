@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
@@ -52,6 +53,12 @@ type Store interface {
 type Config struct {
 	ExcludeModules  map[string]bool
 	ExcludeServices map[string]bool
+
+	// Now is the injected clock the future-window and window-age checks read
+	// -- never a direct time.Now() in validation logic, so both can be driven
+	// deterministically in tests. Defaults to time.Now in NewServer, so no
+	// caller has to set it.
+	Now func() time.Time
 }
 
 type server struct {
@@ -63,6 +70,9 @@ type server struct {
 
 // NewServer builds insightsd's ingest and read API.
 func NewServer(q Publisher, st Store, trusted httpx.TrustedProxies, cfg Config) http.Handler {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	srv := &server{queue: q, store: st, trusted: trusted, cfg: cfg}
 
 	mux := http.NewServeMux()
@@ -162,9 +172,36 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 			"window_start", b.Window.Start, "window_end", b.Window.End)
 		return
 	}
+
+	nowMillis := s.cfg.Now().UnixMilli()
+	if b.Window.End > nowMillis {
+		reject(w, r, http.StatusBadRequest, "window.end is in the future",
+			"window_end", b.Window.End, "now", nowMillis)
+		return
+	}
+	// §5.4: 6 hours, not 1 -- this is the room the edge needs to retry a
+	// bundle across several failed send cycles (a network blip, a server
+	// restart, a queue at capacity) without the server discarding data the
+	// edge eventually manages to deliver. Do not tighten this without
+	// re-reading that section: a smaller window trades recovered data for no
+	// benefit the spec identifies.
+	const maxWindowAge = 6 * time.Hour
+	if cutoff := nowMillis - maxWindowAge.Milliseconds(); b.Window.Start < cutoff {
+		reject(w, r, http.StatusBadRequest, "window.start is older than the acceptance window",
+			"window_start", b.Window.Start, "cutoff", cutoff)
+		return
+	}
+
 	if len(b.Templates) > 1000 {
 		reject(w, r, http.StatusBadRequest, "too many templates", "templates", len(b.Templates))
 		return
+	}
+	for _, t := range b.Templates {
+		if len(t.Samples) > 2 {
+			reject(w, r, http.StatusBadRequest, "too many samples for template",
+				"module_id", t.ModuleID, "samples", len(t.Samples))
+			return
+		}
 	}
 
 	// Strip modules that own a dedicated pipeline before anything else sees
