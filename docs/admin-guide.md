@@ -497,7 +497,9 @@ Everything else about a dashboard is built to match that exposure:
 - **`GET` is read-only.** Every page answers `GET` with no credential.
 - **Only the blocklist dashboard can write**, only when `ADMIN_API_KEY` is
   set, and only on a short enumerated list of routes that each authenticate
-  first. With no key they answer `405` — not "reachable but unauthorized".
+  first. Those routes answer `POST` and nothing else; every other method,
+  `HEAD` and `DELETE` included, is `405`. With no key they answer `405` too —
+  not "reachable but unauthorized".
 - **Cross-site writes are refused**, because a browser replays a cached Basic
   credential automatically.
 - **No secrets on any page.** The configuration table is built from an

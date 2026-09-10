@@ -917,14 +917,14 @@ reject one) are now the only writer anywhere in the deployment, gated behind
 `ADMIN_API_KEY` and HTTP Basic (`chrome.AuthenticateWrite`); the Basic username
 becomes the actor recorded on every write, exactly as `X-Admin-Actor` used to
 be. With `ADMIN_API_KEY` unset `s.canWrite()` is false and every one of those
-routes answers `405` (`internal/ui/threat/ui.go`'s `route()`) — not "reachable
-but unauthorized", and not a guessable credential either. In the deployed
+routes answers `405` (`internal/ui/threat/ui.go`'s `route()`, which is also
+the one place that admits `POST` and refuses every other non-`GET` method) —
+not "reachable but unauthorized", and not a guessable credential either. In the deployed
 shape Traefik additionally
 BasicAuths the whole `/blocklist` subtree with the same key value as the
 htpasswd password; that layer is additive, not a replacement — see "Operator
 UI" above for why the app-level check has to stay regardless.
 
-Three tables sit behind it, and `/audit` is the only reader of the third.
 **A prefix wider than `/24` (v4) or `/48` (v6) is refused, and there is no
 override.** `0.0.0.0/0` on the allowlist disables the whole feed, silently:
 nothing anywhere reports that promotion had quietly stopped. The `force` flag
@@ -947,6 +947,7 @@ reduces to its v4 form, which also weighs it against the right floor:
 `::ffff:0.0.0.0/96` *is* `0.0.0.0/0`, and measuring it against the v6 `/48`
 used to let the widest possible exemption through the guardrail.
 
+Three tables sit behind it, and `/audit` is the only reader of the third.
 `threat_allowlist_requests` is keyed
 `(cidr, system_id)` so one system counts once, mirroring the blocklist's
 distinct-system rule; `threat_allowlist_reviews` records the latest human
@@ -977,11 +978,27 @@ route answers GET, anything else is 405, enforced once, centrally" — the reaso
 an unauthenticated fleet-wide page was safe to run. It is now:
 
 > Every route answers GET. A small, explicit, enumerated set of routes also
-> answers POST, and every one of those authenticates before doing anything.
+> answers POST — POST specifically, not "any method that is not GET" — and
+> every one of those authenticates before doing anything. Every other method
+> is `405`.
 
 The enumeration (`writableRoutes`) lives next to the central check in
 `route()`, so "which routes can write" is answerable by reading one function.
 Writes are registered only when `ADMIN_API_KEY` is set.
+
+**"POST specifically" is load-bearing, not tidiness.** A handler reached by
+another method would still act: `net/http` runs a handler in full for `HEAD`
+and merely discards the body it writes, `http.ServeMux` applies no method
+filter of its own, and `Request.ParseForm` merges the query string into
+`r.Form` whatever the method is — so a `HEAD` carrying every parameter in the
+URL performs the whole write. It also evades the cross-site check below,
+because a browser attaches `Origin` only to a request whose method is neither
+`GET` nor `HEAD`, and the `Sec-Fetch-*` headers only for a potentially
+trustworthy URL: a cross-site `no-cors` `HEAD` to a dashboard served over
+plain HTTP on a routable address arrives with neither, which is the shape
+`sameOriginWrite` has to allow for non-browser clients, while the browser
+replays the operator's cached Basic credential. Narrowing the gate to `POST`
+is what makes that allowance unreachable from a browser.
 
 Write routes additionally refuse cross-site requests. This is not boilerplate
 CSRF hygiene: the routes authenticate with HTTP Basic, and a browser replays a
@@ -989,10 +1006,15 @@ cached Basic credential automatically on every later same-origin request,
 including a form POST from an unrelated page the operator visits afterwards.
 Without the check any site could add an attacker's address to the fleet
 allowlist silently and permanently — the exact harm the no-automatic-promotion
-rule exists to prevent. `sameOriginWrite` requires `Sec-Fetch-Site:
-same-origin`/`none` and an `Origin` matching the host, and allows a request
-carrying neither header, which is a non-browser client with no ambient
-credential to abuse.
+rule exists to prevent. `sameOriginWrite` checks three headers in decreasing
+order of what they guarantee: `Sec-Fetch-Site` must be `same-origin` or
+`none`; `Origin`, when present, must match the host; `Referer`, when present
+and the other two are absent, must match the host too — a hint rather than a
+guarantee, since a page can suppress it, but a mismatching one is still worth
+refusing on. A request carrying none of the three is allowed, which is a
+non-browser client with no ambient credential to abuse; that allowance is safe
+only in combination with the POST-only gate above, so neither rule may be
+relaxed on its own.
 
 ## Data protection
 
@@ -1037,6 +1059,21 @@ Three rules do the work:
   and unwrapping would be a second route into the store for the addresses the
   rule exists to keep out. Documentation ranges are deliberately kept — they
   are valid public space for this purpose and a live fleet reports them.
+
+  **A zoned address is refused before any of that, and the order is the
+  point.** `netip.Prefix.Contains` is false for an address carrying an IPv6
+  zone, because a prefix has no zone to compare, and `Addr.IsUnspecified` is
+  an equality test against the zone-less `::` — so every class caught through
+  `nonPublicPrefixes` or `IsUnspecified`, which is exactly the two transition
+  prefixes above plus `fec0::/10`, used to sail through on a `%eth0` suffix
+  and reach the published feed, while `IsPrivate`, `IsLoopback`,
+  `IsLinkLocalUnicast` and `IsMulticast` (all zone-agnostic) kept working. A
+  zone names a local interface scope, so it cannot describe a remote
+  attacker: refusing it costs nothing and no reporter has business sending
+  one. `Allowlist.Contains` and `blocklist.promote` normalise the zone away
+  as well — the second lock, on the side that reads addresses back out of the
+  store, where a false negative means publishing an address someone
+  explicitly exempted.
 - **The threat metadata allowlist is a fixed, typed set of one field.**
   `threat.metadata` returns `duration_seconds` and nothing else. No
   free-text field but the scenario itself reaches the store: no usernames (a
@@ -1059,21 +1096,6 @@ logged. The request logger never reads the `Authorization` header — it records
 only whether one was present. An authentication failure names the presented
 `system_id` and never the secret. `LLM_API_KEY` appears in a log line only as
 `llm_api_key_set=true`, and each operator UI status page builds its
-
-  **A zoned address is refused before any of that, and the order is the
-  point.** `netip.Prefix.Contains` is false for an address carrying an IPv6
-  zone, because a prefix has no zone to compare, and `Addr.IsUnspecified` is
-  an equality test against the zone-less `::` — so every class caught through
-  `nonPublicPrefixes` or `IsUnspecified`, which is exactly the two transition
-  prefixes above plus `fec0::/10`, used to sail through on a `%eth0` suffix
-  and reach the published feed, while `IsPrivate`, `IsLoopback`,
-  `IsLinkLocalUnicast` and `IsMulticast` (all zone-agnostic) kept working. A
-  zone names a local interface scope, so it cannot describe a remote
-  attacker: refusing it costs nothing and no reporter has business sending
-  one. `Allowlist.Contains` and `blocklist.promote` normalise the zone away
-  as well — the second lock, on the side that reads addresses back out of the
-  store, where a false negative means publishing an address someone
-  explicitly exempted.
 configuration table from an explicit field list rather than iterating
 `os.Environ()`, so a secret added to the process environment later cannot
 appear on an unauthenticated page by accident.

@@ -379,30 +379,46 @@ func (b *Base) ServeStatic(w http.ResponseWriter, r *http.Request) bool {
 // could auto-submit a form at the dashboard's origin and perform an
 // authenticated write silently and permanently.
 //
-// Two headers, both sent by browsers and neither forgeable by a cross-site
-// page:
+// Three headers, all sent by browsers and none forgeable by a cross-site
+// page, checked in decreasing order of how much they guarantee:
 //
 //   - Sec-Fetch-Site must be same-origin (or "none" for a direct address-bar
 //     action). A cross-site form POST arrives as "cross-site".
-//   - Origin, when present, must name this host.
+//   - Origin, when present, must name this host. A browser attaches it to
+//     every cross-site request whose method is neither GET nor HEAD, so a
+//     forged POST always carries one -- absent means the request is not that.
+//   - Referer, when present, must name this host too. This one is only a
+//     hint: a page can suppress it with a referrer policy, so it closes
+//     nothing on its own. It costs a header lookup and catches a browser
+//     that sent neither of the other two, which is why it is here.
 //
-// A request carrying neither header is allowed: that is a non-browser client
-// (curl, a script), which has no ambient credential to be abused in the
-// first place -- CSRF is a browser problem, and refusing curl would only
+// A request carrying none of the three is allowed: that is a non-browser
+// client (curl, a script), which has no ambient credential to be abused in
+// the first place -- CSRF is a browser problem, and refusing curl would only
 // break the legitimate scripted path without closing anything.
+//
+// That last allowance is safe because of where this function is called from,
+// not because of anything it can see. Sec-Fetch-* is appended only for a
+// potentially trustworthy URL, so a dashboard served over plain HTTP on a
+// routable address gets no Sec-Fetch-Site at all, and Origin is omitted on a
+// GET or a HEAD -- a combination a cross-site page can actually produce. What
+// makes it unreachable is that each dashboard's route() admits POST and no
+// other non-GET method (see route() and writableRoutes in
+// internal/ui/threat), and a cross-site POST always carries Origin. Keep
+// those two facts together: relaxing either one alone reopens this.
 func sameOriginWrite(r *http.Request) bool {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return false
 	}
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		return err == nil && u.Host == r.Host
 	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
+	if ref := r.Header.Get("Referer"); ref != "" {
+		u, err := url.Parse(ref)
+		return err == nil && u.Host == r.Host
 	}
-	return u.Host == r.Host
+	return true
 }
 
 // AuthenticateWrite checks HTTP Basic against AdminKey and returns the
@@ -410,6 +426,20 @@ func sameOriginWrite(r *http.Request) bool {
 // prompts for these credentials natively -- this costs no JavaScript, no
 // cookie and no session state.
 func (b *Base) AuthenticateWrite(w http.ResponseWriter, r *http.Request) (string, bool) {
+	// POST or nothing, asserted here as well as in each caller's route().
+	// The rule is not tidiness: net/http runs a handler in full for HEAD and
+	// only discards the response body, ParseForm merges the query string
+	// whatever the method is, and a browser omits Origin on a cross-site
+	// GET or HEAD and omits Sec-Fetch-* for a URL that is not potentially
+	// trustworthy -- so a "not GET" gate turns a HEAD with a query string
+	// into a fully authenticated write that sameOriginWrite cannot see is
+	// cross-site. A route() that forgets this is a dashboard away, and the
+	// check costs one comparison, so it lives at the boundary too.
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return "", false
+	}
+
 	// Checked before the credential: a cross-site request must be refused
 	// whether or not the browser attached a valid cached one, and answering
 	// 401 here would prompt the operator for a password on a forged form.

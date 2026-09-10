@@ -143,10 +143,11 @@ var pages = []string{
 const maxAllowlistFormSize = 16 << 10 // 16 KiB
 
 // writableRoutes is the small, explicit, enumerated set of paths that also
-// answer POST. Every one authenticates against ADMIN_API_KEY and refuses a
-// cross-site request first: Traefik's BasicAuth in front of this subtree is
-// still Basic auth, so a browser replays it on a forged cross-site POST
-// exactly as it would here. The proxy is defence in depth, never the gate.
+// answer POST -- and POST alone, never any other non-GET method; see route().
+// Every one authenticates against ADMIN_API_KEY and refuses a cross-site
+// request first: Traefik's BasicAuth in front of this subtree is still Basic
+// auth, so a browser replays it on a forged cross-site POST exactly as it
+// would here. The proxy is defence in depth, never the gate.
 //
 // The CIDR itself never travels in these paths: it is always a form field.
 var writableRoutes = map[string]bool{
@@ -213,9 +214,26 @@ func (s *server) canWrite() bool {
 	return s.writer != nil && s.chrome.CanWrite()
 }
 
+// route is the central method gate as well as the dispatcher: GET reaches the
+// read pages, POST reaches an enumerated write route, and every other method
+// is refused here before any handler runs.
+//
+// The write branch tests for POST explicitly rather than for "not GET". A
+// handler reached by some other method would still act: net/http runs a
+// handler in full for HEAD and merely discards the body it writes, ServeMux
+// applies no method filter of its own, and ParseForm merges the query string
+// into r.Form whatever the method is -- so a write carrying every parameter
+// in the URL would take effect. That matters because a browser attaches
+// Origin only to a request whose method is neither GET nor HEAD, and attaches
+// the Sec-Fetch-* headers only for a potentially trustworthy URL: a cross-site
+// HEAD to a plain-HTTP dashboard arrives with neither, which is exactly the
+// shape chrome.sameOriginWrite has to let through for non-browser clients.
+// Admitting POST and nothing else is what keeps that allowance from being
+// reachable from a page the operator happens to visit, with their cached
+// Basic credential replayed automatically.
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		if !s.canWrite() || !writableRoutes[r.URL.Path] {
+		if r.Method != http.MethodPost || !s.canWrite() || !writableRoutes[r.URL.Path] {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}

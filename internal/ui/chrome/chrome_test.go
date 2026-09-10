@@ -105,3 +105,80 @@ func TestRenderSecurityHeaders(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 }
+
+// TestSameOriginWrite pins the three-header ladder, and in particular the
+// two boundaries that are easy to get wrong. The both-absent request is
+// allowed on purpose -- it is curl, which carries no ambient credential --
+// and that allowance is only safe because each dashboard's route() admits
+// POST and no other non-GET method, so a browser cannot produce it: Origin
+// is attached to every cross-site request whose method is neither GET nor
+// HEAD. Referer is a hint rather than a guarantee (a page can suppress it),
+// but a mismatching one is still enough to refuse on.
+func TestSameOriginWrite(t *testing.T) {
+	const self = "example.test"
+
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name:    "same-origin form post",
+			headers: map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": "http://" + self},
+			want:    true,
+		},
+		{
+			name:    "cross-site form post",
+			headers: map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "http://evil.example"},
+			want:    false,
+		},
+		{
+			name:    "address bar navigation",
+			headers: map[string]string{"Sec-Fetch-Site": "none"},
+			want:    true,
+		},
+		{
+			name:    "no Sec-Fetch-Site, matching Origin",
+			headers: map[string]string{"Origin": "http://" + self},
+			want:    true,
+		},
+		{
+			name:    "no Sec-Fetch-Site, foreign Origin",
+			headers: map[string]string{"Origin": "http://evil.example"},
+			want:    false,
+		},
+		{
+			name:    "no Sec-Fetch-Site, unparseable Origin",
+			headers: map[string]string{"Origin": "http://[::1"},
+			want:    false,
+		},
+		{
+			name:    "no Sec-Fetch-Site and no Origin, matching Referer",
+			headers: map[string]string{"Referer": "http://" + self + "/blocklist/"},
+			want:    true,
+		},
+		{
+			name:    "no Sec-Fetch-Site and no Origin, foreign Referer",
+			headers: map[string]string{"Referer": "http://evil.example/csrf.html"},
+			want:    false,
+		},
+		{
+			// A non-browser client: nothing to abuse, and refusing it would
+			// break the scripted path without closing anything.
+			name: "no browser headers at all (curl)",
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "http://"+self+"/blocklist/allowlist", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			if got := sameOriginWrite(req); got != tc.want {
+				t.Fatalf("sameOriginWrite = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
