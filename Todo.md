@@ -126,11 +126,12 @@ Three issues, deliberately not 28. Full list with file:line in
       uses the race detector as the primary signal with a bounded blocking
       check as corroboration — a fully deterministic exclusion test is not
       possible, and the test says so.
-      - [ ] One gap left open deliberately: authd's `AUTH_PEPPER`-unset →
-            ephemeral-pepper *decision* is inline in `main()` and unreachable
-            from a test file. `randomPepper()` itself is covered. Closing it
-            needs `resolvePepper(getenv) (pepper, source string)` — a
-            production change, so it was not made from a test-only task.
+      - [x] The one gap it left — authd's `AUTH_PEPPER`-unset →
+            ephemeral-pepper decision, inline in `main()` and unreachable from
+            a test — was closed the same day by extracting
+            `resolvePepper(getenv) (pepper, source string)`. The freshness
+            test asserts two calls **differ**, which is the property a fixed
+            fallback constant would otherwise fake.
 - [x] **Doc-comment sweep.** Done 2026-09-10. Five of the seven triaged
       locations were **already correct**: `5937ce9` fixed them and the triage
       doc's line numbers had drifted, so the entry overstated the work. What
@@ -138,11 +139,19 @@ Three issues, deliberately not 28. Full list with file:line in
       the split renamed to `store.go`, and `queue.go`'s claim that the lockless
       `Workers()` read is safe because the field is immutable — the real
       property is call ordering, verified against both call sites.
-- [ ] **Deploy tooling.** GHA cache unscoped across the matrix (four jobs
-      overwrite each other's `mode=max` export); `render.sh` writing straight
-      into the directory Traefik watches; the duplicated `runPassLoop`/env
-      helpers in `cmd/threatd` and `cmd/sizingd`. (The `After=`-without-`Wants=`
-      item from this list is done — see §4.)
+- [x] **Deploy tooling.** Three of four done 2026-09-10: `Wants=` (§4), the
+      GHA cache now scoped per matrix service, and `render.sh` rendering to a
+      temp file in the same directory and renaming over the target — Traefik
+      watches that directory with `watch: true`, so a direct write was a window
+      in which it could read a half-written config. Output proven
+      byte-identical; only how it lands changed. The rename also had to carry
+      the destination's mode, since `rename(2)` takes the *source's* and
+      `mktemp` creates 0600.
+      - [ ] Left: the duplicated `runPassLoop`/env helpers in `cmd/threatd`
+            and `cmd/sizingd`. Cosmetic. Note `internal/maint` now has a third
+            loop, deliberately kept in the package rather than copied a third
+            time, so a shared helper has more callers to justify it than it
+            did.
 
 ## 4. Known operational sharp edges
 
