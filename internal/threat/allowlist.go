@@ -15,9 +15,12 @@ import (
 // range, a partner's scanner.
 //
 // It replaces the design's Postgres-only `<<=` containment operator with
-// portable Go, and it is applied at promotion rather than at read, so adding
-// an entry retroactively unlists the address on the next consensus pass
-// instead of only hiding it from the feed.
+// portable Go, and it is applied on the consensus pass rather than at read,
+// so adding an entry retroactively unlists the address instead of only
+// hiding it from the feed. That takes both halves of the pass: promote
+// declines to list a covered address, and Runner.unlist deletes the live
+// rows a newly added entry covers -- promote alone cannot, because a listed
+// address usually has no candidates left by then.
 type Allowlist struct {
 	prefixes []netip.Prefix
 }

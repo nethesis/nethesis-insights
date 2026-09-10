@@ -401,8 +401,11 @@ func (s *Store) ConsensusCandidates(ctx context.Context, since int64) ([]ThreatC
 }
 
 // ThreatAllowlist returns the non-expired allowlist entries. The allowlist is
-// applied at promotion, not at read, so adding an entry retroactively unlists
-// the address on the next consensus pass.
+// applied on the consensus pass, not at read, so adding an entry retroactively
+// unlists the address rather than merely hiding it from the feed: promote
+// declines to add a row and the pass's unlist step deletes any live row the
+// entry now covers. Applying it at read would leave the row in place, so
+// deleting the entry again would silently republish the address.
 func (s *Store) ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow, error) {
 	return s.queryAllowlist(ctx, `
 		SELECT cidr, reason, created_by, created_at, expires_at
@@ -550,6 +553,74 @@ func (s *Store) ExpireBlocklist(ctx context.Context, now int64) (int, error) {
 		return 0, fmt.Errorf("store: expire blocklist rows: %w", err)
 	}
 	return int(n), nil
+}
+
+// ListBlocklistIPs returns every live entry's address and nothing else.
+//
+// The consensus pass needs the whole live set to decide which rows the
+// allowlist now covers, so unlike ListBlocklist this is uncapped and skips
+// the JSON columns. Capping it would leave an allowlisted row in the table
+// until it happened to drift inside the feed's cap, and the operator UI
+// lists the table directly.
+func (s *Store) ListBlocklistIPs(ctx context.Context, now int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT attacker_ip FROM threat_blocklist WHERE expires_at > ? ORDER BY attacker_ip
+	`, now)
+	if err != nil {
+		return nil, fmt.Errorf("store: list blocklist ips: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []string{}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, fmt.Errorf("store: scan blocklist ip: %w", err)
+		}
+		out = append(out, ip)
+	}
+	return out, rows.Err()
+}
+
+// DeleteBlocklistEntries removes the named entries, reporting how many rows
+// went.
+//
+// This is how an allowlist entry unlists an address that was already
+// promoted: ExpireBlocklist deletes on expires_at alone, so without this an
+// exemption would take up to BLOCKLIST_TTL to take effect. One statement per
+// address inside one transaction rather than an IN list, because the live
+// blocklist can hold far more addresses than SQLite allows bound parameters.
+func (s *Store) DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error) {
+	if len(ips) == 0 {
+		return 0, nil
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete blocklist entries: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	deleted := 0
+	for _, ip := range ips {
+		res, err := tx.ExecContext(ctx, `DELETE FROM threat_blocklist WHERE attacker_ip = ?`, ip)
+		if err != nil {
+			return 0, fmt.Errorf("store: delete blocklist entry: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("store: delete blocklist entry rows: %w", err)
+		}
+		deleted += int(n)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit blocklist delete: %w", err)
+	}
+	return deleted, nil
 }
 
 // ListBlocklist returns the live entries that make up the feed, oldest

@@ -64,9 +64,16 @@ func report(t *testing.T, s *threatstore.Store, systemID, ip, scenario string, a
 
 func runPass(t *testing.T, s *threatstore.Store, cfg Config) (*Runner, *Snapshot) {
 	t.Helper()
+	return runPassAt(t, s, cfg, now)
+}
+
+// runPassAt is runPass with the clock moved, for the cases that need a
+// second pass later than the sightings that fed the first one.
+func runPassAt(t *testing.T, s *threatstore.Store, cfg Config, at int64) (*Runner, *Snapshot) {
+	t.Helper()
 	snap := NewSnapshot()
 	r := New(s, snap, cfg)
-	if err := r.Run(context.Background(), now); err != nil {
+	if err := r.Run(context.Background(), at); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	return r, snap
@@ -74,7 +81,12 @@ func runPass(t *testing.T, s *threatstore.Store, cfg Config) (*Runner, *Snapshot
 
 func listed(t *testing.T, s *threatstore.Store) []string {
 	t.Helper()
-	rows, err := s.ListBlocklist(context.Background(), now, 0)
+	return listedAt(t, s, now)
+}
+
+func listedAt(t *testing.T, s *threatstore.Store, at int64) []string {
+	t.Helper()
+	rows, err := s.ListBlocklist(context.Background(), at, 0)
 	if err != nil {
 		t.Fatalf("ListBlocklist: %v", err)
 	}
@@ -302,6 +314,68 @@ func TestAllowlistCoversZonedAddresses(t *testing.T) {
 	}
 }
 
+// Declining to promote is not the same as unlisting. An address the fleet
+// already agreed about carries a row with hours of TTL left, and promote only
+// ever skips *adding* one -- so the pass needs a step that deletes the rows
+// the allowlist now covers, or the operator's exemption takes effect only
+// once the TTL runs out.
+func TestAddingAnAllowlistEntryUnlistsAPromotedAddress(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		report(t, s, sys, "203.0.113.7", "ssh_bruteforce", 5*minute)
+		report(t, s, sys, "198.51.100.9", "ssh_bruteforce", 5*minute)
+	}
+
+	runPass(t, s, testConfig())
+	if got := listed(t, s); len(got) != 2 {
+		t.Fatalf("first pass listed %v, want both addresses", got)
+	}
+
+	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+		CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+
+	_, snap := runPass(t, s, testConfig())
+
+	if got := listed(t, s); len(got) != 1 || got[0] != "198.51.100.9" {
+		t.Fatalf("got %v, want the allowlisted row deleted", got)
+	}
+	if body := string(snap.Body()); strings.Contains(body, "203.0.113.7") {
+		t.Fatalf("the regenerated feed still serves the allowlisted address: %q", body)
+	}
+}
+
+// The unlisting must key on the live blocklist, not on this pass's
+// candidates. BLOCKLIST_TTL outlives the observation window by a wide margin,
+// so an address last seen two hours ago has an empty candidate set and a row
+// with 22 hours to run -- which is exactly the state most listed addresses
+// are in when an operator adds the exemption.
+func TestUnlistingSurvivesTheEventsAgingOutOfTheWindow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		report(t, s, sys, "203.0.113.7", "ssh_bruteforce", 5*minute)
+	}
+	runPass(t, s, testConfig())
+
+	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+		CIDR: "203.0.113.7/32", Reason: "customer WAN", CreatedBy: "ops", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed allowlist: %v", err)
+	}
+
+	// Two hours on: outside the one-hour window, well inside the 24h TTL.
+	later := now + 2*hour
+	runPassAt(t, s, testConfig(), later)
+
+	if got := listedAt(t, s, later); len(got) != 0 {
+		t.Fatalf("got %v, want nothing -- the row is allowlisted", got)
+	}
+}
+
 // A malformed allowlist row must stop the pass, not be skipped: skipping it
 // would publish an address someone had explicitly excluded.
 func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
@@ -406,6 +480,14 @@ func (f *failingReader) UpsertBlocklistEntries(context.Context, []threatstore.Bl
 	return nil
 }
 func (f *failingReader) ExpireBlocklist(context.Context, int64) (int, error) { return 0, nil }
+
+func (f *failingReader) ListBlocklistIPs(context.Context, int64) ([]string, error) {
+	return nil, nil
+}
+
+func (f *failingReader) DeleteBlocklistEntries(context.Context, []string) (int, error) {
+	return 0, nil
+}
 func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstore.BlocklistRow, error) {
 	return f.rows, nil
 }

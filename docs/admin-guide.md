@@ -876,7 +876,10 @@ something it shouldn't? One exclusion runs before anything is published.
   never be published, whatever the fleet says — a partner's security scanner, a
   shared resolver. It is applied when the decision to publish is made, not when
   the list is read, so adding an entry actually *removes* the address on the
-  next pass rather than just hiding it.
+  next pass rather than just hiding it — including an address the fleet had
+  already got published, which is deleted rather than left to expire. "Next
+  pass" is at most `BLOCKLIST_CONSENSUS_INTERVAL` away, so an exemption takes
+  effect in minutes, not after the 24 h listing TTL.
 
   A range wider than a `/24` (IPv4) or a `/48` (IPv6) is **refused**, and there
   is no way to override it. An exemption that wide is almost never what someone

@@ -82,8 +82,16 @@ Threat Shield rules that are as load-bearing as the gate's:
   per-scenario counts do not sum and `ARRAY_AGG`/`GROUP_CONCAT` are not portable.
   Promotion never depends on scenario agreement, which is why accepting an unfamiliar
   scenario cannot weaken the rule.
-- **The allowlist is applied at promotion, not at read**, so adding an entry unlists
-  an address on the next pass instead of hiding it. A malformed allowlist row aborts
+- **The allowlist is applied on the consensus pass, not at read**, so adding an
+  entry unlists an address on the next pass instead of hiding it. That takes
+  **two** steps, and dropping either leaves the claim false: `promote` declines to
+  list a covered address, and `Runner.unlist` deletes the live rows a newly added
+  entry covers — `ExpireBlocklist` deletes on `expires_at` alone, so nothing else
+  would remove an address the fleet had already got published for up to
+  `BLOCKLIST_TTL`. `unlist` is keyed on the **live blocklist, not the candidate
+  set** (the TTL outlives the observation window, so a listed address usually has
+  no candidates left by the time it is exempted) and runs **before** the
+  `ListBlocklist` that feeds `Generate`. A malformed allowlist row aborts
   the pass rather than being skipped — skipping fails open. (Fleet egress — an
   earlier, automatic promotion exclusion keyed on each reporter's observed source
   address — was removed as too complex and too easy to get wrong for what it bought;

@@ -24,6 +24,8 @@ type Reader interface {
 	UpsertBlocklistEntries(ctx context.Context, rows []threatstore.BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
+	ListBlocklistIPs(ctx context.Context, now int64) ([]string, error)
+	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
 	RollupThreatDailyStats(ctx context.Context) error
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
 	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
@@ -70,13 +72,15 @@ type candidate struct {
 	lastSeen  int64
 }
 
-// Run executes promote -> expire -> roll up -> prune -> regenerate.
+// Run executes promote -> expire -> unlist -> roll up -> prune -> regenerate.
 //
-// Order matters twice: the rollup must precede the prune or the dropped day
-// loses its history, and the snapshot is regenerated last so it reflects the
-// expiries this pass performed. The allowlist-request prune has no such
-// constraint -- nothing rolls those rows up -- so it sits with the other
-// housekeeping.
+// Order matters three times: the rollup must precede the prune or the dropped
+// day loses its history, the unlist must precede the ListBlocklist that feeds
+// Generate so an exempted address leaves the served feed on the same pass it
+// leaves the table, and the snapshot is regenerated last so it reflects the
+// expiries and unlistings this pass performed. The allowlist-request prune
+// has no such constraint -- nothing rolls those rows up -- so it sits with
+// the other housekeeping.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	rows, err := r.store.ConsensusCandidates(ctx, now-r.cfg.Window.Milliseconds())
 	if err != nil {
@@ -96,6 +100,11 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	expired, err := r.store.ExpireBlocklist(ctx, now)
 	if err != nil {
 		return fmt.Errorf("blocklist: expire: %w", err)
+	}
+
+	unlisted, err := r.unlist(ctx, allow, now)
+	if err != nil {
+		return err
 	}
 
 	// Housekeeping failures are logged, not fatal: they must not stop the
@@ -133,7 +142,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 
 	slog.Info("blocklist consensus pass",
 		"candidates", len(rows), "promoted", len(promoted), "expired", expired,
-		"entries", r.snap.Entries(), "min_systems", r.cfg.MinSystems)
+		"unlisted", unlisted, "entries", r.snap.Entries(), "min_systems", r.cfg.MinSystems)
 	return nil
 }
 
@@ -156,6 +165,56 @@ func (r *Runner) allowlist(ctx context.Context, now int64) (threat.Allowlist, er
 		return threat.Allowlist{}, fmt.Errorf("blocklist: %w", err)
 	}
 	return allow, nil
+}
+
+// unlist deletes the live blocklist rows the allowlist now covers.
+//
+// promote applies the allowlist too, but promotion can only decline to *add*
+// a row -- an address the fleet already agreed about keeps its row, and
+// ExpireBlocklist deletes on expires_at alone, so without this step an
+// exemption added now would not take effect for up to BLOCKLIST_TTL.
+//
+// It is keyed on the live blocklist rather than on this pass's candidates,
+// which is the whole reason it cannot be folded into promote: the TTL
+// outlives the observation window many times over, so by the time an
+// operator exempts a listed address its events have usually aged out and the
+// candidate set holds nothing at all for it.
+//
+// A store error aborts the pass, like every other step on the critical path.
+// Continuing would regenerate a feed that still carried the address anyway,
+// and the previous snapshot is the honest thing to keep serving until the
+// database answers again.
+func (r *Runner) unlist(ctx context.Context, allow threat.Allowlist, now int64) (int, error) {
+	if allow.Len() == 0 {
+		return 0, nil
+	}
+	ips, err := r.store.ListBlocklistIPs(ctx, now)
+	if err != nil {
+		return 0, fmt.Errorf("blocklist: live entries: %w", err)
+	}
+	var covered []string
+	for _, ip := range ips {
+		addr, err := netip.ParseAddr(ip)
+		if err != nil {
+			// A corrupted row, not untrusted input -- the addresses were
+			// parsed before they were written. ExpireBlocklist will reap it.
+			continue
+		}
+		// Allowlist.Contains unmaps and unzones, so a row stored under a
+		// second spelling of an exempted address is still covered.
+		if allow.Contains(addr) {
+			covered = append(covered, ip)
+		}
+	}
+	if len(covered) == 0 {
+		return 0, nil
+	}
+	n, err := r.store.DeleteBlocklistEntries(ctx, covered)
+	if err != nil {
+		return 0, fmt.Errorf("blocklist: unlist: %w", err)
+	}
+	slog.Info("blocklist: unlisted allowlisted addresses", "rows", n)
+	return n, nil
 }
 
 // promote folds candidate triples per address and returns the entries
@@ -189,9 +248,9 @@ func (r *Runner) promote(rows []threatstore.ThreatCandidateRow, allow threat.All
 
 	out := make([]threatstore.BlocklistRow, 0, len(folded))
 	for addr, c := range folded {
-		// Applied at promotion rather than at read, so adding an allowlist
-		// entry retroactively unlists the address on this pass instead of
-		// merely hiding it.
+		// Applied at promotion rather than at read. This half only declines
+		// to list; unlist above is what removes an address the fleet had
+		// already agreed about.
 		if allow.Contains(addr) {
 			continue
 		}

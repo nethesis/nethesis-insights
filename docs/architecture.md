@@ -194,7 +194,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings` and `analyses` against their own independent retention windows (`maint.Config`). Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
-| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
+| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
 | `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the rollups that outlive the raw events. |
 | `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and `IsPlatform` (which families are ignorable when testing "solo"). Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
@@ -547,17 +547,30 @@ load-bearing:
    upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
    `listing_reason` snapshot of the evidence.
 5. Expired entries are deleted.
-6. `RollupThreatDailyStats` **then** `PruneThreatEvents` — reversing these two
+6. `Runner.unlist` deletes the **live** entries the allowlist now covers —
+   `ListBlocklistIPs` then `DeleteBlocklistEntries`. Step 3 is only half of
+   "applied at promotion": it declines to *add* a row, while an address the
+   fleet already agreed about keeps one until its TTL runs out, and
+   `ExpireBlocklist` deletes on `expires_at` alone. Two properties of this
+   step are load-bearing. It is keyed on the **live blocklist, not on this
+   pass's candidates** — the TTL outlives the observation window many times
+   over, so by the time an operator exempts a listed address its events have
+   usually aged out and the candidate set holds nothing for it. And it runs
+   **before** the `ListBlocklist` of step 9, so the address leaves the served
+   feed on the same pass it leaves the table. `ListBlocklistIPs` is uncapped
+   on purpose: capping it would leave an allowlisted row in the table until it
+   drifted inside the feed's cap, and the operator UI lists the table itself.
+7. `RollupThreatDailyStats` **then** `PruneThreatEvents` — reversing these two
    loses the dropped day's history permanently.
-7. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
+8. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent — nothing rolls
    those rows up first — and the audit trail is never pruned.
-8. The snapshot is regenerated from the live entries.
+9. The snapshot is regenerated from the live entries.
 
-An error in steps 1–4 or 8 aborts the pass and returns; the rollup and both
+An error in steps 1–6 or 9 aborts the pass and returns; the rollup and both
 prunes are logged and skipped instead, because housekeeping must not stop the feed
 reflecting promotions already made. A malformed allowlist row is the one
 housekeeping-shaped thing that *does* abort: skipping it would fail open and
