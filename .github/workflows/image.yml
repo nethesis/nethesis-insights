@@ -68,5 +68,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scoped per service: the gha cache backend is keyed workflow-wide
+          # by default, so with no scope the four matrix jobs (authd,
+          # insightsd, threatd, sizingd) all export to and import from the
+          # same cache entry, each overwriting the previous job's export --
+          # every build then restores whatever partial cache the last job to
+          # finish happened to leave.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
