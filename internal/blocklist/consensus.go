@@ -26,6 +26,7 @@ type Reader interface {
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
 	RollupThreatDailyStats(ctx context.Context) error
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
+	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
 }
 
 // Config is the consensus rule plus its housekeeping windows.
@@ -35,6 +36,13 @@ type Config struct {
 	TTL        time.Duration // how long an entry survives its last sighting
 	MaxEntries int           // hard cap on the served feed
 	Retention  time.Duration // how long raw events are kept
+
+	// AllowlistRequestRetention is how long an unreviewed client allowlist
+	// request is kept. It rides along in this pass because this pass is the
+	// only periodic job threatd runs, and the table is client-fed: handling
+	// a request deletes its rows, so without this an unreviewed one lives
+	// for the life of the deployment.
+	AllowlistRequestRetention time.Duration
 }
 
 func (c Config) rule() Rule {
@@ -66,7 +74,9 @@ type candidate struct {
 //
 // Order matters twice: the rollup must precede the prune or the dropped day
 // loses its history, and the snapshot is regenerated last so it reflects the
-// expiries this pass performed.
+// expiries this pass performed. The allowlist-request prune has no such
+// constraint -- nothing rolls those rows up -- so it sits with the other
+// housekeeping.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	rows, err := r.store.ConsensusCandidates(ctx, now-r.cfg.Window.Milliseconds())
 	if err != nil {
@@ -98,6 +108,18 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 			slog.Error("blocklist: prune failed", "error", err)
 		} else if pruned > 0 {
 			slog.Debug("blocklist: pruned expired threat events", "rows", pruned)
+		}
+	}
+
+	// Same convention: logged and skipped, never fatal. A review queue that
+	// keeps a few stale asks is a smaller problem than a feed that stopped
+	// being regenerated.
+	if r.cfg.AllowlistRequestRetention > 0 {
+		cutoff := now - r.cfg.AllowlistRequestRetention.Milliseconds()
+		if pruned, err := r.store.PruneAllowlistRequests(ctx, cutoff); err != nil {
+			slog.Error("blocklist: allowlist request prune failed", "error", err)
+		} else if pruned > 0 {
+			slog.Debug("blocklist: pruned stale allowlist requests", "rows", pruned)
 		}
 	}
 

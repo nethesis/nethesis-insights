@@ -155,7 +155,7 @@ func TestAllowlistRequestsNeverAutoPromote(t *testing.T) {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
 	for _, sys := range []string{"sys-b", "sys-c", "sys-d", "sys-e"} {
-		if _, err := st.UpsertAllowlistRequest(context.Background(), cidr, sys, "please", threatNow); err != nil {
+		if _, err := st.UpsertAllowlistRequest(context.Background(), cidr, sys, "please", threatNow, 0); err != nil {
 			t.Fatalf("UpsertAllowlistRequest(%s): %v", sys, err)
 		}
 	}
@@ -174,5 +174,46 @@ func TestAllowlistRequestsNeverAutoPromote(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("ListThreatAllowlist: got %+v, want no entries -- requests must never auto-promote", entries)
+	}
+}
+
+// The per-system cap is enforced at ingest, like every other bound in this
+// pipeline: a client request is a permanent row, so an uncapped one is an
+// uncapped table. 429 rather than 400 -- the request is well formed, the
+// system has simply used up its share of the review queue -- and the
+// existing rows are untouched.
+func TestAllowlistRequestRefusesASystemPastItsCap(t *testing.T) {
+	st := newAllowlistTestStore(t)
+	h := NewServer(st, nil, nil, trustedProxy, Config{
+		MaxDecisions:               500,
+		MaxAllowlistRequestsPerSys: 2,
+		Now:                        func() int64 { return threatNow },
+	})
+
+	for _, cidr := range []string{"203.0.113.0/24", "198.51.100.0/24"} {
+		rec := postAllowlistRequest(t, h, `{"cidr":"`+cidr+`","reason":"please"}`, true)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("%s: status %d, want 202 (body %s)", cidr, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := postAllowlistRequest(t, h, `{"cidr":"192.0.2.0/24","reason":"one too many"}`, true)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-cap status: got %d, want 429 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// Refreshing a CIDR already asked about is still accepted at the cap:
+	// it adds no row.
+	again := postAllowlistRequest(t, h, `{"cidr":"203.0.113.0/24","reason":"still want it"}`, true)
+	if again.Code != http.StatusAccepted {
+		t.Fatalf("refresh at the cap: got %d, want 202 (body %s)", again.Code, again.Body.String())
+	}
+
+	pending, err := st.PendingAllowlistRequests(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending CIDRs: got %d, want 2 -- the refused request must store nothing", len(pending))
 	}
 }

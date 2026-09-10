@@ -128,6 +128,15 @@ func main() {
 	blocklistMaxEntries := svc.GetenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
 	threatRetention := svc.GetenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
 	threatMaxDecisions := svc.GetenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
+	// The review queue's two bounds. A client allowlist request is a
+	// permanent row that only a human decision ever deletes, so without
+	// these the table grows for the life of the deployment and the review
+	// queue reads it. 25 distinct pending CIDRs is far more than a customer
+	// with a real exemption to ask for ever needs; 90 days is long enough
+	// that a queue nobody has looked at in a quarter is the actual problem,
+	// and a pruned ask can simply be made again.
+	allowlistMaxPerSystem := svc.GetenvInt("THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", 25)
+	allowlistRequestRetention := svc.GetenvDuration("THREAT_ALLOWLIST_REQUEST_RETENTION", 2160*time.Hour)
 
 	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
 	// plus the store's write mutex already do that -- it bounds how many
@@ -172,6 +181,8 @@ func main() {
 		TTL:        blocklistTTL,
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
+
+		AllowlistRequestRetention: allowlistRequestRetention,
 	})
 
 	// The queue's handler is bound to the store here, before either the queue
@@ -182,8 +193,9 @@ func main() {
 	ingestQueue.Start(threatQueueWorkers)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
-		MaxDecisions: threatMaxDecisions,
-		Now:          func() int64 { return time.Now().UnixMilli() },
+		MaxDecisions:               threatMaxDecisions,
+		MaxAllowlistRequestsPerSys: allowlistMaxPerSystem,
+		Now:                        func() int64 { return time.Now().UnixMilli() },
 	})
 
 	httpServer := &http.Server{
@@ -211,6 +223,8 @@ func main() {
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
+		{Name: "THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", Value: strconv.Itoa(allowlistMaxPerSystem)},
+		{Name: "THREAT_ALLOWLIST_REQUEST_RETENTION", Value: allowlistRequestRetention.String()},
 		{Name: "THREAT_QUEUE_SIZE", Value: strconv.Itoa(threatQueueSize)},
 		{Name: "THREAT_QUEUE_WORKERS", Value: strconv.Itoa(threatQueueWorkers)},
 		{Name: "THREAT_QUEUE_TIMEOUT", Value: threatQueueTimeout.String()},

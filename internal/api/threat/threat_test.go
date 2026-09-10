@@ -76,7 +76,7 @@ func (f *fakeThreatStore) RecordIngestCounters(_ context.Context, day, _ string,
 	return f.countErr
 }
 
-func (f *fakeThreatStore) UpsertAllowlistRequest(context.Context, string, string, string, int64) (int, error) {
+func (f *fakeThreatStore) UpsertAllowlistRequest(context.Context, string, string, string, int64, int) (int, error) {
 	return 0, nil
 }
 

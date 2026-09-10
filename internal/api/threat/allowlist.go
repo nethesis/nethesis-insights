@@ -5,12 +5,14 @@ package threat
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
 
@@ -62,8 +64,21 @@ func (s *server) handleAllowlistRequest(w http.ResponseWriter, r *http.Request) 
 	reason := threat.CleanText(body.Reason, model.MaxAllowlistReasonLen)
 
 	now := s.cfg.Now()
-	requests, err := s.store.UpsertAllowlistRequest(r.Context(), cidr, authenticatedSystemID, reason, now)
-	if err != nil {
+	requests, err := s.store.UpsertAllowlistRequest(r.Context(), cidr, authenticatedSystemID, reason,
+		now, s.cfg.MaxAllowlistRequestsPerSys)
+	switch {
+	// The per-system cap. A request is a permanent row that only a human
+	// ever removes, so this bound is enforced at ingest like every other one
+	// in this pipeline -- and it answers 429 rather than 400 because the ask
+	// is well formed: the system has simply used up its share of the review
+	// queue and needs its earlier asks decided first. A refresh of a CIDR
+	// the system already asked about is never refused; only a new CIDR can
+	// hit this.
+	case errors.Is(err, threatstore.ErrTooManyAllowlistRequests):
+		reject(w, r, http.StatusTooManyRequests, "too many pending allowlist requests for this system",
+			"system_id", authenticatedSystemID, "cidr", cidr)
+		return
+	case err != nil:
 		slog.Error("upsert allowlist request failed", "system_id", authenticatedSystemID, "cidr", cidr, "error", err)
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return

@@ -327,6 +327,8 @@ depth. It never logs a credential: the model API key appears only as
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). The daily rollup is written before the prune, so the trend outlives them |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`) |
+| `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` | distinct pending CIDRs one system may hold in the allowlist review queue (default `25`). Over-cap asks are **refused** with `429`, not truncated — a request is a permanent row only a human decision deletes. Re-asking about a CIDR the system already raised is always accepted, since it adds no row |
+| `THREAT_ALLOWLIST_REQUEST_RETENTION` | how long an unreviewed client allowlist request is kept (default `2160h`, 90 days). Pruned as a step in the consensus pass; a dropped ask can simply be made again, which also re-ranks it as current evidence. The audit trail is never pruned |
 | `THREAT_QUEUE_SIZE` | sanitized reports buffered before ingest answers 503 (default `256`) |
 | `THREAT_QUEUE_WORKERS` | concurrent store writes (default `2`) |
 | `THREAT_QUEUE_TIMEOUT` | ceiling for one report's write (default `30s`) |

@@ -30,7 +30,7 @@ import (
 type Store interface {
 	InsertThreatEvents(ctx context.Context, systemID string, ev []model.ThreatEvent) (inserted, duplicates int, err error)
 	RecordIngestCounters(ctx context.Context, day, systemID string, c model.ThreatCounters, duplicates int) error
-	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (distinctSystems int, err error)
+	UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64, maxPerSystem int) (distinctSystems int, err error)
 }
 
 // Work is one accepted, sanitized threat-events batch queued for storage.
@@ -98,12 +98,21 @@ type server struct {
 	cfg     Config
 }
 
-// Config carries the ingest bounds and the injectable clock. MaxDecisions
-// truncates rather than rejects: a batch over the cap loses its tail, never
-// the whole report.
+// Config carries the ingest bounds and the injectable clock.
+//
+// MaxDecisions truncates rather than rejects: a batch over the cap loses
+// its tail, never the whole report.
+//
+// MaxAllowlistRequestsPerSys is the opposite -- it refuses, with a 429 --
+// because the two caps bound different things. A threat batch is evidence
+// with a short retention that an attacker's next alert re-supplies, so
+// dropping its tail costs nearly nothing; a client allowlist request is a
+// permanent row in a queue only a human empties, so the cap has to be a
+// door rather than a trim. 0 means unlimited.
 type Config struct {
-	MaxDecisions int
-	Now          func() int64
+	MaxDecisions               int
+	MaxAllowlistRequestsPerSys int
+	Now                        func() int64
 }
 
 func defaultNow() int64 { return time.Now().UnixMilli() }

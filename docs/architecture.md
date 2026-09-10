@@ -549,10 +549,16 @@ load-bearing:
 5. Expired entries are deleted.
 6. `RollupThreatDailyStats` **then** `PruneThreatEvents` — reversing these two
    loses the dropped day's history permanently.
-7. The snapshot is regenerated from the live entries.
+7. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
+   unreviewed client allowlist requests. It rides along here because this is
+   the only periodic job `threatd` runs, and the table is client-fed:
+   handling a request deletes its rows, so an unreviewed one would otherwise
+   live for the life of the deployment. Order-independent — nothing rolls
+   those rows up first — and the audit trail is never pruned.
+8. The snapshot is regenerated from the live entries.
 
-An error in steps 1–4 or 7 aborts the pass and returns; the rollup and prune
-are logged and skipped instead, because housekeeping must not stop the feed
+An error in steps 1–4 or 8 aborts the pass and returns; the rollup and both
+prunes are logged and skipped instead, because housekeeping must not stop the feed
 reflecting promotions already made. A malformed allowlist row is the one
 housekeeping-shaped thing that *does* abort: skipping it would fail open and
 publish an address someone had explicitly excluded.
@@ -888,6 +894,19 @@ both: **no path promotes a customer request automatically.** A client's
 explicit approval creates an entry. `TestClientRequestsNeverAutoPromoteToTheAllowlist`
 and `TestAllowlistRequestsNeverAutoPromote` are the executable form of that
 rule.
+
+Being a queue only a human empties is also why the request table is bounded
+on both sides. One system may hold at most
+`THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` distinct pending CIDRs, refused at
+ingest with `429` — refused rather than truncated, unlike the threat-events
+cap, because a request is a permanent row rather than expiring evidence; the
+check runs inside the store's write lock, so concurrent asks from one
+reporter cannot race past it, and a re-ask for a CIDR the system already
+raised is always accepted since it adds no row. The consensus pass then
+prunes anything unreviewed past `THREAT_ALLOWLIST_REQUEST_RETENTION`.
+`PendingAllowlistRequests` reads the queue with two bounded queries — one
+ranking and limiting the CIDRs in SQL, one fetching the reasons for just
+those — because a client-fed table must never be read whole.
 
 **The separate admin plane is gone.** `internal/admin`, `ADMIN_LISTEN_ADDR` and
 the `X-Admin-Actor` header no longer exist. `internal/ui/threat`'s four write

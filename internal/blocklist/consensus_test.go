@@ -358,8 +358,9 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 
 // failingReader serves one fixed blocklist row and can be switched to fail.
 type failingReader struct {
-	rows []threatstore.BlocklistRow
-	fail bool
+	rows             []threatstore.BlocklistRow
+	fail             bool
+	failRequestPrune bool
 }
 
 var errBoom = errors.New("store unavailable")
@@ -382,3 +383,59 @@ func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstor
 }
 func (f *failingReader) RollupThreatDailyStats(context.Context) error          { return nil }
 func (f *failingReader) PruneThreatEvents(context.Context, int64) (int, error) { return 0, nil }
+func (f *failingReader) PruneAllowlistRequests(context.Context, int64) (int, error) {
+	if f.failRequestPrune {
+		return 0, errBoom
+	}
+	return 0, nil
+}
+
+// The review queue's retention prune is a step in this pass, for the same
+// reason the events prune is: it is the only periodic job threatd runs, and
+// a table nothing ever prunes is a table that grows for the life of the
+// deployment.
+func TestRunPrunesStaleAllowlistRequests(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-a", "old ask", now-200*hour, 0); err != nil {
+		t.Fatalf("seed old: %v", err)
+	}
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-a", "recent ask", now-hour, 0); err != nil {
+		t.Fatalf("seed recent: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.AllowlistRequestRetention = 168 * time.Hour
+	runPass(t, s, cfg)
+
+	rows, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CIDR != "198.51.100.0/24" {
+		t.Fatalf("after the pass: got %+v, want only the recent request", rows)
+	}
+}
+
+// Housekeeping is logged and skipped, never fatal: it must not stop the feed
+// being regenerated with the promotions this pass just made. (The malformed
+// allowlist row is the deliberate exception, and it aborts for the opposite
+// reason -- skipping it would fail open.)
+func TestAllowlistRequestPruneFailureDoesNotAbortThePass(t *testing.T) {
+	fake := &failingReader{
+		rows:             []threatstore.BlocklistRow{{AttackerIP: "203.0.113.7", ExpiresAt: now + hour}},
+		failRequestPrune: true,
+	}
+	snap := NewSnapshot()
+	cfg := testConfig()
+	cfg.AllowlistRequestRetention = 168 * time.Hour
+	r := New(fake, snap, cfg)
+
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("Run: got %v, want the pass to survive a failed request prune", err)
+	}
+	if !strings.Contains(string(snap.Body()), "203.0.113.7") {
+		t.Fatalf("the snapshot was not regenerated: %q", snap.Body())
+	}
+}

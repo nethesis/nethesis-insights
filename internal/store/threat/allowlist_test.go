@@ -5,6 +5,7 @@ package threat
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -29,7 +30,7 @@ func TestUpsertAllowlistRequestCountsDistinctSystems(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	n, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "first ask", 1000)
+	n, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "first ask", 1000, 0)
 	if err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestUpsertAllowlistRequestCountsDistinctSystems(t *testing.T) {
 
 	// The same system asking again is idempotent: it refreshes the row, it
 	// does not add a second one.
-	n, err = s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "asking again", 2000)
+	n, err = s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "asking again", 2000, 0)
 	if err != nil {
 		t.Fatalf("UpsertAllowlistRequest (repeat): %v", err)
 	}
@@ -47,7 +48,7 @@ func TestUpsertAllowlistRequestCountsDistinctSystems(t *testing.T) {
 		t.Fatalf("distinct systems after a repeat from the same system: got %d, want 1", n)
 	}
 
-	n, err = s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-2", "us too", 3000)
+	n, err = s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-2", "us too", 3000, 0)
 	if err != nil {
 		t.Fatalf("UpsertAllowlistRequest (second system): %v", err)
 	}
@@ -66,7 +67,7 @@ func TestClientRequestsNeverAutoPromoteToTheAllowlist(t *testing.T) {
 	const cidr = "203.0.113.0/24"
 
 	for i, sys := range []string{"sys-1", "sys-2", "sys-3", "sys-4", "sys-5"} {
-		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please allowlist us", int64(1000+i)); err != nil {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please allowlist us", int64(1000+i), 0); err != nil {
 			t.Fatalf("UpsertAllowlistRequest(%s): %v", sys, err)
 		}
 	}
@@ -105,7 +106,7 @@ func TestPendingAllowlistRequestsAreRankedByDistinctSystemsThenRecency(t *testin
 
 	mustRequest := func(cidr, sys string, at int64) {
 		t.Helper()
-		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "reason for "+cidr, at); err != nil {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "reason for "+cidr, at, 0); err != nil {
 			t.Fatalf("UpsertAllowlistRequest: %v", err)
 		}
 	}
@@ -145,7 +146,7 @@ func TestHandledRequestsLeaveTheQueueOnlyWhenDeleted(t *testing.T) {
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
 
-	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
 	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "not enough evidence", 2000); err != nil {
@@ -186,7 +187,7 @@ func TestAFreshAskAfterADecisionReturnsToTheQueue(t *testing.T) {
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
 
-	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
 	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "not enough evidence", 2000); err != nil {
@@ -196,7 +197,7 @@ func TestAFreshAskAfterADecisionReturnsToTheQueue(t *testing.T) {
 		t.Fatalf("DeleteAllowlistRequests: %v", err)
 	}
 
-	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-2", "still want it", 3000); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-2", "still want it", 3000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest (after the rejection): %v", err)
 	}
 	pending, err := s.PendingAllowlistRequests(ctx, 0)
@@ -236,13 +237,13 @@ func TestDeleteAllowlistRequestsTouchesOnlyItsCIDR(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "a", 1000); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "a", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
-	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-1", "b", 1000); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-1", "b", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
-	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-2", "b", 1100); err != nil {
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-2", "b", 1100, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
 
@@ -269,7 +270,7 @@ func TestDeleteAllowlistRequestsRemovesEverySystemsAsk(t *testing.T) {
 	const cidr = "203.0.113.0/24"
 
 	for i, sys := range []string{"sys-1", "sys-2", "sys-3"} {
-		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please", int64(1000+i*100)); err != nil {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please", int64(1000+i*100), 0); err != nil {
 			t.Fatalf("UpsertAllowlistRequest(%s): %v", sys, err)
 		}
 	}
@@ -337,5 +338,126 @@ func TestAppendAllowlistAuditAppendsOneRowPerCall(t *testing.T) {
 	}
 	if rows[0].ID == "" || rows[0].ID == rows[1].ID {
 		t.Fatalf("audit rows must each get a distinct ULID id: got %+v", rows)
+	}
+}
+
+// A client request is a permanent row, and nothing but an admin handling
+// that exact CIDR ever deleted one, so an unbounded number of distinct
+// CIDRs per system was an unbounded table -- read by the review queue and
+// counted by the status page. The cap is per system and counts DISTINCT
+// pending CIDRs, because that is what the queue is measured in.
+func TestUpsertAllowlistRequestCapsDistinctCIDRsPerSystem(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const max = 3
+
+	for i, cidr := range []string{"203.0.113.0/24", "198.51.100.0/24", "192.0.2.0/24"} {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", int64(1000+i), max); err != nil {
+			t.Fatalf("UpsertAllowlistRequest(%s): %v", cidr, err)
+		}
+	}
+
+	_, err := s.UpsertAllowlistRequest(ctx, "203.0.113.128/25", "sys-1", "one too many", 4000, max)
+	if !errors.Is(err, ErrTooManyAllowlistRequests) {
+		t.Fatalf("over-cap request: got %v, want ErrTooManyAllowlistRequests", err)
+	}
+
+	// A system at its cap must still be able to refresh a CIDR it already
+	// asked about: the request is idempotent per (cidr, system_id), it adds
+	// no row, and refusing it would make a retry look like a new ask.
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "still want it", 5000, max); err != nil {
+		t.Fatalf("refresh at the cap: %v", err)
+	}
+
+	// The cap is per system: one noisy customer must not stop another from
+	// asking.
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.128/25", "sys-2", "us too", 6000, max); err != nil {
+		t.Fatalf("second system at the same CIDR: %v", err)
+	}
+
+	rows, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("pending CIDRs: got %d, want 4 (three from sys-1 plus sys-2's)", len(rows))
+	}
+}
+
+// The retention prune is what bounds the table when nobody ever reviews the
+// queue. It drops by age, not by state: a request an admin handled is
+// already gone (DeleteAllowlistRequests), so what is left here is only ever
+// unreviewed.
+func TestPruneAllowlistRequestsDropsOnlyStaleRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-1", "old", 1000, 0); err != nil {
+		t.Fatalf("seed old: %v", err)
+	}
+	if _, err := s.UpsertAllowlistRequest(ctx, "198.51.100.0/24", "sys-1", "fresh", 9000, 0); err != nil {
+		t.Fatalf("seed fresh: %v", err)
+	}
+
+	pruned, err := s.PruneAllowlistRequests(ctx, 5000)
+	if err != nil {
+		t.Fatalf("PruneAllowlistRequests: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned: got %d, want 1", pruned)
+	}
+
+	rows, err := s.PendingAllowlistRequests(ctx, 0)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CIDR != "198.51.100.0/24" {
+		t.Fatalf("after the prune: got %+v, want only the fresh request", rows)
+	}
+}
+
+// The limit is the review queue's read bound, and it must select the
+// top-ranked CIDRs rather than an arbitrary slice of request rows: a limit
+// applied to the flat (cidr, system_id) rows would cut a CIDR's systems in
+// half and mis-rank the queue.
+func TestPendingAllowlistRequestsHonoursTheLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// popular: 3 systems. middling: 2. Two more with 1 each.
+	seed := []struct {
+		cidr string
+		sys  string
+		at   int64
+	}{
+		{"203.0.113.0/24", "sys-1", 1000},
+		{"203.0.113.0/24", "sys-2", 1100},
+		{"203.0.113.0/24", "sys-3", 1200},
+		{"198.51.100.0/24", "sys-1", 2000},
+		{"198.51.100.0/24", "sys-2", 2100},
+		{"192.0.2.0/24", "sys-1", 3000},
+		{"203.0.113.128/25", "sys-2", 4000},
+	}
+	for _, sd := range seed {
+		if _, err := s.UpsertAllowlistRequest(ctx, sd.cidr, sd.sys, "reason for "+sd.cidr, sd.at, 0); err != nil {
+			t.Fatalf("seed %s/%s: %v", sd.cidr, sd.sys, err)
+		}
+	}
+
+	rows, err := s.PendingAllowlistRequests(ctx, 2)
+	if err != nil {
+		t.Fatalf("PendingAllowlistRequests: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows: got %d, want 2", len(rows))
+	}
+	if rows[0].CIDR != "203.0.113.0/24" || rows[0].DistinctSystems != 3 {
+		t.Fatalf("rank 0: got %+v, want the 3-system CIDR with all 3 counted", rows[0])
+	}
+	if rows[1].CIDR != "198.51.100.0/24" || rows[1].DistinctSystems != 2 {
+		t.Fatalf("rank 1: got %+v, want the 2-system CIDR with both counted", rows[1])
+	}
+	if len(rows[0].Reasons) != 1 || rows[0].Reasons[0] != "reason for 203.0.113.0/24" {
+		t.Fatalf("reasons: got %+v", rows[0].Reasons)
 	}
 }

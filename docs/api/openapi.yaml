@@ -507,6 +507,17 @@ paths:
         promise that the CIDR will be allowlisted. A request for a CIDR
         that is already on the allowlist is a successful no-op.
 
+        One system may hold at most
+        `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` (default 25) **distinct
+        pending** CIDRs; a further new CIDR is refused with `429` until
+        some of its earlier asks are decided. Unlike the threat-events cap
+        this refuses rather than truncates, because a request is a
+        permanent row that only a human decision removes. Re-asking about
+        a CIDR already raised is always accepted -- it adds no row.
+        An unreviewed request is pruned after
+        `THREAT_ALLOWLIST_REQUEST_RETENTION` (default 90 days); a client
+        that still wants an exemption simply asks again.
+
         `reason` is free text from a customer: length-capped, and rendered
         escaped wherever the operator UI shows it, never trusted or
         interpreted.
@@ -554,6 +565,17 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "method not allowed" }
+        "429":
+          description: >-
+            This system already holds
+            `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` distinct pending
+            CIDRs. The ask is well formed; the system has used up its share
+            of the review queue and needs its earlier asks decided first.
+            Nothing was stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "too many pending allowlist requests for this system" }
         "503":
           description: Forward-auth validator unreachable, or the store failed to write.
           content:

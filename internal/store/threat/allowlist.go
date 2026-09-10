@@ -5,7 +5,9 @@ package threat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -16,6 +18,20 @@ import (
 // threat_allowlist row by itself -- UpsertThreatAllowlistEntry (store.go)
 // is the only writer of that table, and every caller of it in this codebase
 // is a human decision (an admin API call or an operator UI form submit).
+
+// ErrTooManyAllowlistRequests is returned when a system already has
+// MaxPerSystem distinct pending CIDRs and asks about one more. It is a
+// sentinel rather than a plain error so the HTTP handler can answer 429
+// (the ask is well formed; the system has used up its share of the review
+// queue) without matching on a message.
+var ErrTooManyAllowlistRequests = errors.New("store: too many pending allowlist requests for this system")
+
+// maxReasonsPerCIDR bounds how many distinct reasons the review queue
+// carries for one CIDR. The reasons are context for a human deciding, and
+// no human reads the eleventh restatement of "our scanner"; the cap is what
+// keeps one popular CIDR from turning a bounded row count back into an
+// unbounded one.
+const maxReasonsPerCIDR = 10
 
 // AllowlistReviewApproved and AllowlistReviewRejected are the only two
 // values threat_allowlist_reviews.state ever takes. An absent row means
@@ -34,10 +50,11 @@ type AllowlistRequestRow struct {
 	CIDR                              string
 	DistinctSystems                   int
 	FirstRequestedAt, LastRequestedAt int64
-	// Reasons is every distinct non-empty reason offered for this CIDR,
-	// most-recently-seen first. It is folded in Go rather than aggregated
-	// with GROUP_CONCAT/ARRAY_AGG, which are not portable across SQLite and
-	// Postgres -- the same reasoning as ThreatCandidateRow.
+	// Reasons is the distinct non-empty reasons offered for this CIDR,
+	// most-recently-seen first and at most maxReasonsPerCIDR of them. They
+	// are folded in Go rather than aggregated with GROUP_CONCAT/ARRAY_AGG,
+	// which are not portable across SQLite and Postgres -- the same
+	// reasoning as ThreatCandidateRow.
 	Reasons []string
 }
 
@@ -55,9 +72,31 @@ type AllowlistAuditRow struct {
 // stays a count of systems and never of requests. A request for an already
 // -allowlisted CIDR is accepted the same way -- it is a successful no-op,
 // since the entry is already in effect.
-func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64) (int, error) {
+//
+// maxPerSystem caps how many DISTINCT pending CIDRs one system may hold,
+// and 0 means unlimited (which only tests use -- cmd/threatd always passes
+// a value). The cap is checked here rather than in the handler so it is
+// applied inside the same held write lock as the insert: a count read
+// outside it could be raced past by concurrent requests from one reporter,
+// which is exactly the caller this bound exists for. A refresh of a CIDR
+// the system already asked about is never refused, because it adds no row;
+// only a genuinely new CIDR can push a system over.
+func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reason string, now int64, maxPerSystem int) (int, error) {
 	s.db.Lock()
 	defer s.db.Unlock()
+
+	if maxPerSystem > 0 {
+		var held int
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM threat_allowlist_requests
+			WHERE system_id = ? AND cidr <> ?
+		`, systemID, cidr).Scan(&held); err != nil {
+			return 0, fmt.Errorf("store: count allowlist requests for system: %w", err)
+		}
+		if held >= maxPerSystem {
+			return 0, fmt.Errorf("%w: %d held, %d allowed", ErrTooManyAllowlistRequests, held, maxPerSystem)
+		}
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_requests (cidr, system_id, reason, created_at)
@@ -79,9 +118,9 @@ func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reas
 	return n, nil
 }
 
-// PendingAllowlistRequests returns every CIDR with an outstanding client
-// request, ranked by distinct systems then recency -- the review queue's
-// priority order.
+// PendingAllowlistRequests returns the top `limit` CIDRs with an
+// outstanding client request, ranked by distinct systems then recency --
+// the review queue's priority order.
 //
 // "Pending" means exactly "a threat_allowlist_requests row exists": handling
 // a request deletes its rows (DeleteAllowlistRequests), so the queue holds
@@ -90,61 +129,100 @@ func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reas
 // CIDR rejected once on thin evidence could never be raised again however
 // many systems went on to report it. What was asked and how it was decided
 // lives in the audit trail, which is append-only.
+//
+// Two queries, both bounded, because this table is fed by clients and is
+// therefore as large as the fleet chooses to make it. The first ranks and
+// limits in SQL -- COUNT/MIN/MAX only, never GROUP_CONCAT or ARRAY_AGG --
+// so at most `limit` rows are read however many CIDRs exist. The second
+// fetches the reasons for just those CIDRs, itself limited, because the
+// reasons cannot be aggregated portably and folding every request row in Go
+// is what made the old single query read the whole table.
 func (s *Store) PendingAllowlistRequests(ctx context.Context, limit int) ([]AllowlistRequestRow, error) {
+	limit = clampLimit(limit)
+
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.cidr, r.reason, r.system_id, r.created_at
-		FROM threat_allowlist_requests r
-		ORDER BY r.cidr, r.created_at DESC
-	`)
+		SELECT cidr,
+		       COUNT(DISTINCT system_id) AS systems,
+		       MIN(created_at) AS first_at,
+		       MAX(created_at) AS last_at
+		FROM threat_allowlist_requests
+		GROUP BY cidr
+		ORDER BY systems DESC, last_at DESC
+		LIMIT ?
+	`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: pending allowlist requests: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	// Folded in Go rather than aggregated in SQL for the same reason
-	// ConsensusCandidates is: COUNT(DISTINCT ...) alone cannot also hand back
-	// the reason list, and GROUP_CONCAT/ARRAY_AGG are not portable.
-	byCIDR := map[string]*AllowlistRequestRow{}
-	order := []string{}
+	result := []AllowlistRequestRow{}
 	for rows.Next() {
-		var (
-			cidr, reason, systemID string
-			createdAt              int64
-		)
-		if err := rows.Scan(&cidr, &reason, &systemID, &createdAt); err != nil {
+		var r AllowlistRequestRow
+		if err := rows.Scan(&r.CIDR, &r.DistinctSystems, &r.FirstRequestedAt, &r.LastRequestedAt); err != nil {
 			return nil, fmt.Errorf("store: scan pending allowlist request: %w", err)
 		}
-		r, ok := byCIDR[cidr]
-		if !ok {
-			r = &AllowlistRequestRow{CIDR: cidr, FirstRequestedAt: createdAt, LastRequestedAt: createdAt}
-			byCIDR[cidr] = r
-			order = append(order, cidr)
-		}
-		r.DistinctSystems++ // rows are already one-per-system_id because of the PRIMARY KEY
-		if createdAt > r.LastRequestedAt {
-			r.LastRequestedAt = createdAt
-		}
-		if createdAt < r.FirstRequestedAt {
-			r.FirstRequestedAt = createdAt
-		}
-		if reason != "" && !containsString(r.Reasons, reason) {
-			r.Reasons = append(r.Reasons, reason)
-		}
+		result = append(result, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: pending allowlist requests: %w", err)
 	}
-
-	result := make([]AllowlistRequestRow, 0, len(order))
-	for _, cidr := range order {
-		result = append(result, *byCIDR[cidr])
+	if len(result) == 0 {
+		return result, nil
 	}
-	sortAllowlistRequests(result)
 
-	if limit = clampLimit(limit); limit < len(result) {
-		result = result[:limit]
+	reasons, err := s.allowlistRequestReasons(ctx, result)
+	if err != nil {
+		return nil, err
+	}
+	for i := range result {
+		result[i].Reasons = reasons[result[i].CIDR]
 	}
 	return result, nil
+}
+
+// allowlistRequestReasons loads the distinct non-empty reasons offered for
+// each of the given CIDRs, most-recently-seen first and at most
+// maxReasonsPerCIDR each.
+func (s *Store) allowlistRequestReasons(ctx context.Context, forCIDRs []AllowlistRequestRow) (map[string][]string, error) {
+	placeholders := make([]string, len(forCIDRs))
+	args := make([]any, 0, len(forCIDRs)+1)
+	for i, r := range forCIDRs {
+		placeholders[i] = "?"
+		args = append(args, r.CIDR)
+	}
+	// The row bound: every CIDR could in principle contribute its whole
+	// fleet's worth of reasons, so the read is capped at what the per-CIDR
+	// cap can consume. Ordering by created_at DESC first means the rows that
+	// survive the cap are the newest.
+	args = append(args, len(forCIDRs)*maxReasonsPerCIDR)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT cidr, reason
+		FROM threat_allowlist_requests
+		WHERE reason <> '' AND cidr IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: allowlist request reasons: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string][]string{}
+	for rows.Next() {
+		var cidr, reason string
+		if err := rows.Scan(&cidr, &reason); err != nil {
+			return nil, fmt.Errorf("store: scan allowlist request reason: %w", err)
+		}
+		if len(out[cidr]) >= maxReasonsPerCIDR || containsString(out[cidr], reason) {
+			continue
+		}
+		out[cidr] = append(out[cidr], reason)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: allowlist request reasons: %w", err)
+	}
+	return out, nil
 }
 
 func containsString(ss []string, s string) bool {
@@ -154,23 +232,6 @@ func containsString(ss []string, s string) bool {
 		}
 	}
 	return false
-}
-
-// sortAllowlistRequests orders by distinct systems descending, then most
-// recently asked first -- the same priority order the blocklist gives its
-// own consensus candidates.
-func sortAllowlistRequests(rows []AllowlistRequestRow) {
-	for i := 1; i < len(rows); i++ {
-		for j := i; j > 0; j-- {
-			a, b := rows[j-1], rows[j]
-			less := b.DistinctSystems > a.DistinctSystems ||
-				(b.DistinctSystems == a.DistinctSystems && b.LastRequestedAt > a.LastRequestedAt)
-			if !less {
-				break
-			}
-			rows[j-1], rows[j] = rows[j], rows[j-1]
-		}
-	}
 }
 
 // UpsertAllowlistReview records an approve/reject decision for a CIDR. It is
@@ -225,6 +286,34 @@ func (s *Store) DeleteAllowlistRequests(ctx context.Context, cidr string) (int, 
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("store: delete allowlist requests rows: %w", err)
+	}
+	return int(n), nil
+}
+
+// PruneAllowlistRequests drops client requests last touched before
+// olderThan and returns how many went.
+//
+// This is what bounds the table when nobody reviews the queue: handling a
+// request deletes its rows, but an unreviewed one is otherwise permanent,
+// and the queue is fed by clients. It prunes by age alone -- there is no
+// state to consult, since a decided request has already been deleted -- and
+// a system whose ask is dropped can simply ask again, which also re-ranks
+// it as current evidence rather than a years-old one.
+//
+// The audit trail is deliberately NOT pruned here: it exists precisely to
+// outlive the rows it describes.
+func (s *Store) PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM threat_allowlist_requests WHERE created_at < ?`, olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune allowlist requests: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune allowlist requests rows: %w", err)
 	}
 	return int(n), nil
 }
