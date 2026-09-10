@@ -1206,12 +1206,21 @@ in-process counter, which a crash loop would reset:
 | Limit | Effect on breach |
 |---|---|
 | `LLM_MAX_CONCURRENCY` (default 4) | calls wait for a slot; the bounded queue absorbs the rest and ingest answers 503 when it fills |
-| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` (default 12) | the window is recorded `gated = 1`, `suppressed_by = "system_call_cap"`, no reasons, no cost |
+| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` (default 100) | the window is recorded `gated = 1`, `suppressed_by = "system_call_cap"`, no reasons, no cost |
 | `LLM_DAILY_SPEND_CAP_USD` (default 0 = off) | `gate.SystemState.SecurityOnly` is set: novel and surging security templates still fire, everything else declines |
 
-The per-system cap is the one that makes the worst case arithmetic rather than
-emergent. The spend cap deliberately degrades rather than stops: a cap that
-blinded the fleet to a break-in would be worse than the invoice it prevents.
+The per-system cap makes the worst case arithmetic rather than emergent: one
+system cannot cost more than its cap however the gate votes. **At the default
+of 100 it no longer binds normal operation** — a node ships one bundle per
+15-minute window, so 96 windows is all a UTC day holds. What it still bounds
+is a window attempted repeatedly: `llm_called` counts *attempts*, and a
+transient provider error deliberately leaves the window claimable, so a
+retry loop is the way one system can exceed one call per window. Lower it if
+a per-system daily ceiling below the window count is wanted; `LLM_DAILY_SPEND_CAP_USD`
+is what bounds a day's spend.
+
+The spend cap deliberately degrades rather than stops: a cap that blinded the
+fleet to a break-in would be worse than the invoice it prevents.
 
 A suppressed window still records its templates and baselines. Skipping that
 would leave the system never learning what it saw, so every later window would
@@ -1247,9 +1256,10 @@ Three defences carry it, and all three are required:
   and once `QUEUE_SIZE` is full ingest answers `503` and the edge backs off
   rather than the queue growing without limit.
 - `LLM_DAILY_SPEND_CAP_USD` degrades the gate to security-only on breach.
-- `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` is the one that makes the worst case
-  arithmetic rather than emergent: whatever the gate concludes, one system
-  cannot exceed its own cap.
+- `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` makes the worst case arithmetic rather
+  than emergent: whatever the gate concludes, one system cannot exceed its own
+  cap. At the default of 100 that ceiling sits above the 96 windows a day
+  holds, so on this path the spend cap is the binding one.
 
 Every ledger-derived limit counts from the start of the UTC day and is read
 back from the `analyses` table, never from an in-process counter — a counter

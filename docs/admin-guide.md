@@ -300,7 +300,7 @@ depth. It never logs a credential: the model API key appears only as
 | `GATE_MIN_NEW_TEMPLATES` | novel templates required before novelty alone fires (default `3`). A new security template always fires on its own |
 | `PROMPT_MAX_AMBIENT` | templates carried as background context beyond the ones the gate fired on (default `60`) |
 | `LLM_MAX_CONCURRENCY` | model calls in flight at once (default `4`) |
-| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-machine ceiling, UTC day (default `12`) |
+| `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-machine ceiling, UTC day (default `100`). A machine ships 96 windows a day, so this no longer binds normal operation — it is a backstop against a window being retried in a loop. `LLM_DAILY_SPEND_CAP_USD` is the limit that bounds a day's spend |
 | `LLM_DAILY_SPEND_CAP_USD` | fleet spend ceiling for the UTC day (default `0`, off). On breach the gate narrows to security-only rather than stopping |
 | `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | prices for the cost ledger (default `0`). Without them the ledger records zero cost |
 | `PIPELINE_EXCLUDE_MODULES` | modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline). Matches a module **family** or an exact instance id — configure the family, since NS8 numbers instances per cluster and `crowdsec1` excludes nothing on a node running `crowdsec3` |

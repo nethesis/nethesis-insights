@@ -202,7 +202,7 @@ func main() {
 	// The ceiling under LLM spend (internal/budget). The per-system cap is
 	// what makes the fleet's worst case arithmetic rather than emergent.
 	llmMaxConcurrency := getenvInt("LLM_MAX_CONCURRENCY", 4)
-	llmMaxCallsPerSystemPerDay := getenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 12)
+	llmMaxCallsPerSystemPerDay := getenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 100)
 	llmDailySpendCapUSD := getenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
 	// CrowdSec has its own pipeline (threatd's /v1/events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
