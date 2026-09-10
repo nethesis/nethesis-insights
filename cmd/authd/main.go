@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -30,6 +31,15 @@ const defaultAuthValidateURL = "https://my.nethesis.it/auth"
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -90,6 +100,11 @@ func main() {
 	fa := auth.New(validateURL, pepper, timeout, time.Now)
 	fa.PositiveTTL = getenvDuration("AUTH_CACHE_TTL", 5*time.Minute)
 	fa.NegativeTTL = getenvDuration("AUTH_NEG_CACHE_TTL", 30*time.Second)
+	// Bounding the cache is not tuning: unbounded, every distinct wrong
+	// credential is a permanent entry, so anyone who can reach the proxy
+	// can grow this process until the box kills it.
+	fa.MaxPositiveEntries = getenvInt("AUTH_CACHE_MAX_ENTRIES", fa.MaxPositiveEntries)
+	fa.MaxNegativeEntries = getenvInt("AUTH_NEG_CACHE_MAX_ENTRIES", fa.MaxNegativeEntries)
 
 	srv := &http.Server{
 		Addr:              listenAddr,
@@ -102,7 +117,9 @@ func main() {
 		"validate_url", validateURL,
 		"pepper", pepperSource,
 		"positive_ttl", fa.PositiveTTL,
-		"negative_ttl", fa.NegativeTTL)
+		"negative_ttl", fa.NegativeTTL,
+		"max_positive_entries", fa.MaxPositiveEntries,
+		"max_negative_entries", fa.MaxNegativeEntries)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -100,17 +100,22 @@ Three issues, deliberately not 28. Full list with file:line in
 - [ ] **authd down is indistinguishable from a backend fault.** Verified on the
       box: requests return a Traefik-generated `500`. `Wants=authd.service` on
       the three pipelines would make systemd say so.
-- [ ] **The authd negative cache is unbounded.** `platform/auth/cache.go:47`
-      never evicts, and stale entries are kept deliberately for the outage
-      fallback — so every distinct wrong credential is a permanent entry. The
-      Traefik rate limit added in `f7eb44c` damps the arrival rate; a cap or LRU
-      is the durable fix. The box has 1.7 GiB and no swap.
-- [ ] **Cap journald.** Five containers, Traefik `accessLog: {}`, one
-      `slog.Info("request")` per request per binary, and `LOG_LEVEL=debug` set
-      for the test deploy. Nothing sets `SystemMaxUse=`.
-- [ ] **Lower `LOG_LEVEL` for production.** It is `debug` on all four units so
-      that the untrusted-proxy-versus-no-credential distinction is visible while
-      the deployment is new.
+- [x] **The authd negative cache is unbounded.** Fixed: `internal/platform/auth`
+      now keeps two separately capped LRU tiers
+      (`AUTH_CACHE_MAX_ENTRIES`/`AUTH_NEG_CACHE_MAX_ENTRIES`, default
+      `8192`/`4096`). Separate rather than shared because one cap would let a
+      flood of wrong credentials evict the fleet's positive entries, emptying
+      the stale-entry outage fallback at a moment the attacker picks. Stale
+      entries are still never dropped at expiry.
+- [x] **Cap journald.** `deploy/journald/insights.conf` (`SystemMaxUse=200M`,
+      `SystemMaxFileSize=20M`), installed per runbook §5.1b. Host-wide, correct
+      only because that box is dedicated — never install it on `rl1`.
+- [x] **Lower `LOG_LEVEL` for production.** All four units now ship `info`; the
+      runbook says how and when to raise it to `debug` for §4.3 and smoke
+      test 3.
+- [ ] **Deploy the above.** The three fixes are in the repository, not on the
+      box: the units and the journald drop-in have to be reinstalled there, and
+      `authd` rebuilt from a new image.
 - [ ] **Back up the volumes.** Three fresh databases means nothing to lose now
       and everything to lose later.
 

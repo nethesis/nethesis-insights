@@ -26,11 +26,13 @@ Environment=UI_LISTEN_ADDR=127.0.0.1:9616
 Environment=UI_BASE_PATH=/sizing
 Environment=DB_PATH=/var/lib/sizing/sizing.db
 Environment=TRUSTED_PROXY_CIDRS=127.0.0.0/8
-# Test-deploy only: at info level the two rejected-request sentinels
-# (untrusted proxy vs. no credential) are indistinguishable, so a pod
-# networking mistake (every valid credential 401ing) reads identically to a
-# client sending nothing. Lower this to info (or drop it) before production.
-Environment=LOG_LEVEL=debug
+# Debug is what separates the two rejected-request sentinels (untrusted
+# proxy vs. no credential), so a pod networking mistake -- every valid
+# credential 401ing -- reads differently from a client sending nothing.
+# That is worth having while a deployment is new and not worth five log
+# lines per request forever; raise it to debug for the length of an
+# investigation, not as a resting state.
+Environment=LOG_LEVEL=info
 # sizingd has no admin API and no secret of its own, but EnvironmentFile= is
 # still required here: quadlet's Container key takes only an absolute-or-
 # relative path (man 5 podman-systemd.unit), not systemd's leading-"-"

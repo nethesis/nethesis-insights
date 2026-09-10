@@ -448,6 +448,29 @@ install -d -m 755 /etc/containers/systemd
 getenforce                                         # still Enforcing
 ```
 
+### 5.1b Cap journald
+
+Five containers log here: Traefik with `accessLog: {}` and four Go binaries
+with one line per request each, so one client request can produce five journal
+entries. Unset, journald's ceiling is 10% of the filesystem and it will spend
+it; on a 1.7 GiB box with no swap, a full disk is the failure that takes
+everything else down with it.
+
+```bash
+install -D -m 644 deploy/journald/insights.conf \
+    /etc/systemd/journald.conf.d/insights.conf
+systemctl restart systemd-journald
+```
+
+**Check:**
+
+```bash
+journalctl --disk-usage                  # bounded, and below 200M once rotated
+```
+
+This is host-wide, which is correct only because this host runs this deployment
+and nothing else. Do not install it on a shared NS8 node such as `rl1`.
+
 ### 5.2 Get the four images
 
 **Path A — pull from CI (recommended on this machine; see the RAM gap in §2.5).**
@@ -582,18 +605,24 @@ published-port model and is wrong here; §4.1 says why at length. Note that the 
 Task 9 Step 2 example still shows the gateway appended (see §7 item 3) — the surrounding
 prose in the plan is right and that one line is stale.
 
-**`Environment=LOG_LEVEL=debug` on all four `authd`/`insightsd`/`threatd`/`sizingd`
-units, for this test deployment specifically.** At the default `info` level,
-`httpx.SystemID`'s two rejected-request sentinels — `ErrUntrustedProxy` (the pod's
-networking is wrong and every valid credential 401s) and `ErrNoCredential` (the client
-simply sent nothing) — are logged, but only at `slog.Debug`, so neither reaches the
+**`Environment=LOG_LEVEL=info` on all four `authd`/`insightsd`/`threatd`/`sizingd`
+units — but raise it to `debug` while working through §4.3 and smoke test 3.** At
+`info`, `httpx.SystemID`'s two rejected-request sentinels — `ErrUntrustedProxy` (the
+pod's networking is wrong and every valid credential 401s) and `ErrNoCredential` (the
+client simply sent nothing) — are logged only at `slog.Debug`, so neither reaches the
 journal and the two failure modes are indistinguishable from outside. That distinction
-is exactly what §4.3's verification step and smoke test 3 depend on being able to read.
-Do this on this box because it is a first deployment of the pod-networking arrangement
-and the failure mode it exposes is silent otherwise; a production deployment should
-lower this to `info` (or omit it, which defaults to `info`) once the pod's `RemoteAddr`
-behaviour is confirmed, since debug logging is otherwise unnecessary verbosity on a
-fleet-facing service.
+is exactly what §4.3's verification step and smoke test 3 depend on being able to read,
+and this is the first deployment of the pod-networking arrangement, so confirm the
+pod's `RemoteAddr` behaviour at `debug` and then put it back:
+
+```bash
+sed -i 's/^Environment=LOG_LEVEL=.*/Environment=LOG_LEVEL=debug/' \
+    /etc/containers/systemd/{authd,insightsd,threatd,sizingd}.container
+systemctl daemon-reload && systemctl restart authd insightsd threatd sizingd
+```
+
+Leaving it at `debug` is what §5.1b's journald cap exists to survive: five containers
+at one line per request each, on a box with 1.7 GiB and no swap.
 
 `threatd.container` in full, the others by analogy:
 

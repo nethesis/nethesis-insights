@@ -918,7 +918,20 @@ Authentication moved to the proxy. `cmd/authd` is a thin HTTP shell over
 `https://my.nethesis.it/auth`) and caches the outcome, keyed by
 `HMAC(AUTH_PEPPER, "system_id:secret")` so the in-memory cache cannot be
 reverse-engineered into a credential list. Positive and negative TTLs are
-independently configurable (`AUTH_CACHE_TTL`/`AUTH_NEG_CACHE_TTL`). `authd`
+independently configurable (`AUTH_CACHE_TTL`/`AUTH_NEG_CACHE_TTL`), and so
+are the two size caps.
+
+**The cache is bounded, and positives and negatives are counted
+separately.** Any wrong credential mints a negative entry, and an entry is
+never dropped at expiry — a stale one is the outage fallback below — so
+without a cap every distinct wrong credential is a permanent entry and
+anyone who can reach the proxy can grow the process until the host kills it.
+Counting the two tiers separately is what makes the cap safe rather than
+merely finite: under one shared cap a flood of wrong credentials evicts the
+fleet's cached-valid entries, emptying the outage fallback at a moment the
+attacker picks. Each tier discards its own least recently used entry
+(`AUTH_CACHE_MAX_ENTRIES`/`AUTH_NEG_CACHE_MAX_ENTRIES`, default
+`8192`/`4096`). `authd`
 exists rather than pointing Traefik's `forwardAuth` straight at
 `my.nethesis.it` because Traefik has no cache of its own — at ~2700 nodes an
 uncached forward-auth call is roughly one upstream request per bundle — and

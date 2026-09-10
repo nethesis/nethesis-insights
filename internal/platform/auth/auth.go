@@ -47,6 +47,13 @@ type ForwardAuth struct {
 	PositiveTTL time.Duration
 	NegativeTTL time.Duration
 
+	// MaxPositiveEntries and MaxNegativeEntries bound the outcome cache.
+	// Unbounded, every distinct wrong credential is a permanent entry and
+	// the process grows until it is killed. See cache for why the two are
+	// counted separately.
+	MaxPositiveEntries int
+	MaxNegativeEntries int
+
 	pepper string
 	fwd    *forwarder
 	cache  *cache
@@ -65,12 +72,14 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 		timeout = defaultTimeout
 	}
 	return &ForwardAuth{
-		PositiveTTL: defaultPositiveTTL,
-		NegativeTTL: defaultNegativeTTL,
-		pepper:      pepper,
-		fwd:         &forwarder{url: validateURL, client: &http.Client{Timeout: timeout}},
-		cache:       newCache(now),
-		now:         now,
+		PositiveTTL:        defaultPositiveTTL,
+		NegativeTTL:        defaultNegativeTTL,
+		MaxPositiveEntries: defaultMaxPositiveEntries,
+		MaxNegativeEntries: defaultMaxNegativeEntries,
+		pepper:             pepper,
+		fwd:                &forwarder{url: validateURL, client: &http.Client{Timeout: timeout}},
+		cache:              newCache(now, 0, 0),
+		now:                now,
 	}
 }
 
@@ -84,6 +93,7 @@ func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, 
 		return "", err
 	}
 	key := a.cacheKey(systemID, secret)
+	a.cache.setLimits(a.MaxPositiveEntries, a.MaxNegativeEntries)
 
 	if e, fresh, found := a.cache.get(key); found && fresh {
 		return outcomeFromEntry(e, systemID)

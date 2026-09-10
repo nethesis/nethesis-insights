@@ -204,6 +204,7 @@ The forward-auth cache Traefik calls before any pipeline sees a request. See
 | `AUTH_VALIDATE_URL` | forward-auth validator (default `https://my.nethesis.it/auth`) |
 | `AUTH_PEPPER` | HMAC pepper for the auth cache — secret; unset gets a random, process-lifetime one |
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | positive/negative validator-outcome cache lifetimes (default `5m`/`30s`) |
+| `AUTH_CACHE_MAX_ENTRIES`, `AUTH_NEG_CACHE_MAX_ENTRIES` | cache size caps, counted separately so a flood of wrong credentials cannot evict the fleet's cached-valid entries (default `8192`/`4096`, about 3 MB in total) |
 | `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
 
 ### `insightsd`
