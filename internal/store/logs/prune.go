@@ -37,9 +37,11 @@ var pruneBatchSize = 5000
 //
 // -- until a batch deletes fewer than pruneBatchSize rows, taking and
 // releasing the write lock once per batch. The subquery-with-LIMIT shape
-// (rather than SQLite's non-standard `DELETE ... LIMIT`) is what keeps this
-// portable to the eventual Postgres store, which accepts exactly the same
-// query.
+// (rather than SQLite's non-standard `DELETE ... LIMIT`, which is a build
+// option many SQLite builds omit) is the portable spelling, and standard SQL
+// is this repo's convention even now that Postgres has been dropped as a
+// goal -- it costs nothing here and does not depend on a compile-time
+// option.
 func (s *Store) pruneLoop(ctx context.Context, deleteSQL string, args ...any) (int, error) {
 	batchArgs := append(append([]any{}, args...), pruneBatchSize)
 

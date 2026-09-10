@@ -199,6 +199,20 @@ Three issues, deliberately not 28. Full list with file:line in
       same kind: it is a *service*, not a module, and its own axis
       (`PIPELINE_EXCLUDE_SERVICES`) is already correct by default. Fix is
       `PIPELINE_EXCLUDE_MODULES=crowdsec1` and a restart.
+- [x] **The log pipeline never deleted anything.** Fixed 2026-09-10:
+      `internal/maint` prunes `system_templates`, `findings` and `analyses`
+      on a periodic pass in `insightsd`, in bounded 5000-row batches so the
+      first pass against a backlog cannot hold the single write mutex against
+      ingest. Retentions are env-configurable and each default is justified in
+      code: templates 400 days, because that table **is** the gate's novelty
+      memory and pruning it too eagerly manufactures an LLM call every time a
+      quarterly or annual job recurs; findings 180 days, open ones never
+      pruned at any age; analyses 90 days. `module_baselines` is deliberately
+      left unpruned — it upserts in place rather than growing per event.
+      **`analyses` is the one that destroys data permanently**: there is no
+      rollup table for this pipeline, so `/cost` silently truncates its spend
+      history at the cutoff. Not yet on the box — it ships with the next
+      `insightsd` image.
 - [ ] **`LLM_DAILY_SPEND_CAP_USD` is unset**, so the only ceiling is
       `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY=12`. Cheap insurance on a box that now
       has live reporters.
