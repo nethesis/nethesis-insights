@@ -619,7 +619,7 @@ paths:
 
         The full contract, including the fixed `resources` / `stress`
         vocabulary and its units, is
-        `docs/specs/2026-09-02-sizing-ingest-contract.md`.
+        `docs/api/sizing-ingest.md`.
       security:
         - basicAuth: []
       requestBody:

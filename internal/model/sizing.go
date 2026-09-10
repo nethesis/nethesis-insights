@@ -19,7 +19,7 @@ import "encoding/json"
 // store accepts, and nothing crosses from one to the other except through
 // sizing.Sanitize.
 //
-// The full contract is docs/specs/2026-09-02-sizing-ingest-contract.md.
+// The full contract is docs/api/sizing-ingest.md.
 
 // SizingSchemaVersion is the envelope version reporters must send. Like
 // ThreatSchemaVersion it is independent of SchemaVersion (the bundle

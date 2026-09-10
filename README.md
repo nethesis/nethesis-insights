@@ -52,9 +52,9 @@ Design documents live in this repository:
 - Pipeline-split plan: `docs/plans/2026-09-09-pipeline-split.md` (the four-binary/
   one-proxy shape) and `docs/runbooks/2026-09-09-insights-test-deploy.md` (deploying it)
 - Threat Shield design: `docs/specs/2026-07-28-threat-shield-design.md`
-- Threat Shield ingest contract: `docs/specs/2026-08-07-threat-events-ingest-contract.md`
+- Threat Shield ingest contract: `docs/api/threat-events-ingest.md`
 - Fleet sizing plan: `docs/plans/2026-09-02-fleet-sizing-server.md`
-- Fleet sizing ingest contract: `docs/specs/2026-09-02-sizing-ingest-contract.md`
+- Fleet sizing ingest contract: `docs/api/sizing-ingest.md`
 
 ## Development
 
@@ -431,7 +431,7 @@ synchronous.
 Both use the same HTTP Basic credential as `/logs/v1/bundles`, checked the same
 way: Traefik's `forwardAuth` call to `authd`. The full wire contract — request
 and response shapes, every drop rule — is
-`docs/specs/2026-08-07-threat-events-ingest-contract.md`, which `ns8-crowdsec`
+`docs/api/threat-events-ingest.md`, which `ns8-crowdsec`
 builds its notification template against. There is no scenario→category map:
 every scenario CrowdSec reports is accepted and stored verbatim (see below).
 
@@ -539,7 +539,7 @@ gate, no fingerprint, no queue.
 
 Same HTTP Basic credential and the same `authd`/Traefik check as the other two
 pipelines. The full wire contract is
-`docs/specs/2026-09-02-sizing-ingest-contract.md`; the reasoning — including
+`docs/api/sizing-ingest.md`; the reasoning — including
 why `pressure` is computed server-side only, and why a cohort below the
 evidence floor is deleted rather than left stale — is
 `docs/plans/2026-09-02-fleet-sizing-server.md`. The `ns8-core` reporter that

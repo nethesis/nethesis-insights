@@ -6,14 +6,17 @@
 **Primary client:** `ns8-crowdsec` (CrowdSec `notification-http` plugin)
 
 This is the wire contract between a NethServer 8 node's CrowdSec and the Threat
-Shield pipeline in `nethesis-insights`. It is the authority for anything a client
-needs to build a request; the rules behind it are in
-`docs/specs/2026-07-28-threat-shield-design.md`.
+Shield pipeline in `nethesis-insights`. It is the authority for anything a
+client needs to build a request. The reasoning behind each rule is in
+`docs/architecture.md`; the drop rules it describes are implemented in
+`internal/threat/sanitize.go` and the two must be kept in step.
 
-These two paths supersede both `POST /v1/blocklist-evidence` (the stub in
-`ns8-crowdsec`'s plan) and `POST /api/systems/threat-events` +
-`GET /api/systems/threat-shield/blocklist` (the `my`-flavoured paths in the
-design document).
+## Contents
+
+- [Authentication](#authentication)
+- [`POST /blocklist/v1/events`](#post-blocklistv1events)
+- [`GET /blocklist/v1/feed`](#get-blocklistv1feed)
+- [Promotion rule](#promotion-rule)
 
 | method | path | who |
 |---|---|---|

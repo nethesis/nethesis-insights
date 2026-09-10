@@ -5,18 +5,82 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Architecture
 
-This document describes how `nethesis-insights` is built: package layout, data
-flow, storage, and the invariants that keep the pipeline correct and cheap to
-run. It documents the **prototype as it exists today** — see the "Prototype
-vs. design" table in `CLAUDE.md` for what is deliberately not built yet.
+How `nethesis-insights` is built: package layout, request flow, storage, the
+formulas that decide cost and identity, and the rules that must not be broken.
+Written for engineers changing the code.
 
-For *why* each design decision was made, read
-`docs/specs/2026-08-05-nethesis-insights-design.md`. This document explains
-*how* the current code implements that design.
+For concepts in plain language and for installing and operating a deployment,
+see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 
-> **Keep this file in sync.** Any change to package boundaries, the analyzer's
-> step order, the wire protocol, storage schema, or the gate/fingerprint
-> formulas must update this document in the same change.
+## Contents
+
+- [Scope](#scope)
+- [System context](#system-context)
+- [Package layering](#package-layering)
+- [Request flow](#request-flow)
+  - [Ingest: `POST /v1/bundles`](#ingest-post-v1bundles-public-path-logsv1bundles)
+  - [The queue](#the-queue)
+  - [Analysis: `analyzer.Process`](#analysis-analyzerprocess)
+  - [Read: `GET /v1/findings`](#read-get-v1findings-public-path-logsv1findings)
+  - [Maintenance pass](#maintenance-pass-maintrunnerrun)
+  - [Threat ingest: `POST /v1/events`](#threat-ingest-post-v1events-public-path-blocklistv1events)
+  - [Consensus pass](#consensus-blocklistrunnerrun)
+  - [Feed: `GET /v1/feed`](#feed-get-v1feed-public-path-blocklistv1feed)
+  - [Sizing ingest: `POST /v1/reports`](#sizing-ingest-post-v1reports-public-path-sizingv1reports)
+  - [Cohort pass](#cohort-pass-baselinerunnerrun)
+  - [Operator UI](#operator-ui)
+- [Data model and storage](#data-model-and-storage)
+  - [The EWMA baseline formula](#the-ewma-baseline-formula)
+  - [The empty module is a real bucket](#the-empty-module-is-a-real-bucket)
+  - [Scenarios are not interpreted](#scenarios-are-not-interpreted)
+  - [Local origin only](#local-origin-only)
+  - [The two consensus rules are not symmetric](#the-two-consensus-rules-are-not-symmetric)
+  - [The allowlist write routes](#the-allowlist-write-routes)
+- [Data protection](#data-protection)
+- [Finding identity: the fingerprint](#finding-identity-the-fingerprint)
+- [Cost control: the gate](#cost-control-the-gate)
+  - [What the prompt carries](#what-the-prompt-carries)
+- [Cost control: the ceiling](#cost-control-the-ceiling)
+- [Degradation and failure modes](#degradation-and-failure-modes)
+- [Determinism](#determinism)
+- [LLM integration](#llm-integration)
+- [Authentication](#authentication)
+- [Configuration and wiring](#configuration-and-wiring)
+- [Testing strategy](#testing-strategy)
+- [Known limits](#known-limits)
+
+## Scope
+
+The server analyses logs, shares threat observations, and sizes hardware for a
+fleet of NethServer nodes. Three pipelines, one proxy, three databases.
+
+What it does:
+
+- Accepts deduplicated, masked log bundles; decides whether a bundle is worth
+  an LLM call; stores findings under a server-computed identity so one problem
+  is raised once.
+- Accepts CrowdSec ban decisions from nodes and publishes the addresses enough
+  distinct nodes agree on.
+- Accepts daily cluster workload and performance reports, scores each node, and
+  publishes cohort hardware baselines.
+
+What it deliberately does not do:
+
+- **No consumer-facing dashboard.** The three operator dashboards are for
+  whoever runs the fleet. Findings reach a customer through the read API.
+- **No control of a node.** The server never initiates a connection to a node
+  and has no channel to change anything on one. Every exchange is a node
+  calling in.
+- **No raw log storage.** Bundles carry masked templates; the samples that
+  accompany them are never written to disk.
+- **No classification of its own.** `category=security` is assigned at the
+  edge and propagated. The server never decides what a log line means.
+- **No interpretation of a CrowdSec scenario.** See "Scenarios are not
+  interpreted".
+- **No automatic allowlisting.** See "The two consensus rules are not
+  symmetric".
+- **No multi-tenancy.** The validator returns yes or no, never a tenant, so
+  nothing here can scope a query to an organization.
 
 ## System context
 
@@ -235,9 +299,20 @@ them.
 
 ### Analysis: `analyzer.Process`
 
-This is the pipeline's core, and its step order is a correctness
-requirement — see `CLAUDE.md` § "The analyzer's step order is a correctness
-requirement" for the two rules that must never move, and why. In order:
+This is the pipeline's core, and its step order is a correctness requirement.
+Two of the steps must not move:
+
+- **Prior state is read before any is written.** `KnownTemplates` (step 3)
+  must precede `UpsertTemplates` (step 6 or 10). Reversed, every template
+  looks known and the gate never fires again.
+- **Templates are recorded only after a fully successful analysis.**
+  `record()` is the sole caller of `UpsertTemplates`/`UpsertBaselines`, and it
+  runs only on a gated-out bundle or after the LLM call succeeded. Written
+  before a failed call, the retry would find them known, the gate would
+  decline, and the anomaly would be lost permanently. `analyzer_test.go`
+  asserts this.
+
+In order:
 
 1. **Claim the window** (`BeginAnalysis`) — a duplicate is a no-op.
 2. **Register the system** (`UpsertSystem`).
@@ -532,9 +607,7 @@ Three rules are load-bearing:
   no score. A missing individual input makes its penalty term **absent**, which
   is not the same as zero.
 
-The contract clients build against is
-`docs/specs/2026-09-02-sizing-ingest-contract.md`; the reasoning is
-`docs/plans/2026-09-02-fleet-sizing-server.md`.
+The contract clients build against is `docs/api/sizing-ingest.md`.
 
 ### Cohort pass: `baseline.Runner.Run`
 
@@ -618,9 +691,8 @@ for these listeners in the deployed shape), and threatd's write routes still
 authenticate against `ADMIN_API_KEY` and refuse cross-site requests inside the
 app, because Traefik BasicAuth is still Basic auth and a browser replays it on
 a forged cross-site POST exactly as it would replay credentials cached against
-the app directly. See `README.md` § "Operator UI" for routes and exposure
-guidance, and the "what is a finding / template / baseline" explanations in
-`docs/user-guide.md`.
+the app directly. `docs/admin-guide.md` lists every route and the exposure
+rules, and explains what a finding, template and baseline are.
 
 ## Data model and storage
 
@@ -673,14 +745,28 @@ so a reporter's second and third daily sends are byte-identical restatements)
 and `sizing_ingest_daily` **accumulates** (its counters count requests). Each
 table's DDL says which it is, because mixing them would be silent.
 
-Schema portability rules (SQLite today, Postgres later — see `CLAUDE.md` §
-Invariants) apply to every table: ULIDs generated in Go rather than
-autoincrement primary keys, unix-millis integers rather than native date
-types, `ON CONFLICT … DO UPDATE` rather than `INSERT OR REPLACE`, JSON stored
-as `TEXT` and parsed in Go.
+**SQLite is the only backend, and each pipeline owns one file.** A second
+backend was a goal once and is not any more: there is no Postgres store and
+none is planned, and the schema-migration tool built for it was discarded
+unmerged. Two things settled it. One shared migration directory cannot serve
+three independent databases — three `schema_migrations` tables would give one
+version number three meanings — and `CREATE TABLE IF NOT EXISTS` in each
+pipeline's `store.Init` already does the whole job for a schema that only ever
+gains tables. The per-pipeline `Store` interfaces stay, but for a different
+reason than portability: each consumer's narrow interface is what lets its
+tests run with nothing running.
 
-Raw `samples` from the bundle are **never** persisted — the DB and the UI can
-only ever show masked templates.
+Four schema conventions survive from the portable era, and new code should
+keep following them — the schema already satisfies them and rewriting working
+DDL buys nothing:
+
+- IDs generated in Go as ULID, never `AUTOINCREMENT`/`SERIAL`.
+- Timestamps as `INTEGER` unix-millis, never a native date type.
+- `ON CONFLICT … DO UPDATE`, never `INSERT OR REPLACE`.
+- JSON as `TEXT` parsed in Go, never `jsonb` or SQLite `json1`.
+
+Raw `samples` from the bundle are **never** persisted — the database and the
+UI can only ever show masked templates. See "Data protection".
 
 ### The EWMA baseline formula
 
@@ -704,6 +790,22 @@ being precise about, since the name invites confusion:
 - **`ewma_rate` (the baseline itself) is not bounded to `[0, 1]`.** It is in
   the same units as `observed` — a line count for one window — so it can
   legitimately be 0, or in the thousands, depending on the module.
+
+### The empty module is a real bucket
+
+Host-level journal records — `sshd`, `systemd`, `runagent` — carry no module,
+so their `module_id` is the empty string. That is an ordinary bucket
+everywhere: baselines, gating, prompt selection and findings all treat `""`
+as a module name and never skip or reject it. On a live cluster it is the
+stream that dominates the security signal, because `sshd` is where failed
+authentication appears.
+
+Two consequences. `PIPELINE_EXCLUDE_MODULES` cannot reach a host record — an
+empty `module_id` matches no module name — which is why the service axis
+(`PIPELINE_EXCLUDE_SERVICES`, matching `model.ServiceTag` on the masked line)
+exists as a second filter. And the host bucket is the reason the security gate
+condition has to be novelty-scoped: continuous failed-authentication traffic
+means a bucket that is never quiet.
 
 ### Scenarios are not interpreted
 
@@ -729,6 +831,47 @@ Consequences worth knowing:
 - `threat_blocklist.scenarios` and the daily rollup therefore carry whatever
   the fleet actually reported, which is more useful than four buckets and is
   what makes the rollup a real threat-trend asset.
+
+### Local origin only
+
+`origin` must be `crowdsec` or `cscli` — a decision the reporting node made
+from what it observed itself. Decisions carrying CrowdSec's CAPI or community
+origin are dropped at ingest.
+
+The reason is that consensus is the whole product here. CrowdSec's central API
+already distributes a community blocklist to every node that subscribes; if a
+node re-reported what it received from there, three nodes "agreeing" on an
+address could mean nothing more than three nodes having downloaded the same
+list. That is manufactured agreement, and consensus over manufactured
+agreement measures nothing. Threat Shield's value is that it is the fleet's
+own observations, which CAPI does not have: an NS8-specific probe pattern, a
+scenario from a local rule, an address hitting this fleet before it reaches
+anyone's community list.
+
+This is also why the blocklist is served back to nodes as a plain list rather
+than pushed into CrowdSec's own consensus: it is an independent signal, and
+merging the two would destroy the independence that makes it worth having.
+
+### The two consensus rules are not symmetric
+
+Both the blocklist and the allowlist queue count distinct systems, and the
+resemblance is misleading. **No number of requests ever creates an allowlist
+entry.**
+
+| | blocklist promotion | allowlist request |
+|---|---|---|
+| What a report is | a node saying what it observed | a customer stating an opinion |
+| What N of them creates | a published listing | a queue entry, ranked |
+| Who acts on it | the consensus pass, automatically | an operator, explicitly |
+| A wrong outcome | blocks a legitimate address loudly, and expires at `BLOCKLIST_TTL` | exempts an attacker silently, and never expires |
+
+The asymmetry is the failure modes, not the evidence. A wrong blocklist entry
+announces itself — somebody's traffic stops — and repairs itself when the TTL
+lapses. A wrong allowlist entry produces no symptom at all: the address simply
+never appears, and nothing anywhere reports that it was excluded. So the
+blocklist can afford an automatic rule and the allowlist cannot, however
+similar the counting looks. Never add a consensus threshold that promotes a
+request.
 
 ### The allowlist write routes
 
@@ -800,6 +943,75 @@ rule exists to prevent. `sameOriginWrite` requires `Sec-Fetch-Site:
 same-origin`/`none` and an `Origin` matching the host, and allows a request
 carrying neither header, which is a non-browser client with no ambient
 credential to abuse.
+
+## Data protection
+
+Customer log lines and third-party IP addresses both leave the premises they
+originated on, so what the server is allowed to keep is bounded in code, not
+by policy.
+
+**The masking happens at the edge, before anything ships.** The collector
+scrubs and reduces each line to a template. The server never receives a raw
+log line except as a `samples` entry attached to a template, and those exist
+only in the bundle in flight — held in memory for one queue-and-analyse cycle
+and never written to the database or anywhere else durable. What persists from
+a bundle is template text, counts, digests and findings.
+
+**Every pure package that touches third-party or customer data is pure for
+that reason.** `internal/threat` and `internal/sizing` hold no I/O and no
+clock, so every drop rule is a table-driven test with no fixtures. A bug in
+either is a data-protection incident rather than a wrong answer, which is why
+they are separated from the code that stores what they return.
+
+What each pipeline keeps:
+
+| Pipeline | Persisted | Never persisted |
+|---|---|---|
+| logs | masked template text, counts, digest entries, findings | raw `samples`, unmasked lines |
+| Threat Shield | public attacker address, scenario name, ban duration | usernames, URIs, user agents, any other CrowdSec metadata field |
+| fleet sizing | numeric measurements, module family names, instance counts | anything non-numeric in the workload map |
+
+Three rules do the work:
+
+- **Non-public addresses are dropped at ingest, not at read.** Private,
+  loopback, CGNAT, link-local, multicast, ULA, IMDS, benchmark, unspecified
+  and IPv4-mapped addresses never reach the database, so no later query, no
+  export and no bug in a read path can publish one. Documentation ranges are
+  deliberately kept — they are valid public space for this purpose and a live
+  fleet reports them.
+- **The threat metadata allowlist is a fixed, typed set of one field.**
+  `threat.metadata` returns `duration_seconds` and nothing else. No
+  free-text field but the scenario itself reaches the store: no usernames (a
+  hash of `root` is trivially reversible and carries no analytic value), no
+  URIs, no user agents.
+- **"Number" is the whole privacy control on the sizing workload map.** The
+  map is an open `string → number` vocabulary, and the value type is what
+  protects it: an FQDN, an IP address, a hostname or a DMI serial cannot be
+  encoded in a float. That is stronger than a field blocklist somebody has to
+  maintain, and it is why the vocabulary can stay open. Caps bound shape,
+  never vocabulary, and truncate rather than reject.
+
+Free text that does survive — the scenario name, an allowlist reason —
+goes through `threat.CleanText`, which strips control characters and caps the
+length, because it reaches an HTML page and a log line.
+
+**Secrets live in the environment and nowhere else.** `LLM_API_KEY`,
+`AUTH_PEPPER` and `ADMIN_API_KEY` are never written to a database and never
+logged. The request logger never reads the `Authorization` header — it records
+only whether one was present. An authentication failure names the presented
+`system_id` and never the secret. `LLM_API_KEY` appears in a log line only as
+`llm_api_key_set=true`, and each operator UI status page builds its
+configuration table from an explicit field list rather than iterating
+`os.Environ()`, so a secret added to the process environment later cannot
+appear on an unauthenticated page by accident.
+
+**The auth cache holds credential HMACs, never credentials.** Entries are
+keyed by `HMAC(AUTH_PEPPER, "system_id:secret")`, so the in-memory cache
+cannot be turned back into a list of working credentials.
+
+**What reaches the LLM provider** is the rendered prompt: masked templates,
+counts, module names, and the summaries of currently-open findings. No raw
+line, no address, no credential.
 
 ## Finding identity: the fingerprint
 
@@ -969,6 +1181,48 @@ A suppressed window still records its templates and baselines. Skipping that
 would leave the system never learning what it saw, so every later window would
 look novel — the cap would make the next day more expensive, not less.
 
+## Degradation and failure modes
+
+Every dependency failure is designed to cost one capability rather than the
+run.
+
+| Failure | Consequence |
+|---|---|
+| edge sends no `expected` | the server's EWMA baseline covers the deviation condition |
+| validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window |
+| `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
+| LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
+| LLM provider returns a permanent error | the window is finalized and closed — retrying would hit the same wall forever |
+| spend cap reached | the gate narrows to security-only. Genuinely cheap, because the security condition is novelty-scoped |
+| per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates and baselines are still recorded |
+| consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
+| threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
+| process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |
+
+**The thundering herd is the one failure that is fleet-wide by construction.**
+Two events can make every node's templates novel in the same window: a
+fleet-wide collector upgrade that changes the masking rules, and a change to
+the prompt or fingerprint formula. Either puts every bundle of one window
+through a gate whose novelty condition is satisfied for all of them.
+
+Three defences carry it, and all three are required:
+
+- `LLM_MAX_CONCURRENCY` bounds calls in flight; the excess waits in the queue,
+  and once `QUEUE_SIZE` is full ingest answers `503` and the edge backs off
+  rather than the queue growing without limit.
+- `LLM_DAILY_SPEND_CAP_USD` degrades the gate to security-only on breach.
+- `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` is the one that makes the worst case
+  arithmetic rather than emergent: whatever the gate concludes, one system
+  cannot exceed its own cap.
+
+Every ledger-derived limit counts from the start of the UTC day and is read
+back from the `analyses` table, never from an in-process counter — a counter
+resets on restart, which would make a crash loop a way to spend without limit.
+
+A fourth defence the design calls for is **not built**: there is no
+per-system ingest rate limit, so nothing but `QUEUE_SIZE` stops one
+misbehaving node from filling the queue on its own. See "Known limits".
+
 ## Determinism
 
 Identical bundle input must produce byte-identical prompts and stable gate
@@ -1082,7 +1336,7 @@ tests and local development, no longer exists: a pipeline no longer holds an
 
 Each binary's `main.go` (`cmd/authd`, `cmd/insightsd`, `cmd/threatd`,
 `cmd/sizingd`) is the only place that binary reads environment variables (see
-`README.md` for the full table, split by binary) and the only place its own
+`docs/admin-guide.md` for the full table, split by binary) and the only place its own
 packages are constructed and connected — there is no shared wiring code
 between binaries beyond the `internal/platform` packages themselves. Each
 pipeline binary also builds its operator UI's `ConfigItem` list *explicitly*,
@@ -1107,11 +1361,20 @@ just the HTTP server.
 
 ## Testing strategy
 
-See `CLAUDE.md` § "Testing expectations" for the specifics per package. The
-short version: `gate`/`fingerprint`/`prompt` are pure and table/golden-file
-tested with no fixtures; `analyzer` runs the real pipeline against a stub LLM
-and a temp-file SQLite store, and its tests are what encode the step-order
-invariants above as executable checks rather than just comments.
+`gate`, `fingerprint` and `prompt` are pure, so they are table-driven and
+golden-file tested with no fixtures: every gate condition alone and in
+combination, absent `expected` falling back to EWMA, fingerprint stability
+under evidence reordering and distinctness across systems and categories, and
+byte-identical prompt output for identical input. `analyzer` runs the real
+pipeline against a stub LLM and a temp-file SQLite store, and its tests are
+what encode the step-order invariants above as executable checks rather than
+comments.
+
+Three tests are the executable form of a rule that must never be relaxed, and
+are named so that deleting one is visible: `TestSanitizeAcceptsEveryScenario`
+(no scenario allowlist), `TestSanitizeAcceptsEveryMetricKey` and
+`TestSanitizeRejectsEveryNonNumericValue` (open metric vocabulary, numbers as
+the privacy control).
 
 Threat Shield follows the same split. `threat` is pure and carries the deepest
 table in the repository — every IP class, every origin, every malformed field
@@ -1138,3 +1401,15 @@ reimplements the query.
   identity behind it, so the HTTP Basic username recorded on a write — the
   same value Traefik's htpasswd layer would show — is a readable trail, not an
   authorization boundary: anyone with the key can claim any name.
+- **No per-system ingest rate limit.** The design calls for one (roughly 10
+  bundles/hour burst) so a single misbehaving node cannot fill the queue by
+  itself. It is not built: `QUEUE_SIZE` and the per-system daily call cap are
+  the only bounds, so such a node can crowd out others' windows until it
+  stops, without ever exceeding its own spend cap.
+- **The fleet sizing pipeline has no reporter.** `sizingd` and everything
+  downstream of it — the pressure score, the cohort pass, the three UI pages —
+  are exercised only by their tests, because no NS8 cluster posts a report
+  yet. Treat it as a dev preview.
+- **Sizing thresholds are uncalibrated.** The pressure ramps and the cohort
+  floors are reasoned defaults, not values fitted to fleet data, and cannot be
+  calibrated until roughly 30 days of real reports exist.

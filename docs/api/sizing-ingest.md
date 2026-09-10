@@ -6,9 +6,18 @@
 **Primary client:** `ns8-core` (`cluster/bin/send-sizing-report`, leader only)
 
 This is the wire contract between a NethServer 8 cluster and the fleet-sizing
-pipeline in `nethesis-insights`. It is the authority for anything a client needs
-to build a request; the reasoning behind each rule is in
-`docs/plans/2026-09-02-fleet-sizing-server.md`.
+pipeline in `nethesis-insights`. It is the authority for anything a client
+needs to build a request. The reasoning behind each rule is in
+`docs/architecture.md`; the drop rules it describes are implemented in
+`internal/sizing/sanitize.go` and the two must be kept in step.
+
+## Contents
+
+- [Authentication](#authentication)
+- [The unit is a cluster-day, and it is absolute](#the-unit-is-a-cluster-day-and-it-is-absolute)
+- [Request](#request)
+- [Response](#response)
+- [Client rules](#client-rules)
 
 Sizing is a **third independent pipeline**, beside the log-bundle pipeline and
 Threat Shield — its own binary (`sizingd`), its own SQLite file. It shares
