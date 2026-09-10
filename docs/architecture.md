@@ -92,6 +92,8 @@ llm  queue  budget          logs only; interfaces where I/O is needed
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 baseline                    fleet-sizing cohort pass; same shape as blocklist
+maint                       insightsd's housekeeping pass; same shape again,
+                             depends only on store/logs
 
 store/logs  store/threat  store/sizing   one store package per pipeline,
                                           each its own SQLite file
@@ -117,9 +119,10 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
-| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. |
+| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneFindings`/`PruneAnalyses`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. |
+| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings` and `analyses` against their own independent retention windows (`maint.Config`). Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
@@ -135,7 +138,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /healthz`. Owns no store and no UI. |
-| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs` and the bundle pipeline together, runs graceful shutdown. |
+| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
 
@@ -259,6 +262,88 @@ requirement" for the two rules that must never move, and why. In order:
 Authenticates the same way as ingest, then `store.ListFindings` returns that
 system's findings (optionally filtered by `since`/`status`), sorted by
 `model.SortFindings` — severity descending, then most-recently-seen first.
+
+### Maintenance pass: `maint.Runner.Run`
+
+Driven by a ticker in `cmd/insightsd` at `MAINT_INTERVAL` (default 10m), with
+one pass run immediately at startup so a restart does not leave months of
+unpruned backlog sitting until the first tick — the same reasoning as
+`blocklist.Runner`'s and `baseline.Runner`'s own immediate-first-pass loops.
+insightsd had no housekeeping at all before this: `internal/store/logs`
+carried zero `DELETE` statements, so with the fleet feeding it every 15
+minutes, `system_templates`, `findings` and `analyses` all grew without
+bound.
+
+Unlike the consensus and cohort passes, its three prunes have **no ordering
+constraint** between them — neither dictates the other's correctness, because
+neither threat_daily_stats' nor sizing_node_monthly's situation applies here:
+the logs pipeline keeps no rollup table for any of the three (deliberately
+out of scope; see below), so there is nothing a prune could run ahead of and
+invalidate. `maint.Runner.Run` therefore just prunes all three independently
+and logs, rather than aborts, on a failure in any one — pruning is this
+pass's entire job, not a secondary step guarding a published artifact the
+way blocklist's and baseline's rollup/prune steps are.
+
+```
+1. PruneTemplates(now - TEMPLATE_RETENTION)
+2. PruneFindings(now - FINDING_RETENTION)   -- open findings are never candidates
+3. PruneAnalyses(now - ANALYSIS_RETENTION)
+```
+
+Each call is itself internally batched (`logsstore.pruneBatchSize`, 5000 rows
+per `DELETE`, looped with the write lock released between batches) rather
+than one unbounded statement — see `internal/store/logs/prune.go`'s doc for
+why: the first pass against a live deployment can face hundreds of thousands
+of `analyses` rows alone, and one long `DELETE` holding the write mutex
+(`SetMaxOpenConns(1)` plus `sqlitex.DB`'s lock) for as long as that takes
+would stall the ingest queue's workers behind it for the whole duration.
+
+Three retention defaults, each a deliberate trade-off (see `maint.Config`'s
+doc and the matching comments in `cmd/insightsd/main.go` for the full
+reasoning):
+
+- **`TEMPLATE_RETENTION` (400 days) is the most sensitive of the three.**
+  `system_templates` is the gate's "have I seen this template before"
+  memory — `gate.Evaluate` fires `new_templates` when a line's canonical key
+  is absent from it. Pruned too eagerly, a template that recurs less often
+  than the retention window (a quarterly certificate renewal, a yearly
+  license check) reads as brand new every time it recurs and pays for an LLM
+  call that a correctly-remembered system would not have made. The default is
+  chosen to comfortably clear a full year, not just the quarterly case most
+  often named when this kind of retention is reviewed.
+  `module_baselines` describes the same `(system_id, module_id)` buckets but
+  is deliberately **not** pruned by this pass at all: unlike
+  `system_templates` it does not grow with every distinct template ever
+  seen, only with the number of distinct buckets a system has (each row is
+  upserted in place, never appended), so it has no comparable unbounded-growth
+  problem. If a future change does prune it, its retention must be at least
+  `TEMPLATE_RETENTION` — the two describe the same buckets, and a baseline
+  that outlives the templates computed from it would silently orphan them.
+- **`FINDING_RETENTION` (180 days) only costs continuity.** A finding is a
+  candidate only once it is not open (`findings.status != model.StatusOpen`
+  — currently that means `stale`; an open finding is never a candidate
+  regardless of age). Past this window, a recurrence of the same fingerprint
+  finds no prior row and reports `OutcomeInserted` instead of
+  `OutcomeReopened`: `occurrence_count` and `first_seen` restart, but nothing
+  about cost or gating is affected — unlike `TEMPLATE_RETENTION`, this is a
+  display cost only, which is why it is allowed a shorter default.
+- **`ANALYSIS_RETENTION` (90 days) is a hard, permanent loss, and is the one
+  to read carefully before shortening.** `analyses` is both the cost ledger
+  and the gate-reason record, and it is what the operator UI's `/cost` and
+  `/gate` pages roll up. There is **no rollup table** for this pipeline
+  (unlike `threat_daily_stats` and `sizing_node_monthly`, each written
+  before its own prune specifically so a dropped day's history survives it —
+  building one here was considered and is explicitly out of scope for this
+  change). So every row `PruneAnalyses` removes is gone for good:
+  `CostRollup` has **no time bound at all** (`internal/store/logs/ui.go`), so
+  `/cost`'s spend history silently truncates at `ANALYSIS_RETENTION`, and
+  `GateRollup` already windows to 7 days by default on `/gate`, so as long as
+  `ANALYSIS_RETENTION` comfortably exceeds that the page itself is
+  unaffected — but the option to look further back is gone the moment a row
+  is pruned. 90 days is chosen to keep a quarter of spend trend on `/cost`
+  while bounding this table, which is the pipeline's largest and
+  fastest-growing: one row per system per 15-minute window, whether or not
+  the gate fired.
 
 ### Threat ingest: `POST /v1/events` (public path `/blocklist/v1/events`)
 
@@ -526,10 +611,10 @@ without a goroutine to leak.
 | Table | Purpose |
 |---|---|
 | `systems` | One row per system seen; first/last-seen timestamps, collector version. |
-| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. |
-| `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. |
-| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. |
-| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. |
+| `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. Pruned past `TEMPLATE_RETENTION` by `maint.Runner`; see "Maintenance pass" for why that default is 400 days and not shorter. |
+| `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. Deliberately **not** pruned by `maint.Runner` — it does not grow per event the way `system_templates` and `analyses` do, only with the number of distinct buckets a system has, so it has no comparable backlog problem. |
+| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
+| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
@@ -989,11 +1074,15 @@ accepting HTTP, shut down both that binary's HTTP servers (API and UI), *then*
 drain whatever in-flight work it owns — `insightsd` drains the queue, because
 buffered bundles were already acknowledged to an edge that won't resend them
 and must still be processed before exit — and only then cancel and wait for
-that binary's own background pass (the consensus loop in `threatd`, the cohort
-pass in `sizingd`). The pass loop goes last because it holds no acknowledged
-work: a cancelled pass simply leaves the previous snapshot in place, which is
-its designed failure mode anyway. `authd` has no pass loop and no queue, so its
-shutdown is just the HTTP server.
+that binary's own background pass(es) (the consensus loop in `threatd`, the
+cohort pass in `sizingd`, and in `insightsd` both the queue drain *and* the
+`maint` housekeeping loop, the latter stopped last of everything). Every pass
+loop goes last because none of them holds acknowledged work: a cancelled
+consensus or cohort pass simply leaves the previous snapshot in place, and a
+cancelled maintenance pass simply leaves whatever it has not pruned yet for
+the next run — in each case exactly its designed failure mode, not a special
+case for shutdown. `authd` has no pass loop and no queue, so its shutdown is
+just the HTTP server.
 
 ## Testing strategy
 

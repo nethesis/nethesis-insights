@@ -28,6 +28,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
+	"github.com/nethesis/nethesis-insights/internal/maint"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
@@ -219,6 +220,42 @@ func main() {
 	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
 	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
 
+	// Housekeeping (internal/maint). insightsd has never pruned anything
+	// before this, so these three retention windows are each a deliberate
+	// trade-off -- see maint.Config's doc for the full reasoning behind
+	// every default; the short version is repeated at each variable below.
+	//
+	// TEMPLATE_RETENTION is the gate's novelty memory (system_templates).
+	// Pruned too eagerly, a resurrected template reads as new and
+	// manufactures an LLM call for a line that was never actually novel, so
+	// this must comfortably outlive the longest natural gap between
+	// occurrences of a real recurring line -- a monthly cron, a quarterly
+	// certificate renewal, even a yearly one. 400 days clears a full year
+	// with margin.
+	templateRetention := getenvDuration("TEMPLATE_RETENTION", 400*24*time.Hour)
+	// FINDING_RETENTION only costs continuity -- a recurrence past this
+	// window reads as a brand-new finding (OutcomeInserted) rather than a
+	// reopen, resetting occurrence_count and first_seen -- never an extra
+	// LLM call, so it can be shorter than TEMPLATE_RETENTION. 180 days.
+	findingRetention := getenvDuration("FINDING_RETENTION", 180*24*time.Hour)
+	// ANALYSIS_RETENTION prunes the cost/gate-reason ledger. There is no
+	// rollup table for this pipeline (unlike threatd's threat_daily_stats or
+	// sizingd's sizing_node_monthly), so every row pruned here is gone for
+	// good: the operator UI's /cost page (CostRollup has no time bound at
+	// all) and /gate page (GateRollup already windows to 7 days by default)
+	// both silently lose history older than this. 90 days keeps a quarter
+	// of spend trend, which is this table's biggest and fastest-growing --
+	// one row per system per 15-minute window, gated or not.
+	analysisRetention := getenvDuration("ANALYSIS_RETENTION", 90*24*time.Hour)
+	// MAINT_INTERVAL is how often the prune pass runs. Each prune call is
+	// itself internally batched (logsstore.pruneBatchSize) and releases the
+	// write lock between batches, so running this often is cheap; a short
+	// interval instead matters for working off a large first-run backlog
+	// (see logsstore.pruneBatchSize's doc) without waiting a full day
+	// between passes, unlike sizingd's hourly cohort pass whose inputs are
+	// whole days and cannot answer differently more often.
+	maintInterval := getenvDuration("MAINT_INTERVAL", 10*time.Minute)
+
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
@@ -277,6 +314,15 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 
+	// The housekeeping pass: no LLM, no gate, no fingerprint -- just pruning
+	// system_templates, findings and analyses. See internal/maint's doc and
+	// the retention comments above for why each default is what it is.
+	maintRunner := maint.New(s, maint.Config{
+		TemplateRetention: templateRetention,
+		FindingRetention:  findingRetention,
+		AnalysisRetention: analysisRetention,
+	})
+
 	handler := logsapi.NewServer(q, s, trusted, logsapi.Config{
 		ExcludeModules:  excludeModules,
 		ExcludeServices: excludeServices,
@@ -321,6 +367,10 @@ func main() {
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
+		{Name: "TEMPLATE_RETENTION", Value: templateRetention.String()},
+		{Name: "FINDING_RETENTION", Value: findingRetention.String()},
+		{Name: "ANALYSIS_RETENTION", Value: analysisRetention.String()},
+		{Name: "MAINT_INTERVAL", Value: maintInterval.String()},
 	}
 
 	// BuildInfo reads runtime/debug once here, not per request. q satisfies
@@ -374,6 +424,13 @@ func main() {
 		}()
 	}
 
+	// The maint loop is started after the listeners, like blocklist's and
+	// baseline's, so a slow first pass cannot delay readiness. The first
+	// pass runs immediately rather than one interval in, so a restart does
+	// not leave months of backlog unpruned until MAINT_INTERVAL elapses.
+	maintCtx, stopMaint := context.WithCancel(context.Background())
+	maintDone := maintRunner.RunLoop(maintCtx, maintInterval)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -394,4 +451,12 @@ func main() {
 	// acknowledged to an edge that will not send it again.
 	q.Stop()
 	slog.Info("queue drained")
+
+	// The maint loop holds no acknowledged work -- a cancelled pass just
+	// leaves whatever it has not pruned yet for the next run -- so it is
+	// stopped last and simply waited on, the same ordering threatd and
+	// sizingd give their own housekeeping loops.
+	stopMaint()
+	<-maintDone
+	slog.Info("maintenance loop stopped")
 }

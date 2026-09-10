@@ -229,6 +229,10 @@ The forward-auth cache Traefik calls before any pipeline sees a request. See
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
 | `ANALYSIS_TIMEOUT` | ceiling for one bundle's analysis (default `5m`) |
+| `TEMPLATE_RETENTION` | how long a `system_templates` row survives with no fresh sighting (default `9600h`, 400 days) — this is the gate's "have I seen this before" memory, so it must comfortably outlive the longest gap a real recurring line can have (a quarterly certificate renewal, even a yearly job) or a resurrected template pays for an LLM call as if it were new |
+| `FINDING_RETENTION` | how long a non-open (stale) `findings` row survives (default `4320h`, 180 days); an open finding is never pruned regardless of age. Past this window a recurrence reads as a brand-new finding rather than a reopen — a continuity cost only, never an extra LLM call, which is why this can be shorter than `TEMPLATE_RETENTION` |
+| `ANALYSIS_RETENTION` | how long an `analyses` (cost/gate-reason ledger) row is kept (default `2160h`, 90 days); there is no rollup table for this pipeline, so pruned rows are gone for good — the operator UI's `/cost` page (unbounded) and `/gate` page (already windowed to 7 days by default) both lose history older than this |
+| `MAINT_INTERVAL` | how often the housekeeping pass prunes the three tables above (default `10m`); each prune is itself internally batched, so running this often is cheap and lets a large first-run backlog work itself off quickly instead of waiting a day between passes |
 
 ### `threatd`
 

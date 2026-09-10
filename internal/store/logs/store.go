@@ -153,6 +153,13 @@ func (s *Store) Init(ctx context.Context) error {
 			prompt_version TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_system_fingerprint ON findings(system_id, fingerprint)`,
+		// Supports PruneTemplates' `last_seen < ?` scan (see prune.go) --
+		// without it, every maint pass would be a full table scan of the
+		// gate's novelty memory.
+		`CREATE INDEX IF NOT EXISTS idx_system_templates_last_seen ON system_templates(last_seen)`,
+		// Supports PruneFindings' `status != ? AND last_seen < ?` scan, and
+		// happens to help MarkStale's `status = ?` filter too.
+		`CREATE INDEX IF NOT EXISTS idx_findings_status_last_seen ON findings(status, last_seen)`,
 		`CREATE TABLE IF NOT EXISTS analyses (
 			id TEXT PRIMARY KEY,
 			system_id TEXT,
@@ -173,6 +180,10 @@ func (s *Store) Init(ctx context.Context) error {
 			created_at INTEGER
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_analyses_system_window ON analyses(system_id, window_start)`,
+		// Supports PruneAnalyses' `created_at < ?` scan, and also
+		// DailySpendMicros/SystemCallsSince/CostRollup/GateRollup, all of
+		// which already filter or group on this column.
+		`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at)`,
 	}
 
 	for _, stmt := range stmts {
