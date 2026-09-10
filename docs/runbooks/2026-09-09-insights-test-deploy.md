@@ -965,10 +965,21 @@ credential you know is good is §4, not auth.
 curl -sS -u "$CRED" -o /dev/null -w '%{http_code}\n' https://${INSIGHTS_HOST}/blocklist/v1/feed
 ```
 
-Expect **503** on a fresh database. A `200` with an empty body would be the
-"never serve blank" invariant broken, and every client importing the feed would read it
-as "no threats". After the first successful pass this becomes 200 with a snapshot and a
-`generated_at`; re-run it then and confirm the transition rather than only the 503.
+Expect **200 with a real document** — not the 503, and not a blank body. This
+was measured on the live host on 2026-09-10 by deleting `insights-threat` and racing a
+sub-2 ms in-container polling loop against the restart: the listener came up at
+`09:11:27.503Z`, the first consensus pass finished at `.513Z`, and the first request
+ever logged arrived at `.516Z` and was answered `200`. **Zero** of the ~102,000 feed
+requests logged that run saw a 503. Against an empty database the unready window is
+about ten milliseconds, so nothing external can land inside it.
+
+So the 503 branch is real (`handleFeed` checks `s.snap == nil || !s.snap.Ready()`
+before touching the document) and unit-tested, but it is not reachable by this smoke
+test, and a 200 here is the pass condition rather than a failure. What you are actually
+checking is the invariant underneath it: the body must **never** be blank. An empty
+200 would be read as "no threats" by every client importing the feed. A fresh database
+gives `entries: 0` inside a real document — the `# nethesis threat shield v1` banner, a
+`generated:` line and the rule line — and that is correct output, not an empty one.
 
 **5. Each operator UI is reachable and asks for credentials.**
 

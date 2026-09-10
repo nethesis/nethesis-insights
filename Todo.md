@@ -72,17 +72,39 @@ Note for whoever writes the sizing reporter: follow the same rule. The server
 root goes in configuration, the pipeline prefix belongs to the endpoint, and
 `/sizing/v1/reports` is appended by the client.
 
-## 2. The one test never proven on hardware
+## 2. The one test never proven on hardware — closed, as unobservable
 
-Everything else in the runbook passed. The `503`-before-the-first-consensus-pass
-branch was never observed live, because `threatd` had already completed a pass
-by the time the feed was called — it correctly returned a non-blank document
-with `entries: 0`. Covered by its unit test only.
+The `503`-before-the-first-consensus-pass branch was chased properly on
+2026-09-10 and **cannot be caught on this host**. `insights-threat` was deleted
+and a sub-2 ms in-container polling loop was started before `threatd` was, from
+a sibling container in the pod. threatd's own log gives the timing: listener up
+at `09:11:27.503Z`, first consensus pass done at `.513Z`, first request ever
+logged at `.516Z` — a `200`. Zero of the ~102,000 feed requests logged that run
+saw a 503.
 
-- [ ] Catch it on a genuinely cold start, if the volume is ever rebuilt. Still
-      open after the 2026-09-10 image redeploy: restarting the containers does
-      not rebuild the volumes, so `threatd` came back to an existing database
-      and completed a pass as before.
+Against an empty database the unready window is ~10 ms, so nothing external can
+land inside it. The branch is real (`handleFeed` checks
+`s.snap == nil || !s.snap.Ready()` first) and unit-tested; it would only become
+observable with a slow first pass, which means a large pre-existing database —
+the opposite of the wipe-and-restart this scenario produces. Not worth
+engineering a slow pass to prove a branch a unit test already covers.
+
+Runbook smoke test 4 said "expect 503 on a fresh database" and has been
+corrected: a fresh database gives `200` with `entries: 0` inside a real
+document, and the invariant to check is that the body is never **blank**.
+
+Two things learned in passing, both worth keeping:
+
+- **threatd's own auth applies in-pod too.** A bare
+  `podman exec insightsd wget http://127.0.0.1:9605/v1/feed` returns `401`, not
+  the feed: `handleFeed` calls `httpx.SystemID`, which needs a Basic header with
+  a non-empty username (the password is unchecked once `RemoteAddr` is inside
+  `TRUSTED_PROXY_CIDRS`). Bypassing Traefik bypasses the proxy, not the app. The
+  UI ports (9596/9606/9616) are the ones with no app-layer auth.
+- **Nothing reaps zombies in these containers.** The polling loop left two
+  defunct `wget` processes reparented to PID 1, which is the Go binary and does
+  not reap. Harmless at two, and cleared by a restart, but worth knowing before
+  anyone runs something fork-heavy inside one of these containers.
 
 The credential-dependent tests were closed against a local reproduction using
 the real images, the real rendered Traefik config and the real pod topology,
