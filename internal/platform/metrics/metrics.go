@@ -185,7 +185,7 @@ func (h *HTTP) Observe(method, route string, status int, duration time.Duration)
 // GaugeFuncs evaluated at scrape time. No bookkeeping, no polling loop: the
 // gauge simply calls the accessor when Prometheus asks. name distinguishes
 // the queue when a binary ever has more than one; today insightsd passes
-// "bundle" and threatd passes "threat_ingest".
+// "bundle" and threatd passes "threat_events".
 func RegisterQueueGauges(reg *Registry, name string, depth, capacity, workers func() int) {
 	labels := prometheus.Labels{"queue": name}
 	reg.prefixed.MustRegister(

@@ -573,7 +573,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | Metric (shown with the `insightsd_` prefix) | Binary | What it means |
 |---|---|---|
 | `<svc>_http_requests_total{method,route,status}`, `<svc>_http_request_duration_seconds` | all four | every request, labeled by the registered route pattern — never the raw path, which would be unbounded |
-| `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_ingest"`) | the bundle/ingest queue's live state |
+| `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_events"`) | the bundle/ingest queue's live state |
 | `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |

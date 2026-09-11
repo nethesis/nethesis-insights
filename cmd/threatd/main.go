@@ -206,7 +206,7 @@ func main() {
 	ingestQueue := ingestq.New(threatQueueSize, threatQueueTimeout, threatapi.NewConsumer(s))
 	ingestQueue.Metrics = &ingestq.Metrics{Full: ingestFullMetrics.Counter("threat_events")}
 	ingestQueue.Start(threatQueueWorkers)
-	metrics.RegisterQueueGauges(reg, "threat_ingest", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
+	metrics.RegisterQueueGauges(reg, "threat_events", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
 		MaxDecisions:               threatMaxDecisions,
