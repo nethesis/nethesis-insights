@@ -31,7 +31,21 @@ Pod=insights.pod
 Volume=insights-grafana.volume:/var/lib/grafana
 # :z relabels the bind-mounted host directory for SELinux (Enforcing on the
 # target); ro because provisioning is read at startup and never written back.
-Volume=/etc/insights-dev/grafana/provisioning:/etc/grafana/provisioning:z,ro
+#
+# The two provisioning SUBDIRECTORIES are mounted individually rather than
+# one mount over /etc/grafana/provisioning, which is what the obvious
+# arrangement would be. The image ships six directories there --
+# access-control, alerting, dashboards, datasources, notifiers, plugins --
+# and Grafana reads all six at startup; a single mount hides the four we do
+# not supply, and Grafana then logs a level=error for each missing one on
+# every boot. Nothing breaks, but a permanent pair of red herrings in the log
+# is exactly what makes a real provisioning error easy to miss.
+Volume=/etc/insights-dev/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:z,ro
+Volume=/etc/insights-dev/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:z,ro
+# The dashboard JSON, outside provisioning/ entirely because the dashboard
+# provider scans its path for *.json and the provider YAML that points at it
+# must not be sitting in the directory being scanned.
+Volume=/etc/insights-dev/grafana/dashboards:/etc/grafana/dashboards:z,ro
 # GF_SERVER_ROOT_URL (rendered from INSIGHTS_HOST) and the admin credential
 # both live here, written by deploy/dev/render-dev.sh at mode 0600. The
 # password is a secret and is not in the repository, the same rule the four

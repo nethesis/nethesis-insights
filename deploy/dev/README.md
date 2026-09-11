@@ -34,9 +34,54 @@ or a certificate problem cannot break local monitoring. The job names match
 the sample scrape config in the administrator guide exactly, so a dashboard
 or alert written against the documented names works here unchanged.
 
-Grafana gets the Prometheus datasource by provisioning, not by hand, so it
-survives a wiped volume and cannot drift from the URL Prometheus actually
-serves on.
+Grafana gets the Prometheus datasource **and one dashboard** by provisioning,
+not by hand, so both survive a wiped volume and cannot drift from what the
+containers actually export.
+
+## The dashboard
+
+`grafana/dashboards/nethesis-insights.json`, provisioned read-only
+(`allowUiUpdates: false`), covers every metric the five containers export in
+eight rows: **Overview** (scrape targets, pass staleness, process uptime),
+**HTTP** (request rate, error responses, p95 latency), **Log pipeline**
+(bundle queue, LLM calls by outcome, model spend, budget rejections),
+**Threat Shield** (ingest queue, batches shed at 503), **Forward auth**
+(cache hit/miss, upstream validator results), **Background passes**
+(failures, runs, p95 duration), **Proxy** (response codes, traffic by routed
+backend, certificate expiry, open connections) and **Go runtime** (memory,
+CPU, goroutines).
+
+Because it is provisioned read-only, editing a panel in the browser offers
+"Save as" a copy rather than silently overwriting the file — so the running
+dashboard and git cannot disagree. Iterate by editing the JSON here and
+re-installing it; Grafana re-reads the file without a restart.
+
+Two conventions in it are deliberate and worth keeping:
+
+**Colour means one thing per panel — identity or state, never both.** The
+four services are fixed hues (`logs` blue `#1F60C4`, `threat` orange
+`#FF780A`, `sizing` teal `#009CA6`, `authd` gold `#946200`), pinned per series
+name so that filtering one out never repaints the others. Outcome series —
+`success`/`failure`, `hit`/`miss`, `valid`/`invalid`/`unavailable`, HTTP
+status classes — use green/yellow/red instead, and no panel mixes the two
+vocabularies.
+
+That set of four is not a taste call: it is the largest set in this lightness
+band where **every** pair stays distinguishable under simulated colour-vision
+deficiency (worst pair ΔE 13.6 protan, normal-vision floor 18.8). Five does
+not exist — searching two separate hue pools found no five-colour set that
+clears the bar, because protanopia collapses the red–orange–green axis and
+deuteranopia collapses blue–purple. This is why Traefik and Prometheus are
+**not** series in the per-service panels: adding a fifth and sixth hue would
+quietly make two of the four services indistinguishable to a colourblind
+reader. Traefik gets its own single-series panels instead. If you add a
+service, facet it into its own panel rather than adding a hue.
+
+The palette is tuned for Grafana's **light** theme, where it passes all six
+of the checks in the `dataviz` skill's `validate_palette.js`. Dark theme keeps
+every separation property — those depend on the hues, not the background —
+but sits below the ideal lightness band, since Grafana's JSON has no way to
+express a per-theme colour and the two bands barely overlap.
 
 ## How it stays out of production
 
@@ -70,6 +115,10 @@ required rather than a warm-up.
         /etc/insights-dev/prometheus.yml
     install -D -m 644 deploy/dev/grafana/provisioning/datasources/prometheus.yml \
         /etc/insights-dev/grafana/provisioning/datasources/prometheus.yml
+    install -D -m 644 deploy/dev/grafana/provisioning/dashboards/dashboards.yml \
+        /etc/insights-dev/grafana/provisioning/dashboards/dashboards.yml
+    install -D -m 644 deploy/dev/grafana/dashboards/nethesis-insights.json \
+        /etc/insights-dev/grafana/dashboards/nethesis-insights.json
 
 ### 3. Install the units
 
@@ -128,9 +177,10 @@ Finally, the routed paths:
 
 `401` on Prometheus is correct: the route works and Traefik is asking for the
 operator credential. Sign in to Grafana as `admin` with the password from
-step 4; the `Prometheus` datasource is already there, and
-`Connections → Data sources → Prometheus → Test` should pass. Every target
-in `/prometheus/targets` should read `UP`.
+step 4; the `Prometheus` datasource is already there,
+`Connections → Data sources → Prometheus → Test` should pass, and the
+**Nethesis Insights** dashboard should be listed with every panel drawing.
+Every target in `/prometheus/targets` should read `UP`.
 
 ## Removing
 

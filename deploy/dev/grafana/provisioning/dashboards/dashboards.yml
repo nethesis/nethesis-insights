@@ -1,0 +1,32 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Grafana dashboard provisioning for the DEVELOPMENT monitoring stack only --
+# see deploy/dev/README.md. Installed to
+# /etc/insights-dev/grafana/provisioning/dashboards/dashboards.yml.
+#
+# The dashboard JSON is provisioned rather than imported by hand for the same
+# reason the datasource is: it is then a property of the deployment, comes back
+# after a wiped volume, and -- because it lives in git -- a change to it is
+# reviewable as a diff instead of being a thing somebody did in a browser once.
+apiVersion: 1
+
+providers:
+  - name: nethesis-insights
+    type: file
+    # allowUiUpdates is false, so Grafana serves these read-only and re-reads
+    # the file on disk. Editing a panel in the browser is still possible --
+    # Grafana offers "Save As" a copy -- but it cannot silently overwrite the
+    # provisioned original and leave git and the running dashboard disagreeing.
+    # Iterate by editing the JSON in the repository and re-installing it.
+    allowUiUpdates: false
+    # A separate mount from provisioning/, not a subdirectory of it: this
+    # provider scans its path for *.json, and pointing it at a directory that
+    # also holds provider YAML invites a future file to be read by the wrong
+    # one.
+    options:
+      path: /etc/grafana/dashboards
+      # Keeps the dashboard at the top level rather than inventing a folder
+      # per provider -- there is exactly one dashboard here.
+      foldersFromFilesStructure: false
