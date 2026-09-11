@@ -6,6 +6,7 @@ package svc
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,7 +29,7 @@ func (p *recordingPass) Run(_ context.Context, now int64) error {
 func TestRunPassLoopRunsImmediately(t *testing.T) {
 	p := &recordingPass{calls: make(chan int64, 10)}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := RunPassLoop(ctx, "test", p, time.Hour)
+	done := RunPassLoop(ctx, "test", p, time.Hour, nil)
 
 	select {
 	case <-p.calls:
@@ -44,7 +45,7 @@ func TestRunPassLoopRunsImmediately(t *testing.T) {
 func TestRunPassLoopRunsOnTicker(t *testing.T) {
 	p := &recordingPass{calls: make(chan int64, 10)}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := RunPassLoop(ctx, "test", p, 10*time.Millisecond)
+	done := RunPassLoop(ctx, "test", p, 10*time.Millisecond, nil)
 
 	<-p.calls // the immediate run
 	select {
@@ -62,7 +63,7 @@ func TestRunPassLoopRunsOnTicker(t *testing.T) {
 func TestRunPassLoopStopsOnCancel(t *testing.T) {
 	p := &recordingPass{calls: make(chan int64, 10)}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := RunPassLoop(ctx, "test", p, 5*time.Millisecond)
+	done := RunPassLoop(ctx, "test", p, 5*time.Millisecond, nil)
 	<-p.calls // the immediate run
 
 	cancel()
@@ -78,7 +79,7 @@ func TestRunPassLoopStopsOnCancel(t *testing.T) {
 func TestRunPassLoopContinuesAfterError(t *testing.T) {
 	p := &recordingPass{calls: make(chan int64, 10), err: errors.New("boom")}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := RunPassLoop(ctx, "test", p, 5*time.Millisecond)
+	done := RunPassLoop(ctx, "test", p, 5*time.Millisecond, nil)
 
 	<-p.calls // the immediate run, which fails
 	select {
@@ -89,4 +90,58 @@ func TestRunPassLoopContinuesAfterError(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// recordingRecorder is a PassRecorder that remembers its last observation,
+// so a test can assert what RunPassLoop fed it without a real prometheus
+// registry.
+type recordingRecorder struct {
+	mu    sync.Mutex
+	calls int
+	name  string
+	err   error
+}
+
+func (r *recordingRecorder) Observe(pass string, err error, _ time.Duration, _ int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.name = pass
+	r.err = err
+}
+
+func (r *recordingRecorder) snapshot() (calls int, name string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, r.name, r.err
+}
+
+// A non-nil PassRecorder must be fed the outcome of every run, tagged with
+// the pass's name and whether it failed.
+func TestRunPassLoopFeedsTheRecorderOnSuccessAndFailure(t *testing.T) {
+	okPass := &recordingPass{calls: make(chan int64, 10)}
+	rec := &recordingRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := RunPassLoop(ctx, "ok pass", okPass, time.Hour, rec)
+	<-okPass.calls
+	cancel()
+	<-done
+
+	calls, name, err := rec.snapshot()
+	if calls != 1 || name != "ok pass" || err != nil {
+		t.Fatalf("got calls=%d name=%q err=%v, want 1 \"ok pass\" <nil>", calls, name, err)
+	}
+
+	failPass := &recordingPass{calls: make(chan int64, 10), err: errors.New("boom")}
+	rec2 := &recordingRecorder{}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := RunPassLoop(ctx2, "failing pass", failPass, time.Hour, rec2)
+	<-failPass.calls
+	cancel2()
+	<-done2
+
+	calls2, name2, err2 := rec2.snapshot()
+	if calls2 != 1 || name2 != "failing pass" || err2 == nil {
+		t.Fatalf("got calls=%d name=%q err=%v, want 1 \"failing pass\" a non-nil error", calls2, name2, err2)
+	}
 }

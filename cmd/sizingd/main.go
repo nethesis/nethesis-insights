@@ -28,6 +28,7 @@ import (
 	sizingapi "github.com/nethesis/nethesis-insights/internal/api/sizing"
 	"github.com/nethesis/nethesis-insights/internal/baseline"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
@@ -145,6 +146,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One registry for the whole process: /metrics on the API mux exposes
+	// everything registered into it. cohortName is named once and used
+	// twice -- to pre-create the pass metrics' children at 0 and to tag the
+	// loop itself -- so the metric and the log line cannot disagree.
+	const cohortName = "sizing cohort"
+	reg := metrics.NewRegistry()
+	httpMetrics := metrics.NewHTTP(reg)
+	passMetrics := metrics.NewPass(reg, cohortName)
+
 	// Fleet sizing's cohort pass: no LLM, no gate, no queue.
 	cohortPass := baseline.New(s, baseline.Config{
 		WindowDays:         sizingWindowDays,
@@ -157,7 +167,7 @@ func main() {
 	handler := sizingapi.NewServer(s, trusted, sizingapi.Config{
 		MaxNodes: sizingMaxNodesPerReport,
 		Now:      func() int64 { return time.Now().UnixMilli() },
-	})
+	}, metrics.Handler(reg), httpMetrics)
 
 	httpServer := &http.Server{
 		Addr:              listenAddr,
@@ -217,7 +227,7 @@ func main() {
 	// stale pressure_version rows and must still run before cohorts are
 	// built -- see baseline.Runner.Run.
 	sizingCtx, stopSizing := context.WithCancel(context.Background())
-	sizingDone := svc.RunPassLoop(sizingCtx, "sizing cohort", cohortPass, sizingPassInterval)
+	sizingDone := svc.RunPassLoop(sizingCtx, cohortName, cohortPass, sizingPassInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

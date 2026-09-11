@@ -138,10 +138,20 @@ func scanPaths(t *testing.T, path string) parsed {
 // rather than in the handlers is what lets a pipeline be run without a
 // proxy in front of it during development.
 //
-// /healthz is registered by all three binaries but routed by none of them --
+// /healthz is registered by all four binaries but routed by none of them --
 // the quadlet's HealthCmd= reaches it inside the container -- so it is
 // deliberately absent from this list and from the documented surface; see
 // TestHealthzNotDocumented.
+//
+// /metrics is different, on purpose: every binary registers it next to
+// /healthz too, but unlike /healthz it IS proxy-routed -- Traefik exposes
+// each backend's /metrics at a public path under /metrics/* (see
+// deploy/traefik/dynamic.yaml.tmpl) so a monitoring system outside the pod
+// can scrape it. A path a client can actually reach belongs in the public
+// contract regardless of which credential gates it, so the five
+// /metrics/* paths (four backends plus Traefik's own) are documented below
+// as the "metrics" pseudo-service, with their own security scheme
+// (metricsAuth) rather than pinned as excluded the way /healthz is.
 var services = []struct {
 	name   string
 	prefix string
@@ -172,6 +182,23 @@ var services = []struct {
 		prefix: "/sizing",
 		routes: []struct{ path, method string }{
 			{"/v1/reports", "post"},
+		},
+	},
+	{
+		// Not a Go binary's route prefix: five independent Traefik routers,
+		// one per backend (the four Go binaries' own /metrics plus
+		// Traefik's built-in exporter), grouped under one public /metrics/
+		// namespace so a monitoring system's scrape config can apply one
+		// metricsAuth credential to a single path prefix. See the doc
+		// comment above services.
+		name:   "metrics",
+		prefix: "/metrics",
+		routes: []struct{ path, method string }{
+			{"/logs", "get"},
+			{"/threat", "get"},
+			{"/sizing", "get"},
+			{"/authd", "get"},
+			{"/traefik", "get"},
 		},
 	},
 }

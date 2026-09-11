@@ -203,7 +203,7 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config) (ht
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.route)
 
-	return httpx.Logging(mux), nil
+	return httpx.Logging(mux, nil), nil
 }
 
 // canWrite reports whether the write forms should render, and whether a

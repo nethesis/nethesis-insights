@@ -14,6 +14,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 )
 
@@ -533,6 +534,171 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 	if !known[model.CanonicalKey("mod1", "<3> [svc] something entirely new")] {
 		t.Fatal("a suppressed window must still record its templates")
 	}
+}
+
+// recordingAnalyzerMetrics is an analyzer.Metrics that just remembers every
+// call, so a test can assert what Process fed it without a real prometheus
+// registry.
+type recordingAnalyzerMetrics struct {
+	budgetRejections []string
+	llmCalls         []struct {
+		result string
+		cost   int64
+	}
+}
+
+func (r *recordingAnalyzerMetrics) hooks() *Metrics {
+	return &Metrics{
+		BudgetRejected: func(reason string) { r.budgetRejections = append(r.budgetRejections, reason) },
+		LLMCall: func(result string, cost int64) {
+			r.llmCalls = append(r.llmCalls, struct {
+				result string
+				cost   int64
+			}{result, cost})
+		},
+	}
+}
+
+// A nil Analyzer.Metrics (the zero value) must not panic anywhere in
+// Process -- every existing caller and test predates this field.
+func TestProcessWithNoMetricsDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
+	a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+
+	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+}
+
+// Process must report exactly one LLMCall per attempt, classed by outcome,
+// and exactly one BudgetRejected per window the budget suppressed -- the
+// same four outcome classes and the same suppression reason the analyses
+// ledger itself records (LLMCalled, gate_reasons, suppressed_by).
+//
+// The expected classes are the metrics.LLMResult* constants rather than
+// string literals on purpose. internal/platform/metrics pre-creates one
+// child per constant so the family exports at 0 before the first call; if
+// this package ever emitted a different spelling, that pre-created child
+// would sit at 0 forever while the real count accumulated under a second,
+// unalerted series. Comparing against the constants is what makes the two
+// halves provably agree -- the Metrics hook takes a plain string precisely
+// so the analyzer needs no production dependency on prometheus.
+func TestProcessReportsLLMCallOutcomesAndBudgetRejections(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		s := newTestStore(t)
+		stub := &llm.Stub{
+			Content:      `{"window_assessment":"nominal","findings":[]}`,
+			InputTokens:  100,
+			OutputTokens: 50,
+		}
+		a := New(s, stub, testBudget(s), Config{
+			Gate:          testConfig().Gate,
+			PromptAmbient: 100, StaleAfter: 24 * time.Hour, EWMAAlpha: 0.3, Model: "test-model",
+			InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000,
+		}, func() int64 { return 1000 })
+		rec := &recordingAnalyzerMetrics{}
+		a.Metrics = rec.hooks()
+
+		b := steadyBundle("sys1")
+		b.Templates[0].Template = "novel-line-for-success"
+		if err := a.Process(ctx, b); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+
+		if len(rec.llmCalls) != 1 || rec.llmCalls[0].result != metrics.LLMResultSuccess || rec.llmCalls[0].cost <= 0 {
+			t.Fatalf("llmCalls = %+v, want exactly one success call with a positive cost", rec.llmCalls)
+		}
+		if len(rec.budgetRejections) != 0 {
+			t.Fatalf("budgetRejections = %v, want none", rec.budgetRejections)
+		}
+	})
+
+	t.Run("transient", func(t *testing.T) {
+		s := newTestStore(t)
+		stub := &llm.Stub{Err: errors.New("boom")}
+		a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+		rec := &recordingAnalyzerMetrics{}
+		a.Metrics = rec.hooks()
+
+		b := steadyBundle("sys1")
+		b.Templates[0].Template = "novel-line-for-transient"
+		if err := a.Process(ctx, b); err == nil {
+			t.Fatal("expected an error from the failed llm call")
+		}
+
+		if len(rec.llmCalls) != 1 || rec.llmCalls[0].result != metrics.LLMResultTransient || rec.llmCalls[0].cost != 0 {
+			t.Fatalf("llmCalls = %+v, want exactly one transient call at zero cost", rec.llmCalls)
+		}
+	})
+
+	t.Run("permanent", func(t *testing.T) {
+		s := newTestStore(t)
+		stub := &llm.Stub{Err: &llm.HTTPError{StatusCode: 400, Body: "bad request"}}
+		a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+		rec := &recordingAnalyzerMetrics{}
+		a.Metrics = rec.hooks()
+
+		b := steadyBundle("sys1")
+		b.Templates[0].Template = "novel-line-for-permanent"
+		if err := a.Process(ctx, b); err == nil {
+			t.Fatal("expected an error from the permanent llm failure")
+		}
+
+		if len(rec.llmCalls) != 1 || rec.llmCalls[0].result != metrics.LLMResultPermanent || rec.llmCalls[0].cost != 0 {
+			t.Fatalf("llmCalls = %+v, want exactly one permanent call at zero cost", rec.llmCalls)
+		}
+	})
+
+	t.Run("parse", func(t *testing.T) {
+		s := newTestStore(t)
+		stub := &llm.Stub{Content: `not valid json at all`}
+		a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+		rec := &recordingAnalyzerMetrics{}
+		a.Metrics = rec.hooks()
+
+		b := steadyBundle("sys1")
+		b.Templates[0].Template = "novel-line-for-parse"
+		if err := a.Process(ctx, b); err == nil {
+			t.Fatal("expected an error from the unparseable response")
+		}
+
+		if len(rec.llmCalls) != 1 || rec.llmCalls[0].result != metrics.LLMResultParse || rec.llmCalls[0].cost != 0 {
+			t.Fatalf("llmCalls = %+v, want exactly one parse call at zero cost", rec.llmCalls)
+		}
+	})
+
+	t.Run("budget rejected", func(t *testing.T) {
+		st := newTestStore(t)
+		stub := &llm.Stub{Content: `{"window_assessment":"nominal","findings":[]}`}
+		capped := budget.New(st, budget.Config{MaxCallsPerSystemPerDay: 1}, func() int64 { return 1000 })
+		a := New(st, stub, capped, testConfig(), func() int64 { return 1000 })
+		rec := &recordingAnalyzerMetrics{}
+		a.Metrics = rec.hooks()
+
+		if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+			t.Fatalf("first window: %v", err)
+		}
+		second := steadyBundle("sys1")
+		second.Window = model.Window{Start: 100000, End: 100100}
+		second.Templates = []model.Template{
+			{Template: "<3> [svc] something entirely new", Count: 5, ModuleID: "mod1", Priority: 1},
+		}
+		if err := a.Process(ctx, second); err != nil {
+			t.Fatalf("second window: %v", err)
+		}
+
+		if len(rec.budgetRejections) != 1 || rec.budgetRejections[0] != budget.SuppressedSystemCap {
+			t.Fatalf("budgetRejections = %v, want exactly one %q", rec.budgetRejections, budget.SuppressedSystemCap)
+		}
+		// The suppressed window must not itself show up as an LLM call.
+		if len(rec.llmCalls) != 1 {
+			t.Fatalf("llmCalls = %+v, want exactly the first window's call and nothing for the suppressed one", rec.llmCalls)
+		}
+	})
 }
 
 // A hosted node runs one module per tenant -- 82 nethvoice instances on the

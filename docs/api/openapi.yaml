@@ -61,6 +61,11 @@ tags:
     description: CrowdSec ban-decision ingest and the fleet-consensus blocklist feed, same credentials as the log pipeline.
   - name: sizing
     description: NS8 cluster workload/performance report ingest, same credentials as the log pipeline.
+  - name: observability
+    description: >-
+      Prometheus scrape endpoints for the four Go binaries and the Traefik
+      proxy, gated by a dedicated `metricsAuth` credential distinct from
+      every other surface's.
 paths:
   /logs/v1/bundles:
     post:
@@ -765,6 +770,124 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
+  /metrics/logs:
+    get:
+      operationId: getLogsMetrics
+      tags: [observability]
+      summary: Prometheus scrape endpoint for insightsd
+      description: |
+        Exposition-format text for `insightsd`'s process, HTTP, bundle-queue,
+        LLM-call, budget and housekeeping-pass metrics -- see
+        `docs/admin-guide.md`'s "Metrics" section for the full metric list.
+        Unlike the six pipeline surfaces above, this is gated by a
+        **separate** BasicAuth credential (`metricsAuth`, Traefik's
+        `metrics-auth` middleware reading `/etc/traefik/metrics.htpasswd`),
+        deliberately not `ADMIN_API_KEY` or a node credential: a monitoring
+        system holds its own password, never the operator's or the fleet's.
+        `insightsd` itself answers unauthenticated on its own `LISTEN_ADDR`
+        (`GET /metrics` with no `/logs` prefix) -- this BasicAuth gate exists
+        only at the proxy, on the public path.
+      security:
+        - metricsAuth: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401":
+          description: Invalid or missing credentials.
+
+  /metrics/threat:
+    get:
+      operationId: getThreatMetrics
+      tags: [observability]
+      summary: Prometheus scrape endpoint for threatd
+      description: |
+        Exposition-format text for `threatd`'s process, HTTP, ingest-queue
+        (including `ingestq_full_total`) and blocklist-consensus-pass
+        metrics -- see `docs/admin-guide.md`'s "Metrics" section. Same
+        `metricsAuth` credential as every other `/metrics/*` path, distinct
+        from `ADMIN_API_KEY`; see `/metrics/logs`'s description for why.
+      security:
+        - metricsAuth: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401":
+          description: Invalid or missing credentials.
+
+  /metrics/sizing:
+    get:
+      operationId: getSizingMetrics
+      tags: [observability]
+      summary: Prometheus scrape endpoint for sizingd
+      description: |
+        Exposition-format text for `sizingd`'s process, HTTP and
+        cohort-pass metrics -- see `docs/admin-guide.md`'s "Metrics"
+        section. Same `metricsAuth` credential as every other `/metrics/*`
+        path, distinct from `ADMIN_API_KEY`; see `/metrics/logs`'s
+        description for why.
+      security:
+        - metricsAuth: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401":
+          description: Invalid or missing credentials.
+
+  /metrics/authd:
+    get:
+      operationId: getAuthdMetrics
+      tags: [observability]
+      summary: Prometheus scrape endpoint for authd
+      description: |
+        Exposition-format text for `authd`'s process, HTTP and forward-auth
+        cache/upstream metrics -- see `docs/admin-guide.md`'s "Metrics"
+        section. Same `metricsAuth` credential as every other `/metrics/*`
+        path, distinct from `ADMIN_API_KEY`; see `/metrics/logs`'s
+        description for why.
+      security:
+        - metricsAuth: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401":
+          description: Invalid or missing credentials.
+
+  /metrics/traefik:
+    get:
+      operationId: getTraefikMetrics
+      tags: [observability]
+      summary: Prometheus scrape endpoint for the Traefik proxy itself
+      description: |
+        Traefik's own built-in Prometheus exporter (`metrics.prometheus` on
+        a loopback-only `metrics` entryPoint, `127.0.0.1:8082`), republished
+        at this public path the same way the four backends' own `/metrics`
+        are: entrypoint-, router- and service-labeled request counts and
+        latencies for every proxied route. Same `metricsAuth` credential as
+        every other `/metrics/*` path, distinct from `ADMIN_API_KEY`; see
+        `/metrics/logs`'s description for why.
+      security:
+        - metricsAuth: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain; version=0.0.4; charset=utf-8:
+              schema: { type: string }
+        "401":
+          description: Invalid or missing credentials.
+
 components:
   securitySchemes:
     basicAuth:
@@ -775,6 +898,17 @@ components:
         `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`) with a
         TTL cache. Fail-closed: a rejected credential is `401`, a validator
         that cannot be reached is `503` (retryable), never a silent `401`.
+    metricsAuth:
+      type: http
+      scheme: basic
+      description: >-
+        A single `prometheus` user, HTTP Basic, checked by Traefik's own
+        `metrics-auth` middleware against `/etc/traefik/metrics.htpasswd` --
+        never by the Go backends and never against `AUTH_VALIDATE_URL` or
+        `ADMIN_API_KEY`. The password is generated at deploy time
+        (`deploy/gen-metrics-auth.sh`) and lives in
+        `/etc/insights/metrics.env`; see `docs/admin-guide.md`'s "Metrics"
+        section.
   schemas:
     Error:
       type: object

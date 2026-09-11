@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 )
 
 const defaultAuthValidateURL = "https://my.nethesis.it/auth"
@@ -118,9 +119,26 @@ func main() {
 	fa.MaxPositiveEntries = getenvInt("AUTH_CACHE_MAX_ENTRIES", fa.MaxPositiveEntries)
 	fa.MaxNegativeEntries = getenvInt("AUTH_NEG_CACHE_MAX_ENTRIES", fa.MaxNegativeEntries)
 
+	// One registry for the whole process: /metrics on the mux exposes
+	// everything registered into it, standard Go collectors plus the
+	// forward-auth cache/upstream counters wired in below.
+	// The upstream vocabulary comes from internal/platform/auth, the package
+	// that produces it, so each outcome's child is pre-created at 0 -- an
+	// alert on auth_upstream_results_total{result="unavailable"} must
+	// evaluate against a real zero on a fresh process, not no data.
+	reg := metrics.NewRegistry()
+	httpMetrics := metrics.NewHTTP(reg)
+	authMetrics := metrics.NewAuth(reg,
+		auth.UpstreamValid, auth.UpstreamInvalid, auth.UpstreamUnavailable)
+	fa.Metrics = &auth.Metrics{
+		CacheHit:  authMetrics.CacheHit,
+		CacheMiss: authMetrics.CacheMiss,
+		Upstream:  authMetrics.Upstream,
+	}
+
 	srv := &http.Server{
 		Addr:              listenAddr,
-		Handler:           newHandler(fa),
+		Handler:           newHandler(fa, metrics.Handler(reg), httpMetrics),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

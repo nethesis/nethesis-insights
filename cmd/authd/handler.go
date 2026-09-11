@@ -25,9 +25,17 @@ type validator interface {
 // original request headers here, expects 2xx to mean "let it through", and
 // passes any other status straight back to the client -- which is what keeps
 // this service's 401/503 distinction visible at the edge.
-func newHandler(v validator) http.Handler {
+//
+// metricsHandler is mounted at /metrics next to /healthz -- nil skips it,
+// which only tests exercise. rec is fed every completed request's
+// method/route/status/duration; nil is valid and simply skips metrics -- see
+// httpx.MetricsRecorder.
+func newHandler(v validator, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 	mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		if header == "" {
@@ -64,7 +72,7 @@ func newHandler(v validator) http.Handler {
 			http.Error(w, "validator unavailable", http.StatusServiceUnavailable)
 		}
 	})
-	return httpx.Logging(mux)
+	return httpx.Logging(mux, rec)
 }
 
 // unauthorized answers without a WWW-Authenticate challenge: the client is a

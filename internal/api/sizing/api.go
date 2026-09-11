@@ -50,7 +50,11 @@ type Config struct {
 
 func defaultNow() int64 { return time.Now().UnixMilli() }
 
-func NewServer(st Store, trusted httpx.TrustedProxies, cfg Config) http.Handler {
+// NewServer builds sizingd's ingest API. metricsHandler is mounted at
+// /metrics next to /healthz -- nil skips it, which only tests exercise. rec
+// is fed every completed request's method/route/status/duration; nil is
+// valid and simply skips metrics -- see httpx.MetricsRecorder.
+func NewServer(st Store, trusted httpx.TrustedProxies, cfg Config, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = defaultNow
 	}
@@ -58,8 +62,11 @@ func NewServer(st Store, trusted httpx.TrustedProxies, cfg Config) http.Handler 
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 	mux.HandleFunc("/v1/reports", srv.handleReports)
-	return httpx.Logging(mux)
+	return httpx.Logging(mux, rec)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

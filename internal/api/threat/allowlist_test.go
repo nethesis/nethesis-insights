@@ -39,7 +39,7 @@ func allowlistServer(st Store) http.Handler {
 	return NewServer(st, nil, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
-	})
+	}, nil, nil)
 }
 
 func postAllowlistRequest(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
@@ -192,7 +192,7 @@ func TestAllowlistRequestRefusesASystemPastItsCap(t *testing.T) {
 		MaxDecisions:               500,
 		MaxAllowlistRequestsPerSys: 2,
 		Now:                        func() int64 { return threatNow },
-	})
+	}, nil, nil)
 
 	for _, cidr := range []string{"203.0.113.0/24", "198.51.100.0/24"} {
 		rec := postAllowlistRequest(t, h, `{"cidr":"`+cidr+`","reason":"please"}`, true)

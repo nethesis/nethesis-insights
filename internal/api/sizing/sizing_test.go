@@ -17,6 +17,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/sizing"
 	sizingstore "github.com/nethesis/nethesis-insights/internal/store/sizing"
 )
@@ -79,7 +80,36 @@ func sizingServer(st Store) http.Handler {
 	return NewServer(st, trustedProxy, Config{
 		MaxNodes: 500,
 		Now:      func() int64 { return sizingNow },
-	})
+	}, nil, nil)
+}
+
+// /metrics is mounted next to /healthz. See the equivalent logs-package test
+// for why this drives a request through an unrelated route first.
+func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
+	reg := metrics.NewRegistry()
+	rec := metrics.NewHTTP(reg)
+	h := NewServer(&fakeSizingStore{}, trustedProxy, Config{MaxNodes: 500}, metrics.Handler(reg), rec)
+
+	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	hw := httptest.NewRecorder()
+	h.ServeHTTP(hw, hr)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"go_goroutines",
+		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)
+		}
+	}
 }
 
 func postSizing(t *testing.T, h http.Handler, body string, withAuth bool) *httptest.ResponseRecorder {
@@ -160,7 +190,7 @@ func TestSizingIngestRequiresAuth(t *testing.T) {
 // system_id.
 func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
 	st := &fakeSizingStore{}
-	h := NewServer(st, trustedProxy, Config{MaxNodes: 500})
+	h := NewServer(st, trustedProxy, Config{MaxNodes: 500}, nil, nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader(validReport("2026-09-01")))
 	r.RemoteAddr = "203.0.113.7:4444"

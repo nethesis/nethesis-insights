@@ -38,6 +38,46 @@ const (
 	defaultTimeout     = 5 * time.Second
 )
 
+// Upstream outcome labels, exported so a caller wiring Metrics.Upstream (a
+// plain func(string), to keep this package free of a prometheus dependency)
+// has a fixed vocabulary to switch on instead of guessing the internal
+// outcome type's spelling.
+const (
+	UpstreamValid       = "valid"
+	UpstreamInvalid     = "invalid"
+	UpstreamUnavailable = "unavailable"
+)
+
+// Metrics is the optional counter set Validate reports against: one call per
+// cache lookup (CacheHit or CacheMiss, mutually exclusive) and, on a miss,
+// one call to Upstream naming what the validator answered. A nil field (or
+// a nil *Metrics, the zero value of ForwardAuth.Metrics) is skipped, so
+// every existing caller and test is unaffected by adding this.
+// *metrics.Auth supplies all three.
+type Metrics struct {
+	CacheHit  func()
+	CacheMiss func()
+	Upstream  func(result string)
+}
+
+func (m *Metrics) cacheHit() {
+	if m != nil && m.CacheHit != nil {
+		m.CacheHit()
+	}
+}
+
+func (m *Metrics) cacheMiss() {
+	if m != nil && m.CacheMiss != nil {
+		m.CacheMiss()
+	}
+}
+
+func (m *Metrics) upstream(result string) {
+	if m != nil && m.Upstream != nil {
+		m.Upstream(result)
+	}
+}
+
 // ForwardAuth validates HTTP Basic credentials by forwarding the
 // Authorization header verbatim to a validator URL and caching the
 // outcome. Caching is mandatory, not an optimization: at fleet scale,
@@ -53,6 +93,10 @@ type ForwardAuth struct {
 	// counted separately.
 	MaxPositiveEntries int
 	MaxNegativeEntries int
+
+	// Metrics is optional and nil-safe on every call; see Metrics' doc. Set
+	// directly after New, before the first Validate call.
+	Metrics *Metrics
 
 	pepper string
 	fwd    *forwarder
@@ -96,19 +140,24 @@ func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, 
 	a.cache.setLimits(a.MaxPositiveEntries, a.MaxNegativeEntries)
 
 	if e, fresh, found := a.cache.get(key); found && fresh {
+		a.Metrics.cacheHit()
 		return outcomeFromEntry(e, systemID)
 	}
+	a.Metrics.cacheMiss()
 
 	switch a.fwd.check(ctx, authHeader) {
 	case outcomeValid:
+		a.Metrics.upstream(UpstreamValid)
 		a.cache.set(key, entry{ok: true, systemID: systemID, expiresAt: a.now().Add(a.PositiveTTL)})
 		return systemID, nil
 
 	case outcomeInvalid:
+		a.Metrics.upstream(UpstreamInvalid)
 		a.cache.set(key, entry{ok: false, expiresAt: a.now().Add(a.NegativeTTL)})
 		return "", fmt.Errorf("%w: validator rejected system_id %q", ErrInvalidCredentials, systemID)
 
 	default: // outcomeUnavailable
+		a.Metrics.upstream(UpstreamUnavailable)
 		if e, _, found := a.cache.get(key); found {
 			// Stale beats unavailable: see the cache's doc comment.
 			return outcomeFromEntry(e, systemID)

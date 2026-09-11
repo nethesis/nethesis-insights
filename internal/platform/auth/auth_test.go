@@ -67,6 +67,58 @@ func TestValidCredentialsAreCachedNotReverified(t *testing.T) {
 	}
 }
 
+// A nil Metrics (the zero value) must not panic anywhere in Validate --
+// every existing caller and test predates this field.
+func TestValidateWithNoMetricsDoesNotPanic(t *testing.T) {
+	v := &validator{status: http.StatusOK}
+	srv := v.server(t)
+	defer srv.Close()
+
+	a := newAuth(t, srv.URL, time.Now)
+	if _, err := a.Validate(context.Background(), basicHeader("sys-1", "secret")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// The first Validate call for a credential is a cache miss followed by an
+// upstream call; every later call for the same credential is a cache hit
+// with no upstream call at all.
+func TestValidateReportsCacheHitsMissesAndUpstreamResult(t *testing.T) {
+	v := &validator{status: http.StatusOK}
+	srv := v.server(t)
+	defer srv.Close()
+
+	a := newAuth(t, srv.URL, time.Now)
+	var hits, misses int
+	var upstreamResults []string
+	a.Metrics = &Metrics{
+		CacheHit:  func() { hits++ },
+		CacheMiss: func() { misses++ },
+		Upstream:  func(result string) { upstreamResults = append(upstreamResults, result) },
+	}
+
+	hdr := basicHeader("sys-1", "secret")
+	if _, err := a.Validate(context.Background(), hdr); err != nil {
+		t.Fatalf("call 1: unexpected error: %v", err)
+	}
+	if hits != 0 || misses != 1 {
+		t.Fatalf("after the first call: hits=%d misses=%d, want 0 1", hits, misses)
+	}
+	if len(upstreamResults) != 1 || upstreamResults[0] != UpstreamValid {
+		t.Fatalf("upstream results = %v, want [%q]", upstreamResults, UpstreamValid)
+	}
+
+	if _, err := a.Validate(context.Background(), hdr); err != nil {
+		t.Fatalf("call 2: unexpected error: %v", err)
+	}
+	if hits != 1 || misses != 1 {
+		t.Fatalf("after the second (cached) call: hits=%d misses=%d, want 1 1", hits, misses)
+	}
+	if len(upstreamResults) != 1 {
+		t.Fatalf("upstream called again on a cache hit: %v", upstreamResults)
+	}
+}
+
 func TestInvalidCredentialsAreCachedAndRejected(t *testing.T) {
 	v := &validator{status: http.StatusUnauthorized}
 	srv := v.server(t)

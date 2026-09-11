@@ -21,6 +21,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
 )
@@ -102,7 +103,36 @@ func threatServer(st Store, q Publisher, snap *blocklist.Snapshot) http.Handler 
 	return NewServer(st, q, snap, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
-	})
+	}, nil, nil)
+}
+
+// /metrics is mounted next to /healthz. See the equivalent logs-package test
+// for why this drives a request through an unrelated route first.
+func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
+	reg := metrics.NewRegistry()
+	rec := metrics.NewHTTP(reg)
+	h := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, trustedProxy, Config{MaxDecisions: 500}, metrics.Handler(reg), rec)
+
+	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	hw := httptest.NewRecorder()
+	h.ServeHTTP(hw, hr)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"go_goroutines",
+		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)
+		}
+	}
 }
 
 func decision(ip, scenario, origin string) model.Decision {
@@ -286,7 +316,7 @@ func TestThreatIngestRequiresAuthentication(t *testing.T) {
 // system_id.
 func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
 	q := &fakeQueue{}
-	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions})
+	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions}, nil, nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{"decisions":[]}`))
 	r.RemoteAddr = "203.0.113.7:4444"

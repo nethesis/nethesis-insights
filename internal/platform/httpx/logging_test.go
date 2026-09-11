@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Logging is the request logger every binary in this repository wraps its
@@ -32,7 +33,7 @@ func TestLoggingNeverLogsTheAuthorizationHeaderValue(t *testing.T) {
 
 	h := Logging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
+	}), nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/bundles?since=42", nil)
 	r.Header.Set("Authorization", secretHeader)
@@ -68,7 +69,7 @@ func TestLoggingReportsAbsentAuthorizationHeader(t *testing.T) {
 
 	h := Logging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
+	}), nil)
 	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -90,7 +91,7 @@ func TestLoggingRecordsMethodPathAndTheHandlersStatus(t *testing.T) {
 
 	h := Logging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
-	}))
+	}), nil)
 	r := httptest.NewRequest(http.MethodPost, "/v1/findings", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -100,5 +101,79 @@ func TestLoggingRecordsMethodPathAndTheHandlersStatus(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("logger output = %q, want it to contain %q", out, want)
 		}
+	}
+}
+
+// recordingMetrics is a MetricsRecorder that just remembers its last call,
+// so a test can assert what Logging fed it without pulling in a real
+// prometheus registry.
+type recordingMetrics struct {
+	method, route string
+	status        int
+	calls         int
+}
+
+func (r *recordingMetrics) Observe(method, route string, status int, _ time.Duration) {
+	r.method, r.route, r.status = method, route, status
+	r.calls++
+}
+
+// A nil MetricsRecorder must not panic -- every UI mux in this codebase
+// passes nil, since only the four binaries' API muxes carry a /metrics
+// endpoint.
+func TestLoggingToleratesNilMetricsRecorder(t *testing.T) {
+	h := Logging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), nil)
+	r := httptest.NewRequest(http.MethodGet, "/v1/findings", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r) // must not panic
+}
+
+// CLAUDE.md's cardinality rule: the route label fed to metrics must be the
+// registered ServeMux pattern, never the raw request path. This is the
+// regression test for that -- two distinct paths matching the SAME pattern
+// (a wildcard) must report the SAME route label, and an unmatched path must
+// report a fixed label rather than itself.
+func TestLoggingMetricsRouteLabelIsThePatternNotThePath(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/findings", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/systems/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rec := &recordingMetrics{}
+	h := Logging(mux, rec)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/findings", nil))
+	if rec.route != "/v1/findings" || rec.method != "GET" || rec.status != http.StatusOK {
+		t.Fatalf("got method=%q route=%q status=%d, want GET /v1/findings 200", rec.method, rec.route, rec.status)
+	}
+
+	// Two distinct system ids must collapse onto the SAME route label --
+	// the wildcard pattern, never the id itself. This is the check that
+	// would catch a regression back to r.URL.Path.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/systems/alpha", nil))
+	firstRoute := rec.route
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/systems/bravo", nil))
+	if rec.route != firstRoute {
+		t.Fatalf("route label changed between requests to the same pattern: %q vs %q -- looks like the raw path leaked into the label", firstRoute, rec.route)
+	}
+	if rec.route != "/systems/{id}" {
+		t.Fatalf("route = %q, want the registered pattern /systems/{id}", rec.route)
+	}
+	if strings.Contains(rec.route, "alpha") || strings.Contains(rec.route, "bravo") {
+		t.Fatalf("route label %q leaked a path segment", rec.route)
+	}
+
+	// An unmatched path must not become an unbounded label either.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/no/such/route", nil))
+	if rec.route != "unmatched" {
+		t.Fatalf("route = %q for a 404, want the fixed \"unmatched\" label", rec.route)
+	}
+	if rec.calls != 4 {
+		t.Fatalf("Observe called %d times, want 4", rec.calls)
 	}
 }

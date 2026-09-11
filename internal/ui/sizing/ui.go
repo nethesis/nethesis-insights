@@ -99,7 +99,7 @@ func NewServer(r Reader, cfg chrome.Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.route)
 
-	return httpx.Logging(mux), nil
+	return httpx.Logging(mux, nil), nil
 }
 
 func (s *server) route(w http.ResponseWriter, r *http.Request) {

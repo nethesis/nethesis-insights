@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 )
 
 type fakeValidator struct {
@@ -23,6 +24,35 @@ type fakeValidator struct {
 func (f *fakeValidator) Validate(ctx context.Context, authHeader string) (string, error) {
 	f.calls++
 	return f.systemID, f.err
+}
+
+// /metrics is mounted next to /healthz. See the equivalent api/logs test for
+// why this drives a request through an unrelated route first.
+func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
+	reg := metrics.NewRegistry()
+	rec := metrics.NewHTTP(reg)
+	h := newHandler(&fakeValidator{systemID: "sys-1"}, metrics.Handler(reg), rec)
+
+	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	hw := httptest.NewRecorder()
+	h.ServeHTTP(hw, hr)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"go_goroutines",
+		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)
+		}
+	}
 }
 
 // Traefik forwards the auth server's status when it is not 2xx, so these
@@ -41,7 +71,7 @@ func TestAuthEndpointStatuses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHandler(tc.v)
+			h := newHandler(tc.v, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 			r.SetBasicAuth("sys-1", "secret")
 			w := httptest.NewRecorder()
@@ -63,7 +93,7 @@ func TestAuthEndpointStatuses(t *testing.T) {
 // header upstream would spend a request to learn that.
 func TestAuthEndpointRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.T) {
 	v := &fakeValidator{systemID: "sys-1"}
-	h := newHandler(v)
+	h := newHandler(v, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	w := httptest.NewRecorder()
 
@@ -80,7 +110,7 @@ func TestAuthEndpointRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.
 // The response body must never echo the credential, and the header must
 // never be reflected back into a response Traefik will log.
 func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
-	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials})
+	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "hunter2")
 	w := httptest.NewRecorder()
@@ -107,7 +137,7 @@ func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
 // being treated as success or leaking an internal error to the caller.
 func TestAuthEndpointFailsClosedOnAnUnrecognizedValidatorError(t *testing.T) {
 	v := &fakeValidator{err: errors.New("boom: this is not one of the sentinel errors")}
-	h := newHandler(v)
+	h := newHandler(v, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "secret")
 	w := httptest.NewRecorder()
@@ -138,7 +168,7 @@ func TestAuthEndpoint401OmitsWWWAuthenticate(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHandler(tc.v)
+			h := newHandler(tc.v, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 			if tc.setAuth {
 				r.SetBasicAuth("sys-1", "secret")

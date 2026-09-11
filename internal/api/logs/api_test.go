@@ -17,6 +17,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 )
 
 type fakePublisher struct {
@@ -79,7 +80,7 @@ var testWindow = model.Window{
 }
 
 func testServer(p Publisher) http.Handler {
-	return NewServer(p, &fakeStore{}, trustedProxy, Config{Now: fixedClock})
+	return NewServer(p, &fakeStore{}, trustedProxy, Config{Now: fixedClock}, nil, nil)
 }
 
 func validBundle() string {
@@ -176,12 +177,48 @@ func TestIngestRequiresCredentials(t *testing.T) {
 	}
 }
 
+// /metrics is mounted next to /healthz, unauthenticated at this layer (proxy
+// BasicAuth is what actually gates it in the deployed shape -- see
+// deploy/traefik/dynamic.yaml.tmpl). It must expose the standard Go
+// collectors and, after a request to another route on the same mux, that
+// request's counter -- proving httpx.Logging's metrics hook is actually
+// wired to this server's registry, not just constructed and discarded.
+func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
+	reg := metrics.NewRegistry()
+	rec := metrics.NewHTTP(reg)
+	pub := &fakePublisher{}
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{}, metrics.Handler(reg), rec)
+
+	// Drive one request through an unrelated route first, so its counter is
+	// present in the scrape below.
+	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	hw := httptest.NewRecorder()
+	h.ServeHTTP(hw, hr)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"go_goroutines",
+		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
 // The credential is not verified in this process, so the trusted-proxy check
 // is the entire boundary: a direct connection must not be able to name a
 // system_id.
 func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
 	pub := &fakePublisher{}
-	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{}, nil, nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", strings.NewReader(validBundle()))
 	r.RemoteAddr = "203.0.113.7:4444"
@@ -206,7 +243,7 @@ func TestIngestExcludesConfiguredModules(t *testing.T) {
 	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
 		ExcludeModules: map[string]bool{"crowdsec1": true},
 		Now:            fixedClock,
-	})
+	}, nil, nil)
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
@@ -282,7 +319,7 @@ func TestIngestExcludesConfiguredServices(t *testing.T) {
 	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{
 		ExcludeServices: map[string]bool{"insights": true},
 		Now:             fixedClock,
-	})
+	}, nil, nil)
 
 	body, err := json.Marshal(model.Bundle{
 		SchemaVersion: model.SchemaVersion,
@@ -339,7 +376,7 @@ func TestBundleGzipBombIsRejectedBySize(t *testing.T) {
 	}
 
 	pub := &fakePublisher{}
-	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{}, nil, nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", bytes.NewReader(body.Bytes()))
 	r.RemoteAddr = "127.0.0.1:12345"
@@ -360,7 +397,7 @@ func TestBundleGzipBombIsRejectedBySize(t *testing.T) {
 // The raw cap still applies to a body that is not compressed at all.
 func TestOversizedUncompressedBundleIsRejectedBySize(t *testing.T) {
 	pub := &fakePublisher{}
-	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{})
+	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{}, nil, nil)
 
 	big := strings.NewReader(`{"schema_version":1,` + strings.Repeat(" ", maxCompressedBundleSize+1))
 	r := httptest.NewRequest(http.MethodPost, "/v1/bundles", big)

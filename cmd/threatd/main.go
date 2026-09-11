@@ -26,6 +26,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/threat"
@@ -173,6 +174,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One registry for the whole process: /metrics on the API mux exposes
+	// everything registered into it. consensusName is named once and
+	// used twice -- to pre-create the pass metrics' children at 0 and to tag
+	// the loop itself -- so the metric and the log line cannot disagree.
+	const consensusName = "blocklist consensus"
+	reg := metrics.NewRegistry()
+	httpMetrics := metrics.NewHTTP(reg)
+	passMetrics := metrics.NewPass(reg, consensusName)
+	ingestFullMetrics := metrics.NewIngestQueueFull(reg)
+
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
 	consensus := blocklist.New(s, snapshot, blocklist.Config{
@@ -190,13 +201,15 @@ func main() {
 	// construction, and NewServer takes the already-built queue as a
 	// parameter, so this is the one order that works.
 	ingestQueue := ingestq.New(threatQueueSize, threatQueueTimeout, threatapi.NewConsumer(s))
+	ingestQueue.Metrics = &ingestq.Metrics{Full: ingestFullMetrics.Counter("threat_events")}
 	ingestQueue.Start(threatQueueWorkers)
+	metrics.RegisterQueueGauges(reg, "threat_ingest", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
 		MaxDecisions:               threatMaxDecisions,
 		MaxAllowlistRequestsPerSys: allowlistMaxPerSystem,
 		Now:                        func() int64 { return time.Now().UnixMilli() },
-	})
+	}, metrics.Handler(reg), httpMetrics)
 
 	httpServer := &http.Server{
 		Addr:              listenAddr,
@@ -271,7 +284,7 @@ func main() {
 	// interval in, so a restart does not leave the feed answering 503 for
 	// five minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
-	consensusDone := svc.RunPassLoop(consensusCtx, "blocklist consensus", consensus, consensusInterval)
+	consensusDone := svc.RunPassLoop(consensusCtx, consensusName, consensus, consensusInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

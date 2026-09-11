@@ -29,6 +29,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
   - [Sizing ingest: `POST /v1/reports`](#sizing-ingest-post-v1reports-public-path-sizingv1reports)
   - [Cohort pass](#cohort-pass-baselinerunnerrun)
   - [Operator UI](#operator-ui)
+  - [Metrics](#metrics)
 - [Data model and storage](#data-model-and-storage)
   - [The EWMA baseline formula](#the-ewma-baseline-formula)
   - [The empty module is a real bucket](#the-empty-module-is-a-real-bucket)
@@ -143,6 +144,14 @@ cmd/authd  cmd/insightsd  cmd/threatd  cmd/sizingd    four binaries; authd owns
 internal/platform/auth  httpx  sqlitex   shared: ForwardAuth+cache, HTTP
                                           plumbing (ClientIP, SystemID,
                                           Logging, Healthz), SQLite Open
+internal/platform/metrics                shared: the Prometheus registry
+                                          construction and /metrics handler
+                                          every binary mounts next to
+                                          /healthz, plus the typed
+                                          counter/gauge/histogram
+                                          constructors (HTTP, LLM, Budget,
+                                          Pass, Auth, IngestQueueFull) other
+                                          packages' main()s wire up
 internal/platform/ingestq                generic bounded queue; threatd's
                                           ingest bound. Not shared with
                                           internal/queue (below) -- that one
@@ -179,18 +188,19 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | Package | Responsibility |
 |---|---|
 | `internal/model` | Wire types (`Bundle`, `Finding`, `Template`, …) and the pure helpers (`SortFindings`, `SeverityRank`) that operate on them. |
-| `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. Used only by `cmd/authd` now; moved from `internal/auth`. |
-| `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. |
+| `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
+| `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. `Logging` takes an optional `MetricsRecorder` (`*metrics.HTTP` satisfies it) and feeds it method/route/status/duration for every request after logging it -- `RouteLabel` derives the metrics label from the matched `net/http` `ServeMux` pattern (`Request.Pattern`), never `r.URL.Path`, so the label set stays the small fixed list of registered routes instead of being unbounded. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
-| `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. |
-| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. |
+| `internal/platform/metrics` | `NewRegistry`/`Handler` (a per-process `*prometheus.Registry` carrying the standard Go collectors, and the `/metrics` handler over it) plus typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
+| `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
+| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `pass_runs_total`/`pass_duration_seconds`/`pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
 | `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneFindings`/`PruneAnalyses`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
-| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. |
+| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `LLMCall`) reports one call per budget-suppressed window and one per LLM attempt, classed `success`/`transient`/`permanent`/`parse` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.LLM`. |
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings` and `analyses` against their own independent retention windows (`maint.Config`). Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
@@ -199,14 +209,14 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and `IsPlatform` (which families are ignorable when testing "solo"). Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/store/sizing` | sizingd's only store package: ingest, the cohort pass's inputs and outputs, and the rollups that outlive the daily rows. |
-| `internal/api/logs` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz` (registered unprefixed; Traefik adds `/logs`). |
-| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz` (Traefik adds `/blocklist`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
-| `internal/api/sizing` | HTTP handler for `POST /v1/reports`, `/healthz` (Traefik adds `/sizing`). |
+| `internal/api/logs` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz`, `/metrics` (registered unprefixed; Traefik adds `/logs` to the first two, and routes `/metrics` separately under `/metrics/logs` -- see "Metrics" below). |
+| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics` (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
+| `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings, systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines. Read-only — no write routes. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
-| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /healthz`. Owns no store and no UI. |
+| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
@@ -719,6 +729,102 @@ app, because Traefik BasicAuth is still Basic auth and a browser replays it on
 a forged cross-site POST exactly as it would replay credentials cached against
 the app directly. `docs/admin-guide.md` lists every route and the exposure
 rules, and explains what a finding, template and baseline are.
+
+### Metrics
+
+Each of the four binaries mounts `GET /metrics` on its existing API mux, next
+to `/healthz` (`internal/api/logs`, `internal/api/threat`,
+`internal/api/sizing`, `cmd/authd`'s own mux) -- never a fifth listener, the
+same "one process, one set of listeners" shape `/healthz` already has.
+`internal/platform/metrics.NewRegistry` builds one unshared
+`*prometheus.Registry` per process in `main()`, carrying the standard Go
+runtime/process collectors; every counter, histogram and gauge that package's
+other constructors return is registered into that same registry, and
+`metrics.Handler(reg)` is what gets mounted. No binary ever registers into
+`prometheus.DefaultRegisterer` -- an imported dependency that registers there
+on init would otherwise leak into the scrape output with no way to trace it
+back.
+
+`httpx.Logging` is the single instrumentation point for HTTP: every mux in
+the codebase already wraps its handler in it, so `Logging`'s optional
+`MetricsRecorder` parameter (`*metrics.HTTP` satisfies it) is fed
+method/route/status/duration for every request that flows through any of
+them, UI muxes included (which simply pass `nil` today, since only the four
+API muxes carry a `/metrics` endpoint). The route label is
+`httpx.RouteLabel(r)` -- the `net/http` `ServeMux` pattern that matched
+(`Request.Pattern`, populated by every pattern-based match since the request
+was dispatched through a registered pattern, `"unmatched"` for a 404) --
+**never** `r.URL.Path`. This is the same cardinality discipline "Gate reasons
+carry no computed values" describes for `gate_reasons`: a raw path is
+unbounded (an attacker or a typo can mint any string), a registered pattern
+is a small fixed set per binary. No metric anywhere carries a `system_id`
+label, for the same customer-identifying reason threat and sizing data never
+appear in a log line's fixed text.
+
+Everywhere a live accessor already exists -- `queue.Queue.Depth/Cap/Workers`,
+`ingestq.Queue[T].Depth/Cap/Workers` -- `metrics.RegisterQueueGauges` wires a
+`GaugeFunc` reading it directly at scrape time, so there is no polling loop
+and no second source of truth to drift from the queue's own state. The same
+"read the existing accessor, add no bookkeeping" rule is why no DB-derived
+gauge (open findings, blocklist size, published cohorts) was added: each
+pipeline has exactly one SQLite writer, and a gauge that ran a query per
+scrape would compete with it. Should one ever be needed, it must be computed
+once on the pipeline's own periodic pass (`internal/maint`, `internal/blocklist`,
+`internal/baseline`) and cached in memory behind the gauge, never queried
+live.
+
+**Every enumerable child is pre-created at 0.** A prometheus `CounterVec`
+creates a child only on the first `WithLabelValues` call, and a family with
+no children is absent from the scrape output entirely — no `HELP`, no `TYPE`,
+no series. An alert like
+`rate(llm_calls_total{result="permanent"}[5m]) > 0` then evaluates against
+*no data* rather than 0 on a freshly restarted process, so it never fires
+until the first permanent error has already happened — exactly the moment it
+was written for; dashboards show gaps instead of flat zero lines for the same
+reason. So each constructor calls `WithLabelValues` for every label value it
+can enumerate and discards the result, which registers the child at 0.
+Where the vocabulary belongs to another package the constructor takes it as a
+parameter (`metrics.NewBudget(reg, budget.SuppressedSystemCap)`,
+`metrics.NewAuth(reg, auth.Upstream*)`, `metrics.NewPass(reg, maint.PassName)`)
+rather than restating the strings, so there is never a second copy to drift.
+Two deliberate exceptions: the `HTTP` families stay lazy, because `status`
+and `method` are not closed sets and enumerating them would invent series
+that can never occur; and `pass_last_success_timestamp_seconds` stays absent
+until a pass actually succeeds, because a pre-created 0 reads as "last
+succeeded at the Unix epoch" and would fire
+`time() - pass_last_success_timestamp_seconds > 3600` on every restart.
+Absent is the honest representation of "has not succeeded yet".
+
+Three optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`
+(LLM call outcome and budget rejections, wired in `cmd/insightsd`),
+`auth.ForwardAuth.Metrics` (cache hit/miss and upstream result, wired in
+`cmd/authd`), and `ingestq.Queue[T].Metrics.Full` (the saturated-queue
+counter, wired in `cmd/threatd`) -- each the same shape as the pattern
+established elsewhere in this codebase for an optional side effect: a struct
+of function fields, checked for nil before every call, so every existing
+caller and test predates the field and needs no change. `svc.RunPassLoop`'s
+optional `PassRecorder` parameter (`*metrics.Pass` satisfies it) is the
+fourth: it is what gives `blocklist consensus`, `sizing cohort` and `log
+maintenance` (via `internal/maint.Runner.RunLoop`, itself a thin wrapper over
+`RunPassLoop`) their run/duration/last-success metrics without each pass
+package depending on `internal/platform/metrics` itself -- only the three
+`main()`s that already import it do.
+
+Traefik republishes each binary's `/metrics`, plus its own built-in
+Prometheus exporter, at a public path under `/metrics/*`
+(`deploy/traefik/dynamic.yaml.tmpl`), gated by a BasicAuth credential
+(`metrics-auth`, `/etc/traefik/metrics.htpasswd`) that is deliberately
+**not** `ADMIN_API_KEY` and not a node's forward-auth credential -- see
+`docs/admin-guide.md`'s "Metrics" section for the full endpoint list, the
+metric catalogue and the deploy-time credential generation
+(`deploy/gen-metrics-auth.sh`). Because `/metrics/<name>` strips its whole
+public path and needs the backend's fixed `/metrics` back afterwards --
+`stripPrefix` alone cannot do this: stripping a request path's entire length
+leaves `""`, which Traefik forces to `"/"`, never `"/metrics"` -- each
+`strip-metrics-*` middleware is chained with one shared `add-metrics-prefix`
+(`addPrefix: {prefix: /metrics}`) rather than the single `stripPrefix` the
+six pipeline routers use, whose public prefix (`/logs`, `/blocklist`,
+`/sizing`) is always followed by more path, not the whole thing.
 
 ## Data model and storage
 

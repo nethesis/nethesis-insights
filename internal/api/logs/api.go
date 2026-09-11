@@ -68,8 +68,12 @@ type server struct {
 	cfg     Config
 }
 
-// NewServer builds insightsd's ingest and read API.
-func NewServer(q Publisher, st Store, trusted httpx.TrustedProxies, cfg Config) http.Handler {
+// NewServer builds insightsd's ingest and read API. metricsHandler is
+// mounted at /metrics next to /healthz -- nil skips it, which only tests
+// exercise; every real binary supplies internal/platform/metrics.Handler.
+// rec is fed every completed request's method/route/status/duration; nil is
+// valid and simply skips metrics -- see httpx.MetricsRecorder.
+func NewServer(q Publisher, st Store, trusted httpx.TrustedProxies, cfg Config, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -77,9 +81,12 @@ func NewServer(q Publisher, st Store, trusted httpx.TrustedProxies, cfg Config) 
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 	mux.HandleFunc("/v1/bundles", srv.handleBundles)
 	mux.HandleFunc("/v1/findings", srv.handleFindings)
-	return httpx.Logging(mux)
+	return httpx.Logging(mux, rec)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

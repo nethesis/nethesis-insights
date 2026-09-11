@@ -25,6 +25,14 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 )
 
+// PassName is what this pass is called in the log line svc.RunPassLoop
+// writes and in the `pass` label of the metrics it feeds. Exported because
+// cmd/insightsd needs the same string to pre-create that label's children
+// (metrics.NewPass) while RunLoop below is what actually hands it to
+// svc.RunPassLoop -- one definition, so the log line and the metric can
+// never disagree about this pass's name.
+const PassName = "log maintenance"
+
 // Reader is the slice of logsstore.Store this pass needs. Declared here,
 // like blocklist.Reader and baseline.Reader, so this package is testable
 // with a fake and the layering stays a DAG. *logsstore.Store satisfies it.
@@ -115,6 +123,6 @@ func (r *Runner) prune(ctx context.Context, table string, fn func(context.Contex
 // already satisfies svc.Pass, and there is nothing left for this method to
 // do but supply the log line's name. cmd/insightsd/main.go is unaffected --
 // it still just calls maintRunner.RunLoop(ctx, interval).
-func (r *Runner) RunLoop(ctx context.Context, interval time.Duration) <-chan struct{} {
-	return svc.RunPassLoop(ctx, "log maintenance", r, interval)
+func (r *Runner) RunLoop(ctx context.Context, interval time.Duration, rec svc.PassRecorder) <-chan struct{} {
+	return svc.RunPassLoop(ctx, PassName, r, interval, rec)
 }

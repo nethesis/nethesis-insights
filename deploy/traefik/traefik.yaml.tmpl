@@ -27,6 +27,15 @@ entryPoints:
     # overwrite is what makes the pipelines' rightmost-value rule correct.
     forwardedHeaders:
       trustedIPs: []
+  # Loopback-only and unpublished by insights.pod (see its PublishPort
+  # comment: only 80 and 443 ever leave the pod). This is where Traefik's
+  # OWN Prometheus exporter listens; it is never reachable directly, only
+  # republished at the public /metrics/traefik path (dynamic.yaml's
+  # metrics-traefik router, itself gated by metricsAuth) the same way the
+  # four Go backends' own /metrics are. 8082 does not collide with any of
+  # this deployment's other ports (9590, 9595-9596, 9605-9606, 9615-9616).
+  metrics:
+    address: "127.0.0.1:8082"
 
 providers:
   file:
@@ -40,6 +49,13 @@ certificatesResolvers:
       storage: /acme/acme.json
       httpChallenge:
         entryPoint: web
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
 
 log:
   level: INFO

@@ -54,6 +54,41 @@ func TestPublishRefusesWhenFull(t *testing.T) {
 	}
 }
 
+// A nil Metrics (the zero value) must not panic on ErrFull -- every existing
+// caller and test predates this field.
+func TestPublishWithNoMetricsDoesNotPanicWhenFull(t *testing.T) {
+	q := New(0, time.Second, func(context.Context, int) error { return nil })
+	// No Start: the single-slot buffer is already the whole capacity, so the
+	// first Publish fills it and the second overflows without a worker ever
+	// draining it.
+	_ = q.Publish(0)
+	if err := q.Publish(1); !errors.Is(err, ErrFull) {
+		t.Fatalf("Publish past capacity = %v, want ErrFull", err)
+	}
+}
+
+// A configured Metrics.Full hook must fire exactly once per ErrFull, never
+// on an accepted Publish.
+func TestPublishReportsFullToMetrics(t *testing.T) {
+	q := New(0, time.Second, func(context.Context, int) error { return nil })
+	var fullCalls int
+	q.Metrics = &Metrics{Full: func() { fullCalls++ }}
+
+	if err := q.Publish(0); err != nil {
+		t.Fatalf("Publish(0) = %v, want nil", err)
+	}
+	if fullCalls != 0 {
+		t.Fatalf("Full called %d times on an accepted Publish, want 0", fullCalls)
+	}
+
+	if err := q.Publish(1); !errors.Is(err, ErrFull) {
+		t.Fatalf("Publish past capacity = %v, want ErrFull", err)
+	}
+	if fullCalls != 1 {
+		t.Fatalf("Full called %d times on ErrFull, want 1", fullCalls)
+	}
+}
+
 // Every accepted item must reach the handler exactly once, from any worker.
 func TestEveryPublishedItemIsHandledOnce(t *testing.T) {
 	const items = 200

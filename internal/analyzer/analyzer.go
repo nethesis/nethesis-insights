@@ -55,12 +55,41 @@ type Config struct {
 	OutputPerMTok float64
 }
 
+// Metrics is the optional counter set Process reports against: one call to
+// BudgetRejected per window the budget suppressed before the gate ran, and
+// one call to LLMCall per attempt -- "success", "transient", "permanent" or
+// "parse" (see the metrics.LLMResult* constants), with costMicros set only
+// on success. Nil fields (or a nil *Metrics, the zero value of Analyzer's
+// Metrics field) are skipped, so every existing caller and test is
+// unaffected by adding this -- the same nil-safe-hook shape
+// internal/platform/auth.ForwardAuth.Metrics uses.
+type Metrics struct {
+	BudgetRejected func(reason string)
+	LLMCall        func(result string, costMicros int64)
+}
+
+func (m *Metrics) budgetRejected(reason string) {
+	if m != nil && m.BudgetRejected != nil {
+		m.BudgetRejected(reason)
+	}
+}
+
+func (m *Metrics) llmCall(result string, costMicros int64) {
+	if m != nil && m.LLMCall != nil {
+		m.LLMCall(result, costMicros)
+	}
+}
+
 type Analyzer struct {
 	store  Store
 	llm    llm.Client
 	budget *budget.Controller
 	cfg    Config
 	now    func() int64
+
+	// Metrics is optional and nil-checked on every use; see Metrics' doc.
+	// Set directly after New, before the analyzer starts processing bundles.
+	Metrics *Metrics
 }
 
 func New(s Store, c llm.Client, b *budget.Controller, cfg Config, now func() int64) *Analyzer {
@@ -183,6 +212,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	if verdict.Suppressed != "" {
 		slog.Warn("window suppressed by budget",
 			"system_id", b.SystemID, "window_start", b.Window.Start, "limit", verdict.Suppressed)
+		a.Metrics.budgetRejected(verdict.Suppressed)
 		return a.record(ctx, b, analysisEntry{
 			windowStart:  b.Window.Start,
 			windowEnd:    b.Window.End,
@@ -268,6 +298,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		)
 
 		if permanent {
+			a.Metrics.llmCall("permanent", 0)
 			// The request itself is wrong and will fail identically forever.
 			// Close the window so it is not retried into the same wall.
 			if finalizeErr := a.store.FinalizeAnalysis(ctx, logsstore.Analysis{
@@ -285,6 +316,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			return fmt.Errorf("analyzer: llm call: %w: %w", ErrPermanent, err)
 		}
 
+		a.Metrics.llmCall("transient", 0)
 		// Transient: record the attempt but leave the window claimable, or
 		// the edge's retry is rejected as a duplicate and the window is lost.
 		if recErr := a.store.RecordAttemptError(ctx, b.SystemID, b.Window.Start,
@@ -306,6 +338,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// 8. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
+		a.Metrics.llmCall("parse", 0)
 		finalizeErr := a.store.FinalizeAnalysis(ctx, logsstore.Analysis{
 			SystemID:     b.SystemID,
 			WindowStart:  b.Window.Start,
@@ -398,6 +431,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	}
 	billedInput := float64(resp.InputTokens-cached) + 0.5*float64(cached)
 	costMicros := int64(math.Round(((billedInput/1e6)*a.cfg.InputPerMTok + (float64(resp.OutputTokens)/1e6)*a.cfg.OutputPerMTok) * 1e6))
+	a.Metrics.llmCall("success", costMicros)
 
 	return a.record(ctx, b, analysisEntry{
 		windowStart:  b.Window.Start,

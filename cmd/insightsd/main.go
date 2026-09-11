@@ -30,6 +30,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/maint"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
+	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
@@ -286,6 +287,20 @@ func main() {
 
 	now := func() int64 { return time.Now().UnixMilli() }
 
+	// One registry for the whole process: /metrics on the API mux exposes
+	// everything registered into it, from the standard Go collectors up
+	// through the LLM/budget/queue/pass counters wired in below.
+	// The label vocabularies are passed in from the packages that own them
+	// (budget's suppression reason, maint's pass name) so every enumerable
+	// child is pre-created at 0 and alert rules evaluate against a real zero
+	// on a fresh process rather than no data -- see internal/platform/metrics'
+	// package doc.
+	reg := metrics.NewRegistry()
+	httpMetrics := metrics.NewHTTP(reg)
+	llmMetrics := metrics.NewLLM(reg)
+	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)
+	passMetrics := metrics.NewPass(reg, maint.PassName)
+
 	bud := budget.New(s, budget.Config{
 		MaxConcurrency:          llmMaxConcurrency,
 		MaxCallsPerSystemPerDay: llmMaxCallsPerSystemPerDay,
@@ -307,12 +322,17 @@ func main() {
 		OutputPerMTok: priceOutput,
 	}
 	az := analyzer.New(s, client, bud, cfg, now)
+	az.Metrics = &analyzer.Metrics{
+		BudgetRejected: budgetMetrics.Rejected,
+		LLMCall:        llmMetrics.Call,
+	}
 
 	// Ingest hands bundles to the queue and answers immediately; the workers
 	// own the analysis on their own context, so an edge that gives up waiting
 	// does not cancel work already in flight.
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
+	metrics.RegisterQueueGauges(reg, "bundle", q.Depth, q.Cap, q.Workers)
 
 	// The housekeeping pass: no LLM, no gate, no fingerprint -- just pruning
 	// system_templates, findings and analyses. See internal/maint's doc and
@@ -326,7 +346,7 @@ func main() {
 	handler := logsapi.NewServer(q, s, trusted, logsapi.Config{
 		ExcludeModules:  excludeModules,
 		ExcludeServices: excludeServices,
-	})
+	}, metrics.Handler(reg), httpMetrics)
 
 	httpServer := &http.Server{
 		Addr:              listenAddr,
@@ -429,7 +449,7 @@ func main() {
 	// pass runs immediately rather than one interval in, so a restart does
 	// not leave months of backlog unpruned until MAINT_INTERVAL elapses.
 	maintCtx, stopMaint := context.WithCancel(context.Background())
-	maintDone := maintRunner.RunLoop(maintCtx, maintInterval)
+	maintDone := maintRunner.RunLoop(maintCtx, maintInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

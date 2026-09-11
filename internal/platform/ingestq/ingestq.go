@@ -33,6 +33,16 @@ import (
 // 503 so the client retries later, rather than dropping the item silently.
 var ErrFull = errors.New("ingestq: full")
 
+// Metrics is the optional counter Publish reports against when it finds the
+// queue saturated. A nil Full (or a nil *Metrics, the zero value of Queue's
+// Metrics field) is skipped, so every existing caller and test is
+// unaffected by adding this -- the same nil-safe-hook shape
+// internal/platform/auth.ForwardAuth.Metrics uses. *metrics.IngestQueueFull
+// supplies a bound Full via its Counter method.
+type Metrics struct {
+	Full func()
+}
+
 // Handler processes one item. It runs on a background context, never on the
 // request context: a disconnected client must not abort work that has
 // already been accepted and, in the threat-events case, already sanitized.
@@ -50,6 +60,11 @@ type Queue[T any] struct {
 	// status row -- it never changes after Start, so reading it concurrently
 	// with Depth/Cap needs no lock, the same as those two.
 	workers int
+
+	// Metrics is optional and nil-checked on every Publish; see Metrics'
+	// doc. Set directly after New, before the queue starts taking traffic --
+	// the same convention ForwardAuth.Metrics uses.
+	Metrics *Metrics
 }
 
 // New returns a queue holding at most size items. Each item gets at most
@@ -73,6 +88,9 @@ func (q *Queue[T]) Publish(item T) error {
 	case q.ch <- item:
 		return nil
 	default:
+		if q.Metrics != nil && q.Metrics.Full != nil {
+			q.Metrics.Full()
+		}
 		return ErrFull
 	}
 }

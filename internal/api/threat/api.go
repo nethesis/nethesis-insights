@@ -120,7 +120,11 @@ func defaultNow() int64 { return time.Now().UnixMilli() }
 // NewServer builds threatd's client API. q is not optional: every deployment
 // bounds ingest against the single-writer database, so cmd/threatd always
 // builds one and there is no synchronous fallback path to leave untested.
-func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config) http.Handler {
+// metricsHandler is mounted at /metrics next to /healthz -- nil skips it,
+// which only tests exercise. rec is fed every completed request's
+// method/route/status/duration; nil is valid and simply skips metrics --
+// see httpx.MetricsRecorder.
+func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = defaultNow
 	}
@@ -128,10 +132,13 @@ func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.Tr
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 	mux.HandleFunc("/v1/events", srv.handleEvents)
 	mux.HandleFunc("/v1/feed", srv.handleFeed)
 	mux.HandleFunc("/v1/allowlist-requests", srv.handleAllowlistRequest)
-	return httpx.Logging(mux)
+	return httpx.Logging(mux, rec)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
