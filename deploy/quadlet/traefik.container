@@ -24,7 +24,7 @@ After=authd.service insightsd.service threatd.service sizingd.service
 Wants=authd.service
 
 [Container]
-Image=docker.io/library/traefik:v3.3
+Image=docker.io/library/traefik:v3.7.13
 ContainerName=traefik
 # In the pod, not on the host network: its connections to the four backends
 # stay inside the shared namespace, which is what makes their RemoteAddr a

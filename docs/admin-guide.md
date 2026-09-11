@@ -127,7 +127,7 @@ This is host-wide. It is the reason the host must be dedicated.
     for s in authd insightsd threatd sizingd; do
       podman pull ghcr.io/nethesis/nethesis-insights-$s:latest
     done
-    podman pull docker.io/library/traefik:v3.3
+    podman pull docker.io/library/traefik:v3.7.13
 
 The images are public and multi-arch (`linux/amd64`, `linux/arm64`); no
 registry login is needed. The four `ghcr.io` pulls are a warm-up rather than a
@@ -451,7 +451,7 @@ containers come back: `authd` goes first, because each pipeline unit carries
 a Traefik-generated `500` — never let through unauthenticated. A node treats
 both that and a `503` as retryable, so nothing is lost.
 
-`traefik` is deliberately excluded: it is pinned to `docker.io/library/traefik:v3.3`,
+`traefik` is deliberately excluded: it is pinned to `docker.io/library/traefik:v3.7.13`,
 so a restart would re-check Docker Hub on every start for a tag that does not
 move. Upgrading it is a deliberate two-step — `podman pull` the new tag, edit
 `Image=` in `/etc/containers/systemd/traefik.container`, `systemctl daemon-reload`,
@@ -499,7 +499,7 @@ Then the configuration, the secrets and the images:
     for s in authd insightsd threatd sizingd; do
       podman rmi ghcr.io/nethesis/nethesis-insights-$s:latest
     done
-    podman rmi docker.io/library/traefik:v3.3
+    podman rmi docker.io/library/traefik:v3.7.13
 
 Two things to know afterwards. Nodes keep calling in and get a connection
 refused, which they treat as a retryable outage — they do not need
