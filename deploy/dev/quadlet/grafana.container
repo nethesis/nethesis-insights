@@ -1,0 +1,66 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Grafana (development monitoring stack)
+# Wants=, not just After=: unlike the scrape targets, Prometheus is not
+# something Grafana observes going down -- it is the only datasource
+# provisioned into it, so a Grafana that starts without it is a dashboard
+# that renders "no data" on every panel and looks like a metrics bug rather
+# than a missing container. Wants= rather than Requires= for the reason the
+# pipeline units give: propagating a Prometheus failure by stopping Grafana
+# too would hide the one place the failure is visible.
+After=prometheus.service
+Wants=prometheus.service
+
+[Container]
+# Pinned, for the reason prometheus.container gives.
+Image=docker.io/grafana/grafana:13.0.8
+ContainerName=grafana
+# No PublishPort: 3000 exists only inside the pod's namespace, reachable
+# from outside solely through the Traefik router in
+# deploy/dev/traefik/dev.yaml.tmpl. Unlike Prometheus this container does
+# have authentication of its own, which is why that router carries no
+# BasicAuth -- but the unpublished port is still what guarantees the login
+# page is the only way in.
+#
+# One namespace means one port space: 3000 is Grafana's alone.
+Pod=insights.pod
+Volume=insights-grafana.volume:/var/lib/grafana
+# :z relabels the bind-mounted host directory for SELinux (Enforcing on the
+# target); ro because provisioning is read at startup and never written back.
+Volume=/etc/insights-dev/grafana/provisioning:/etc/grafana/provisioning:z,ro
+# GF_SERVER_ROOT_URL (rendered from INSIGHTS_HOST) and the admin credential
+# both live here, written by deploy/dev/render-dev.sh at mode 0600. The
+# password is a secret and is not in the repository, the same rule the four
+# /etc/insights/*.env files follow.
+EnvironmentFile=/etc/insights/grafana.env
+# This host is a development box that talks to nobody it does not have to.
+Environment=GF_ANALYTICS_REPORTING_ENABLED=false
+Environment=GF_ANALYTICS_CHECK_FOR_UPDATES=false
+Environment=GF_USERS_ALLOW_SIGN_UP=false
+# Loopback, not Grafana's default 0.0.0.0. Nothing in the pod is reachable
+# from outside it either way, but every other listener in this deployment
+# is explicitly bound to 127.0.0.1 and a single exception is the one that
+# would survive a future change to the pod's PublishPort list.
+Environment=GF_SERVER_HTTP_ADDR=127.0.0.1
+# Its OWN port, and the api/health path rather than the UI root: the root
+# answers a redirect to the login page, which wget -q treats as success even
+# when Grafana is still starting up.
+HealthCmd=wget -qO- http://127.0.0.1:3000/api/health || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=20s
+
+[Service]
+Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

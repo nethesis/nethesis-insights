@@ -1,0 +1,55 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Prometheus scrape config for the DEVELOPMENT monitoring stack only -- see
+# deploy/dev/README.md. Installed verbatim to /etc/insights-dev/prometheus.yml;
+# nothing in it is templated, because nothing in it is per-deployment.
+#
+# Every target is a loopback address, not a public /metrics/<name> path.
+# Prometheus runs inside the same pod as the five services it scrapes, so it
+# shares their network namespace and reaches each one exactly the way Traefik
+# does: a real loopback connection with no address translation in the path.
+# That is deliberately NOT the documented public scrape config in
+# docs/admin-guide.md's "Metrics" section, which exists for a monitoring
+# system outside this host and therefore has to carry TLS and the
+# metricsAuth credential. Scraping the public paths from inside the pod would
+# add both for no gain, and would make a broken certificate or a rotated
+# /etc/traefik/metrics.htpasswd break local monitoring too.
+#
+# The job names match that section's sample config exactly. The four Go
+# binaries prefix their own metrics with the service name, so the job label
+# is only load-bearing for the identically-named go_*/process_* collectors --
+# but a dashboard or alert written against the documented names then works
+# unchanged here, which is the whole point of not inventing a second set.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # metrics_path is left at its /metrics default on all five: that is where
+  # internal/platform/metrics mounts the handler in each Go binary, and where
+  # Traefik's own exporter answers on its loopback-only metrics entryPoint.
+  - job_name: nethesis-insights-logs
+    static_configs:
+      - targets: ["127.0.0.1:9595"]
+  - job_name: nethesis-insights-threat
+    static_configs:
+      - targets: ["127.0.0.1:9605"]
+  - job_name: nethesis-insights-sizing
+    static_configs:
+      - targets: ["127.0.0.1:9615"]
+  - job_name: nethesis-insights-authd
+    static_configs:
+      - targets: ["127.0.0.1:9590"]
+  - job_name: nethesis-insights-traefik
+    static_configs:
+      - targets: ["127.0.0.1:8082"]
+  # Prometheus scraping itself. The explicit metrics_path is required and is
+  # the one place --web.route-prefix=/prometheus (see the quadlet unit) leaks
+  # into this file: the flag moves every one of Prometheus's own endpoints,
+  # its exporter included, under that prefix.
+  - job_name: prometheus
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

@@ -1,0 +1,82 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Traefik routers for the DEVELOPMENT monitoring stack -- see
+# deploy/dev/README.md. Rendered to /etc/traefik/dynamic/dev.yaml by
+# deploy/dev/render-dev.sh.
+#
+# This is a SECOND file in the directory Traefik's file provider reads, not
+# an edit to dynamic.yaml, and that is the whole mechanism keeping the dev
+# stack out of production: a host that never ran render-dev.sh has no
+# dev.yaml, and a router that does not exist cannot 502 towards a container
+# that is not running. Adding these routers to dynamic.yaml.tmpl instead
+# would put them on every deployment and leave production answering
+# /grafana with a proxy error.
+#
+# Both files are loaded by the same file provider, so they share one
+# namespace: `operator-auth` below is dynamic.yaml's middleware, referenced
+# across files without a provider suffix. Nothing here may REDEFINE a name
+# that file already uses -- two definitions of one key across two files in a
+# directory provider is a last-one-wins race decided by filename order.
+#
+# INSIGHTS_HOST is the only substitution, exactly as in dynamic.yaml.tmpl.
+http:
+  routers:
+    # Priority 300, matching the metrics-* tier in dynamic.yaml rather than
+    # the API/UI tiers below it: neither path shares a prefix with anything
+    # in that file, but every router in this deployment carries an explicit
+    # priority so that a later router which DOES share a prefix cannot fall
+    # back to Traefik's rule-length tiebreak by accident.
+    #
+    # entryPoints is pinned to websecure for the reason dynamic.yaml gives:
+    # without it a router also attaches to plain :80, and its safety over
+    # cleartext then depends on an undefined ordering against the redirect
+    # router.
+    #
+    # Neither router carries the rate-limit middleware the eleven production
+    # routers all carry. That middleware is sized for fleet traffic -- 5
+    # req/s per source -- and a single Grafana page load pulls dozens of
+    # assets and fires a query per panel, so it would throttle the dashboard
+    # into uselessness while protecting a container that is only reachable
+    # by someone who has already authenticated.
+    dev-prometheus:
+      # Prometheus has no authentication of its own whatsoever, so
+      # operator-auth (Traefik BasicAuth against /etc/traefik/operators.htpasswd,
+      # whose password is ADMIN_API_KEY) is the only thing in front of a UI
+      # that can read every metric this deployment exports. It is also the
+      # only thing in front of Prometheus's admin-ish endpoints, which is
+      # why this router is NOT the one left open.
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/prometheus`)"
+      entryPoints: [websecure]
+      priority: 300
+      middlewares: [operator-auth]
+      service: dev-prometheus
+    dev-grafana:
+      # No middleware: Grafana has a real login of its own, with sessions and
+      # a password that is not ADMIN_API_KEY. Stacking operator-auth on top
+      # would mean two prompts for one page and would tie dashboard access to
+      # the fleet's admin key, which is the opposite of why the metrics
+      # credential was kept separate in the first place.
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/grafana`)"
+      entryPoints: [websecure]
+      priority: 300
+      service: dev-grafana
+
+  services:
+    # No stripPrefix on either: both backends are started already serving
+    # under their public path (Prometheus's --web.route-prefix, Grafana's
+    # GF_SERVER_ROOT_URL plus serve_from_sub_path). Stripping here as well
+    # would leave each one answering 404 on the path the proxy just rewrote.
+    dev-prometheus:
+      loadBalancer:
+        # passHostHeader defaults to true and stays true, matching every
+        # service in dynamic.yaml: Grafana builds redirects from the
+        # incoming Host, and a rewritten one sends the browser to the
+        # container's own address.
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:9090"}]
+    dev-grafana:
+      loadBalancer:
+        passHostHeader: true
+        servers: [{url: "http://127.0.0.1:3000"}]

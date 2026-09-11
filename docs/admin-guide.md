@@ -217,9 +217,18 @@ Then render:
 
     bash deploy/render.sh
 
-This writes `/etc/traefik/dynamic.yaml` and `/etc/traefik/traefik.yaml`. It
-fails loudly if either value is unset rather than rendering a broken config.
-Re-run it after any change to either value.
+This writes `/etc/traefik/traefik.yaml` and
+`/etc/traefik/dynamic/dynamic.yaml`. It fails loudly if either value is unset
+rather than rendering a broken config. Re-run it after any change to either
+value.
+
+The routing half lands in a **directory** the proxy watches, rather than in a
+single file, so that an optional extra set of routers can be added beside it
+without editing it — see [the development monitoring
+stack](../deploy/dev/README.md). Nothing else in a production deployment puts
+a file there, and every file in that directory shares one namespace: a second
+file must never redefine a router, service or middleware `dynamic.yaml`
+already names.
 
 ### 7. Start
 
@@ -637,6 +646,13 @@ scrape_configs:
     static_configs: [{targets: ["insights.example.com"]}]
     metrics_path: /metrics/traefik
 ```
+
+On a development host you can skip all of this and run Prometheus and Grafana
+in the pod itself, scraping the four binaries over loopback with no credential
+at all — see [the development monitoring
+stack](../deploy/dev/README.md). That is a dev convenience and is deliberately
+absent from a production deployment, which is expected to be scraped by the
+monitoring system that already exists.
 
 The five jobs all scrape the same host on the same port, differing only in
 `metrics_path`, so the `job` label is what separates them. That label is what

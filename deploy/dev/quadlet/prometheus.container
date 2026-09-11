@@ -1,0 +1,65 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Prometheus (development monitoring stack)
+# Ordering only, and no Wants=: a scrape target that is down is a target
+# Prometheus marks down and retries on the next interval, which is exactly
+# the signal this stack exists to show. Pulling the five services in here
+# would mean a monitoring container able to start the things it monitors,
+# which inverts the relationship.
+After=insights-pod.service authd.service insightsd.service threatd.service sizingd.service traefik.service
+
+[Container]
+# Pinned, like traefik.container and unlike the four :latest Nethesis
+# images: this is a third-party image nobody here builds, so "whatever the
+# tag points at today" would silently change the monitoring stack underneath
+# an investigation.
+Image=docker.io/prom/prometheus:v3.13.3
+ContainerName=prometheus
+# No PublishPort: like every other container here, 9090 exists only inside
+# the pod's namespace. That is what makes the scrape targets in
+# prometheus.yml real loopback addresses, and it is also what keeps this
+# container -- which has no authentication of its own at all -- reachable
+# only through Traefik's operator BasicAuth (deploy/dev/traefik/dev.yaml.tmpl).
+#
+# One namespace means one port space: 9090 is Prometheus's alone and does not
+# collide with 80, 443, 8082, 9590, 9595-9596, 9605-9606 or 9615-9616.
+Pod=insights.pod
+Volume=insights-prometheus.volume:/prometheus
+# :z relabels the bind-mounted host directory for SELinux (Enforcing on the
+# target); ro because Prometheus never writes its own config.
+Volume=/etc/insights-dev/prometheus.yml:/etc/prometheus/prometheus.yml:z,ro
+# --web.route-prefix, rather than a stripPrefix middleware on the Traefik
+# side: Prometheus redirects "/" to "<route-prefix>/graph" internally, so a
+# proxy that strips the prefix gets a redirect to /graph that matches no
+# router and 404s. Serving under the prefix natively removes the mismatch.
+# --web.external-url is deliberately not set: it exists to put an absolute
+# URL into Alertmanager notifications, there is no Alertmanager here, and
+# setting it would drag INSIGHTS_HOST into a file that is otherwise entirely
+# per-deployment-free.
+#
+# retention is a dev bound, not a policy: 15 days on a host with ~56 GB free
+# is a few hundred megabytes at this target count, and it means nobody has to
+# remember this container exists before the disk fills.
+Exec=--config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d --web.route-prefix=/prometheus --web.listen-address=127.0.0.1:9090
+# Its OWN port and its OWN route prefix. In a shared namespace a healthcheck
+# pointed at the wrong port succeeds against a sibling container and reports
+# its health as this one's.
+HealthCmd=wget -qO- http://127.0.0.1:9090/prometheus/-/healthy || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

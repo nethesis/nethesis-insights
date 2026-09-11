@@ -4,8 +4,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-# Renders deploy/traefik/*.tmpl to /etc/traefik/*.yaml (or DEST_DIR, if
-# given as $1). Both Traefik files are committed as templates deliberately
+# Renders deploy/traefik/*.tmpl to /etc/traefik/traefik.yaml and
+# /etc/traefik/dynamic/dynamic.yaml (or under DEST_DIR, if given as $1).
+# The dynamic half lands in a subdirectory because traefik.yaml.tmpl points
+# the file provider at a DIRECTORY -- see its comment: that is what lets the
+# optional development stack (deploy/dev/) add routers as a second file
+# rather than an edit to this one.
+# Both Traefik files are committed as templates deliberately
 # -- templating one and leaving the other static is a trap, since the
 # static one looks editable in place and either the edit is silently
 # overwritten on the next render or it is not and the two quietly disagree
@@ -23,6 +28,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 dest_dir=${1:-/etc/traefik}
+dynamic_dir="$dest_dir/dynamic"
 
 deploy_env=/etc/insights/deploy.env
 if [ -f "$deploy_env" ]; then
@@ -35,10 +41,10 @@ fi
 : "${INSIGHTS_HOST:?INSIGHTS_HOST is not set -- define it in $deploy_env}"
 : "${ACME_EMAIL:?ACME_EMAIL is not set -- define it in $deploy_env}"
 
-mkdir -p "$dest_dir"
+mkdir -p "$dest_dir" "$dynamic_dir"
 
 # traefik.yaml.tmpl configures the file provider with watch: true, so
-# $dest_dir is a directory Traefik is actively reading from while this
+# $dynamic_dir is a directory Traefik is actively reading from while this
 # script runs. Rendering straight into dynamic.yaml/traefik.yaml would give
 # Traefik a window to read a half-written file mid-render -- a routing
 # outage that lands at exactly the moment someone is changing routing, and
@@ -47,7 +53,10 @@ mkdir -p "$dest_dir"
 # filesystem, so a temp file anywhere else would turn the final step back
 # into a non-atomic copy -- and rename over the target: Traefik then only
 # ever sees the old file or the fully-rendered new one, never a partial one.
-tmp_dynamic=$(mktemp "$dest_dir/.dynamic.yaml.XXXXXX")
+# The temp name's random suffix is not one of the extensions the directory
+# provider loads (.yaml/.yml/.toml/.json), so Traefik ignores it even while
+# it is being written.
+tmp_dynamic=$(mktemp "$dynamic_dir/.dynamic.yaml.XXXXXX")
 tmp_traefik=$(mktemp "$dest_dir/.traefik.yaml.XXXXXX")
 # set -euo pipefail means a failed envsubst below exits the script
 # immediately, and without this trap the temp file it was writing would be
@@ -74,8 +83,8 @@ envsubst '$INSIGHTS_HOST $ACME_EMAIL' \
 # a plain "> file" would have created. Match what's already there; on the
 # very first render there is nothing to match, so fall back to the same 0644
 # a fresh "> file" gets under a standard umask.
-if [ -e "$dest_dir/dynamic.yaml" ]; then
-    chmod --reference="$dest_dir/dynamic.yaml" "$tmp_dynamic"
+if [ -e "$dynamic_dir/dynamic.yaml" ]; then
+    chmod --reference="$dynamic_dir/dynamic.yaml" "$tmp_dynamic"
 else
     chmod 644 "$tmp_dynamic"
 fi
@@ -85,7 +94,7 @@ else
     chmod 644 "$tmp_traefik"
 fi
 
-mv -f "$tmp_dynamic" "$dest_dir/dynamic.yaml"
+mv -f "$tmp_dynamic" "$dynamic_dir/dynamic.yaml"
 mv -f "$tmp_traefik" "$dest_dir/traefik.yaml"
 
-echo "rendered $dest_dir/dynamic.yaml and $dest_dir/traefik.yaml for INSIGHTS_HOST=$INSIGHTS_HOST" >&2
+echo "rendered $dynamic_dir/dynamic.yaml and $dest_dir/traefik.yaml for INSIGHTS_HOST=$INSIGHTS_HOST" >&2

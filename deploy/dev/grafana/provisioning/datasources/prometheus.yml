@@ -1,0 +1,33 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Grafana datasource provisioning for the DEVELOPMENT monitoring stack only
+# -- see deploy/dev/README.md. Installed verbatim to
+# /etc/insights-dev/grafana/provisioning/datasources/prometheus.yml and
+# mounted read-only; Grafana re-reads it on every start.
+#
+# Provisioned rather than clicked in, so "Grafana connected to Prometheus" is
+# a property of the deployment and not of whoever set it up: a rebuilt
+# grafana volume comes back with the datasource already there, and it cannot
+# drift from the URL the Prometheus unit actually serves on.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # A fixed uid, not a generated one: a dashboard JSON that names this
+    # datasource keeps working across a volume wipe, which a random uid
+    # would not survive.
+    uid: insights-prometheus
+    # proxy, not direct: Grafana's backend fetches the data, so the browser
+    # never needs to reach 127.0.0.1:9090 -- which it could not, that port
+    # being inside the pod and unpublished.
+    access: proxy
+    # Loopback inside the shared pod namespace, with the same
+    # /prometheus route prefix the quadlet unit starts Prometheus under.
+    # Dropping the prefix here yields a datasource that saves cleanly and
+    # then 404s on every query.
+    url: http://127.0.0.1:9090/prometheus
+    isDefault: true
+    editable: false

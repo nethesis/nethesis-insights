@@ -39,7 +39,21 @@ entryPoints:
 
 providers:
   file:
-    filename: /etc/traefik/dynamic.yaml
+    # A directory, not a single filename, and that is load-bearing rather
+    # than cosmetic: it is what lets the optional development monitoring
+    # stack (deploy/dev/) drop a second file of routers in beside the
+    # rendered dynamic.yaml without editing it. A production host never runs
+    # deploy/dev/render-dev.sh, so that file does not exist there and neither
+    # do its routers -- whereas putting them in dynamic.yaml.tmpl would leave
+    # every deployment answering /grafana with a 502 towards a container it
+    # is not running.
+    #
+    # Every file in here is merged into ONE namespace, so two files must
+    # never define the same router, service or middleware name: that is a
+    # last-one-wins race decided by filename order, not an error.
+    # /etc/traefik itself stays outside this directory because it holds the
+    # two htpasswd files, which are not Traefik configuration.
+    directory: /etc/traefik/dynamic
     watch: true
 
 certificatesResolvers:

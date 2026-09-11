@@ -2,9 +2,15 @@
 # Copyright (C) 2026 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Rendered to /etc/traefik/dynamic.yaml at deploy time:
+# Rendered to /etc/traefik/dynamic/dynamic.yaml at deploy time:
 #   set -a; . /etc/insights/deploy.env; set +a
-#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < dynamic.yaml.tmpl > /etc/traefik/dynamic.yaml
+#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < dynamic.yaml.tmpl > /etc/traefik/dynamic/dynamic.yaml
+#
+# A subdirectory because traefik.yaml.tmpl points the file provider at a
+# DIRECTORY, so the optional development stack (deploy/dev/) can add routers
+# as a second file rather than an edit to this one. All files there share one
+# namespace: nothing else may redefine a router, service or middleware named
+# here.
 # Naming the variables in envsubst's argument matters: unquoted, it would
 # also expand Traefik's own ${...} syntax. INSIGHTS_HOST drives the six
 # Host() matchers below and the ACME certificate domain, and nothing else --
