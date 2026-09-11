@@ -179,7 +179,10 @@ func main() {
 	// used twice -- to pre-create the pass metrics' children at 0 and to tag
 	// the loop itself -- so the metric and the log line cannot disagree.
 	const consensusName = "blocklist consensus"
-	reg := metrics.NewRegistry()
+	// The service name prefixes every metric this package defines
+	// (threatd_http_requests_total, ...); the standard go_*/process_*
+	// collectors deliberately stay unprefixed.
+	reg := metrics.NewRegistry("threatd")
 	httpMetrics := metrics.NewHTTP(reg)
 	passMetrics := metrics.NewPass(reg, consensusName)
 	ingestFullMetrics := metrics.NewIngestQueueFull(reg)

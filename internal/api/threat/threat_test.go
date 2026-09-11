@@ -109,7 +109,7 @@ func threatServer(st Store, q Publisher, snap *blocklist.Snapshot) http.Handler 
 // /metrics is mounted next to /healthz. See the equivalent logs-package test
 // for why this drives a request through an unrelated route first.
 func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
-	reg := metrics.NewRegistry()
+	reg := metrics.NewRegistry("threatd")
 	rec := metrics.NewHTTP(reg)
 	h := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, trustedProxy, Config{MaxDecisions: 500}, metrics.Handler(reg), rec)
 
@@ -127,7 +127,7 @@ func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
 	body := w.Body.String()
 	for _, want := range []string{
 		"go_goroutines",
-		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+		`threatd_http_requests_total{method="GET",route="/healthz",status="200"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)

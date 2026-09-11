@@ -17,12 +17,12 @@ type IngestQueueFull struct {
 }
 
 // NewIngestQueueFull builds and registers the counter into reg.
-func NewIngestQueueFull(reg *prometheus.Registry) *IngestQueueFull {
+func NewIngestQueueFull(reg *Registry) *IngestQueueFull {
 	c := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ingestq_full_total",
 		Help: "Publish calls that found internal/platform/ingestq.Queue saturated, by queue name.",
 	}, []string{"queue"})
-	reg.MustRegister(c)
+	reg.prefixed.MustRegister(c)
 	return &IngestQueueFull{full: c}
 }
 

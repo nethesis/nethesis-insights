@@ -27,14 +27,14 @@ type Budget struct {
 // cap degrades the gate to security-only (Verdict.SecurityOnly) rather than
 // suppressing a window, so it never reaches this counter, and pre-creating
 // it would invent a series that can never move.
-func NewBudget(reg *prometheus.Registry, reasons ...string) *Budget {
+func NewBudget(reg *Registry, reasons ...string) *Budget {
 	b := &Budget{
 		rejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "budget_rejections_total",
 			Help: "Windows suppressed by internal/budget before the gate ran, by the limit that fired.",
 		}, []string{"reason"}),
 	}
-	reg.MustRegister(b.rejections)
+	reg.prefixed.MustRegister(b.rejections)
 	for _, reason := range reasons {
 		b.rejections.WithLabelValues(reason)
 	}

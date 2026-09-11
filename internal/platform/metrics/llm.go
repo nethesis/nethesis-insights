@@ -30,7 +30,7 @@ type LLM struct {
 // "pre-create every enumerable child" note. This vocabulary is closed and
 // owned here (the LLMResult* constants above), so unlike NewBudget and
 // NewAuth this constructor needs no vocabulary from its caller.
-func NewLLM(reg *prometheus.Registry) *LLM {
+func NewLLM(reg *Registry) *LLM {
 	l := &LLM{
 		calls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_calls_total",
@@ -41,7 +41,7 @@ func NewLLM(reg *prometheus.Registry) *LLM {
 			Help: "Total LLM spend in micro-dollars (1e-6 USD), from successful calls only.",
 		}),
 	}
-	reg.MustRegister(l.calls, l.cost)
+	reg.prefixed.MustRegister(l.calls, l.cost)
 	for _, result := range []string{
 		LLMResultSuccess, LLMResultTransient, LLMResultPermanent, LLMResultParse,
 	} {

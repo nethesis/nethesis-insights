@@ -151,7 +151,10 @@ func main() {
 	// twice -- to pre-create the pass metrics' children at 0 and to tag the
 	// loop itself -- so the metric and the log line cannot disagree.
 	const cohortName = "sizing cohort"
-	reg := metrics.NewRegistry()
+	// The service name prefixes every metric this package defines
+	// (sizingd_http_requests_total, ...); the standard go_*/process_*
+	// collectors deliberately stay unprefixed.
+	reg := metrics.NewRegistry("sizingd")
 	httpMetrics := metrics.NewHTTP(reg)
 	passMetrics := metrics.NewPass(reg, cohortName)
 

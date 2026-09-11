@@ -124,9 +124,12 @@ func main() {
 	// forward-auth cache/upstream counters wired in below.
 	// The upstream vocabulary comes from internal/platform/auth, the package
 	// that produces it, so each outcome's child is pre-created at 0 -- an
-	// alert on auth_upstream_results_total{result="unavailable"} must
+	// alert on authd_upstream_results_total{result="unavailable"} must
 	// evaluate against a real zero on a fresh process, not no data.
-	reg := metrics.NewRegistry()
+	// The service name prefixes every metric this package defines
+	// (authd_http_requests_total, ...); the standard go_*/process_*
+	// collectors deliberately stay unprefixed.
+	reg := metrics.NewRegistry("authd")
 	httpMetrics := metrics.NewHTTP(reg)
 	authMetrics := metrics.NewAuth(reg,
 		auth.UpstreamValid, auth.UpstreamInvalid, auth.UpstreamUnavailable)

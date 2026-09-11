@@ -184,7 +184,7 @@ func TestIngestRequiresCredentials(t *testing.T) {
 // request's counter -- proving httpx.Logging's metrics hook is actually
 // wired to this server's registry, not just constructed and discarded.
 func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
-	reg := metrics.NewRegistry()
+	reg := metrics.NewRegistry("insightsd")
 	rec := metrics.NewHTTP(reg)
 	pub := &fakePublisher{}
 	h := NewServer(pub, &fakeStore{}, trustedProxy, Config{}, metrics.Handler(reg), rec)
@@ -205,7 +205,7 @@ func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
 	body := w.Body.String()
 	for _, want := range []string{
 		"go_goroutines",
-		`http_requests_total{method="GET",route="/healthz",status="200"} 1`,
+		`insightsd_http_requests_total{method="GET",route="/healthz",status="200"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape body missing %q\nbody:\n%s", want, body)

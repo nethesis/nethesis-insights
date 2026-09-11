@@ -191,9 +191,9 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. `Logging` takes an optional `MetricsRecorder` (`*metrics.HTTP` satisfies it) and feeds it method/route/status/duration for every request after logging it -- `RouteLabel` derives the metrics label from the matched `net/http` `ServeMux` pattern (`Request.Pattern`), never `r.URL.Path`, so the label set stays the small fixed list of registered routes instead of being unbounded. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
-| `internal/platform/metrics` | `NewRegistry`/`Handler` (a per-process `*prometheus.Registry` carrying the standard Go collectors, and the `/metrics` handler over it) plus typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
-| `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
-| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `pass_runs_total`/`pass_duration_seconds`/`pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
+| `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
+| `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `<svc>_http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
+| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `<svc>_pass_runs_total`/`_pass_duration_seconds`/`_pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
@@ -736,14 +736,41 @@ Each of the four binaries mounts `GET /metrics` on its existing API mux, next
 to `/healthz` (`internal/api/logs`, `internal/api/threat`,
 `internal/api/sizing`, `cmd/authd`'s own mux) -- never a fifth listener, the
 same "one process, one set of listeners" shape `/healthz` already has.
-`internal/platform/metrics.NewRegistry` builds one unshared
-`*prometheus.Registry` per process in `main()`, carrying the standard Go
-runtime/process collectors; every counter, histogram and gauge that package's
-other constructors return is registered into that same registry, and
+`internal/platform/metrics.NewRegistry(service)` builds one unshared
+`Registry` per process in `main()`, carrying the standard Go runtime/process
+collectors; every counter, histogram and gauge that package's other
+constructors return is registered into that same registry, and
 `metrics.Handler(reg)` is what gets mounted. No binary ever registers into
 `prometheus.DefaultRegisterer` -- an imported dependency that registers there
 on init would otherwise leak into the scrape output with no way to trace it
 back.
+
+**Every metric this package defines is prefixed with the exporting
+container's name** (`insightsd`, `threatd`, `sizingd`, `authd` -- the
+`ContainerName=` of `deploy/quadlet/*.container`), so one Prometheus holding
+all five targets never disambiguates two services' request counts by label
+alone. `metrics.Registry` is what makes that structural rather than a
+convention: it holds the raw `*prometheus.Registry` **and** a
+`prometheus.WrapRegistererWithPrefix(service+"_", raw)` registerer, both
+unexported, and every constructor in the package takes a `*Registry` and
+registers through the prefixed half. The prefix is therefore applied once, at
+the registry, rather than as a `Namespace:` on each of the metric
+definitions -- a metric added later is prefixed automatically, whereas a
+per-definition `Namespace` is something a future change can silently forget,
+and one unprefixed family in an otherwise prefixed set is the kind of
+inconsistency nobody notices until a dashboard query comes back empty. There
+is correspondingly no way to register one of this package's metrics on the
+unprefixed half by accident.
+
+The standard collectors are the deliberate exception: `go_*`, `process_*` and
+promhttp's own `promhttp_*` are registered on the **raw** registry and keep
+their conventional names, because every off-the-shelf Go/Grafana dashboard
+and every `go_*`-based alert rule queries those exact strings -- prefixing
+them would buy internal consistency at the cost of breaking all of it. The
+scrape is served from the raw registry, so one response carries both halves.
+`TestStandardCollectorsAreNotPrefixed` pins both directions of that rule.
+Traefik's own exporter already emits `traefik_*` and needs nothing from this
+package.
 
 `httpx.Logging` is the single instrumentation point for HTTP: every mux in
 the codebase already wraps its handler in it, so `Logging`'s optional
@@ -777,7 +804,7 @@ live.
 creates a child only on the first `WithLabelValues` call, and a family with
 no children is absent from the scrape output entirely — no `HELP`, no `TYPE`,
 no series. An alert like
-`rate(llm_calls_total{result="permanent"}[5m]) > 0` then evaluates against
+`rate(insightsd_llm_calls_total{result="permanent"}[5m]) > 0` then evaluates against
 *no data* rather than 0 on a freshly restarted process, so it never fires
 until the first permanent error has already happened — exactly the moment it
 was written for; dashboards show gaps instead of flat zero lines for the same
@@ -789,10 +816,10 @@ parameter (`metrics.NewBudget(reg, budget.SuppressedSystemCap)`,
 rather than restating the strings, so there is never a second copy to drift.
 Two deliberate exceptions: the `HTTP` families stay lazy, because `status`
 and `method` are not closed sets and enumerating them would invent series
-that can never occur; and `pass_last_success_timestamp_seconds` stays absent
+that can never occur; and `<svc>_pass_last_success_timestamp_seconds` stays absent
 until a pass actually succeeds, because a pre-created 0 reads as "last
 succeeded at the Unix epoch" and would fire
-`time() - pass_last_success_timestamp_seconds > 3600` on every restart.
+`time() - threatd_pass_last_success_timestamp_seconds > 3600` on every restart.
 Absent is the honest representation of "has not succeeded yet".
 
 Three optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`

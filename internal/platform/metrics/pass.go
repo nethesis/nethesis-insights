@@ -45,7 +45,7 @@ const (
 // pass_last_success_timestamp_seconds is deliberately NOT pre-created --
 // see the package doc: a zero there would read as "last succeeded at the
 // Unix epoch" and fire every staleness alert on every restart.
-func NewPass(reg *prometheus.Registry, passes ...string) *Pass {
+func NewPass(reg *Registry, passes ...string) *Pass {
 	p := &Pass{
 		runs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pass_runs_total",
@@ -61,7 +61,7 @@ func NewPass(reg *prometheus.Registry, passes ...string) *Pass {
 			Help: "Unix time of the last successful run of this pass.",
 		}, []string{"pass"}),
 	}
-	reg.MustRegister(p.runs, p.duration, p.lastSuccess)
+	reg.prefixed.MustRegister(p.runs, p.duration, p.lastSuccess)
 	for _, pass := range passes {
 		p.runs.WithLabelValues(pass, passResultSuccess)
 		p.runs.WithLabelValues(pass, passResultFailure)

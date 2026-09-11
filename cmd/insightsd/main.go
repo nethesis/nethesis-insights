@@ -295,7 +295,10 @@ func main() {
 	// child is pre-created at 0 and alert rules evaluate against a real zero
 	// on a fresh process rather than no data -- see internal/platform/metrics'
 	// package doc.
-	reg := metrics.NewRegistry()
+	// The service name prefixes every metric this package defines
+	// (insightsd_http_requests_total, ...); the standard go_*/process_*
+	// collectors deliberately stay unprefixed.
+	reg := metrics.NewRegistry("insightsd")
 	httpMetrics := metrics.NewHTTP(reg)
 	llmMetrics := metrics.NewLLM(reg)
 	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)

@@ -556,18 +556,29 @@ Traefik checks that credential itself (`metrics-auth`, against
 `/etc/traefik/metrics.htpasswd`); the four Go binaries never see it and never
 validate it.
 
-**What each endpoint carries.** The Go runtime and process collectors
-(`go_*`, `process_*`) on all four, plus:
+**Every metric is prefixed with the name of the container exporting it** —
+`insightsd_`, `threatd_`, `sizingd_`, `authd_` — so one Prometheus holding
+all five targets never has to disambiguate two services' request counts by
+label alone. Traefik does the same for itself (`traefik_*`) out of the box.
 
-| Metric | Binary | What it means |
+The one deliberate exception is the standard Go runtime and process
+collectors, which keep their conventional unprefixed `go_*` and `process_*`
+names on all four binaries (plus `promhttp_*`): every off-the-shelf Go or
+Grafana dashboard and every `go_*`-based alert rule queries those exact
+names, and prefixing them would break all of it for the sake of tidiness.
+Tell the two apart by the `job` label your scrape config sets.
+
+So, per binary, in addition to `go_*`/`process_*`:
+
+| Metric (shown with the `insightsd_` prefix) | Binary | What it means |
 |---|---|---|
-| `http_requests_total{method,route,status}`, `http_request_duration_seconds` | all four | every request, labeled by the registered route pattern — never the raw path, which would be unbounded |
-| `queue_depth{queue}`, `queue_capacity{queue}`, `queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_ingest"`) | the bundle/ingest queue's live state |
-| `llm_calls_total{result}`, `llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
-| `budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
-| `ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
-| `pass_runs_total{pass,result}`, `pass_duration_seconds{pass}`, `pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
-| `auth_cache_results_total{result}`, `auth_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered |
+| `<svc>_http_requests_total{method,route,status}`, `<svc>_http_request_duration_seconds` | all four | every request, labeled by the registered route pattern — never the raw path, which would be unbounded |
+| `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_ingest"`) | the bundle/ingest queue's live state |
+| `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
+| `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
+| `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
+| `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
+| `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered |
 
 No metric anywhere carries a `system_id` label, a raw request path, a
 scenario, a template or a module name — the same cardinality and
@@ -575,27 +586,29 @@ data-protection rule this document's "How it works" sections describe for
 gate reasons and findings.
 
 **Counters start at 0, not missing.** Every counter above whose labels are a
-known list — the four `llm_calls_total` outcomes, the `budget_rejections_total`
-reason, both `auth_*` families, `ingestq_full_total`, and both
-`pass_runs_total` results — is exported at `0` from the first scrape after a
-restart, before the thing it counts has ever happened. That is what lets an
-alert like `rate(llm_calls_total{result="permanent"}[5m]) > 0` work on a
+known list — the four `insightsd_llm_calls_total` outcomes, the
+`insightsd_budget_rejections_total` reason, both `authd_*` families,
+`threatd_ingestq_full_total`, and both `<svc>_pass_runs_total` results — is
+exported at `0` from the first scrape after a restart, before the thing it
+counts has ever happened. That is what lets an alert like
+`rate(insightsd_llm_calls_total{result="permanent"}[5m]) > 0` work on a
 freshly restarted server: without it the series would not exist yet, the rule
 would evaluate against no data, and it would stay silent until the first
 failure had already occurred. Two deliberate exceptions:
-`http_requests_total` and `http_request_duration_seconds` appear only once a
-matching request has been served (the method/status combinations are not a
-fixed list, so pre-creating them would invent series that never occur), and
-`pass_last_success_timestamp_seconds` appears only once that pass has
-genuinely succeeded — a `0` there would mean "last succeeded in 1970" and
-would trip every staleness alert on every restart.
+`<svc>_http_requests_total` and `<svc>_http_request_duration_seconds` appear
+only once a matching request has been served (the method/status combinations
+are not a fixed list, so pre-creating them would invent series that never
+occur), and `<svc>_pass_last_success_timestamp_seconds` appears only once
+that pass has genuinely succeeded — a `0` there would mean "last succeeded in
+1970" and would trip every staleness alert on every restart
+(`time() - threatd_pass_last_success_timestamp_seconds > 3600`).
 
 A sample Prometheus scrape config, one job per binary, reusing one
 `basic_auth` block:
 
 ```yaml
 scrape_configs:
-  - job_name: nethesis-insights
+  - job_name: nethesis-insights-logs
     scheme: https
     basic_auth:
       username: prometheus
@@ -624,6 +637,13 @@ scrape_configs:
     static_configs: [{targets: ["insights.example.com"]}]
     metrics_path: /metrics/traefik
 ```
+
+The five jobs all scrape the same host on the same port, differing only in
+`metrics_path`, so the `job` label is what separates them. That label is what
+you need for the `go_*` and `process_*` metrics, which are identically named
+on all four binaries — `go_goroutines{job="nethesis-insights-authd"}`. Every
+other metric already carries its service in the name, so
+`insightsd_queue_depth` is unambiguous with or without the job label.
 
 ## The operator UI
 
