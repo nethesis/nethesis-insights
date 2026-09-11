@@ -115,10 +115,11 @@ interface.
 
 `ss -tlnp` is the wrong check here, unlike in the production install: the pod
 has its own network namespace, so a container's listener never appears in the
-host's table either way, and on a Fedora-family host `*:9090` is already
-**cockpit.socket** — a pre-existing host service, not this Prometheus. The two
-do not collide, being in different namespaces, but reading that line as
-"Prometheus published its port" is the mistake this note exists to prevent.
+host's table whether or not it was published, and a port these two happen to
+want is one an unrelated host service may already hold — 9090 is Cockpit's
+default, and 3000 is a common one. Such a listener neither collides with
+these containers nor says anything about them, but it reads exactly like a
+Prometheus that escaped the pod. Compare namespaces instead.
 
 Finally, the routed paths:
 
