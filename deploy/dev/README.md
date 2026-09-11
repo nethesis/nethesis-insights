@@ -104,12 +104,21 @@ so it needs no restart.
     systemctl is-active prometheus grafana
     podman ps --format '{{.Names}}\t{{.Status}}' | grep -E 'prometheus|grafana'
 
-Both report `healthy`. Then confirm the host's port surface is unchanged:
+Both report `healthy`. Then confirm neither container kept a port of its own:
 
-    ss -tlnp | grep -E ':(3000|9090)\b'
+    podman inspect prometheus grafana --format '{{.Name}} {{.NetworkSettings.SandboxKey}}'
 
-**Expect nothing.** A hit here means the container kept a published port and
-is not in the pod — an unauthenticated Prometheus on a public interface.
+**Both must print the same namespace path**, and the same one `traefik`
+prints. A container with a namespace of its own is not in the pod, which
+means it published its port — an unauthenticated Prometheus on a public
+interface.
+
+`ss -tlnp` is the wrong check here, unlike in the production install: the pod
+has its own network namespace, so a container's listener never appears in the
+host's table either way, and on a Fedora-family host `*:9090` is already
+**cockpit.socket** — a pre-existing host service, not this Prometheus. The two
+do not collide, being in different namespaces, but reading that line as
+"Prometheus published its port" is the mistake this note exists to prevent.
 
 Finally, the routed paths:
 
