@@ -17,7 +17,22 @@
   },
   "timepicker": {},
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "regex": "",
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "skipUrlSync": false
+      }
+    ]
   },
   "annotations": {
     "list": []
@@ -44,7 +59,7 @@
       "description": "Every target Prometheus is scraping. DOWN means the container is gone or its /metrics stopped answering -- not that the service is unhealthy, which its own health check reports.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 5,
@@ -56,7 +71,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(up, \"svc\", \"$1\", \"job\", \"(?:nethesis-insights-)?(.*)\")",
@@ -129,7 +144,7 @@
       "description": "Each binary's periodic background pass. The series only exists once that pass has genuinely succeeded, so a missing tile after a restart is expected, not an alert.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 5,
@@ -141,7 +156,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "time() - {__name__=~\"(insightsd|threatd|sizingd|authd)_pass_last_success_timestamp_seconds\"}",
@@ -202,7 +217,7 @@
       "description": "A value that keeps resetting is a container in a restart loop.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 5,
@@ -214,7 +229,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(time() - process_start_time_seconds{job=~\"nethesis-insights-(logs|threat|sizing|authd)\"}, \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",
@@ -288,7 +303,7 @@
       "description": "Every request each binary served, including its own /healthz and /metrics -- which is why an idle deployment is not at zero.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -300,7 +315,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(sum by (job) (rate({__name__=~\"(insightsd|threatd|sizingd|authd)_http_requests_total\"}[$__rate_interval])), \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",
@@ -432,7 +447,7 @@
       "description": "4xx is usually a client without a credential; 5xx is the server's own fault. 503 on threatd's ingest path means the queue shed load.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -444,7 +459,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (status) (rate({__name__=~\"(insightsd|threatd|sizingd|authd)_http_requests_total\", status=~\"4..|5..\"}[$__rate_interval]))",
@@ -546,7 +561,7 @@
       "description": "Ingest is asynchronous on both queued pipelines, so this measures accepting a request, never the analysis behind it.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -558,7 +573,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(histogram_quantile(0.95, sum by (job, le) (rate({__name__=~\"(insightsd|threatd|sizingd|authd)_http_request_duration_seconds_bucket\"}[$__rate_interval]))), \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",
@@ -703,7 +718,7 @@
       "description": "Depth against the bound it is allowed to reach. The queue is in memory: depth at capacity means bundles are being refused, and a crash drops whatever is buffered.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -715,7 +730,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "insightsd_queue_depth{queue=\"bundle\"}",
@@ -726,7 +741,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "insightsd_queue_capacity{queue=\"bundle\"}",
@@ -737,7 +752,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "insightsd_queue_workers{queue=\"bundle\"}",
@@ -872,7 +887,7 @@
       "description": "Attempts, not successes: the transient, permanent and parse paths all count here and all cost nothing. A transient error deliberately leaves the window claimable for the edge to retry.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -884,7 +899,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (result) (rate(insightsd_llm_calls_total[$__rate_interval]))",
@@ -1016,7 +1031,7 @@
       "description": "Counted in micro-dollars by the server and divided here. Resets when the container restarts -- it is a process counter, not the stored ledger.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
@@ -1028,7 +1043,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "insightsd_llm_cost_micros_total / 1e6",
@@ -1081,7 +1096,7 @@
       "description": "Windows suppressed before the gate ran. Anything above zero means the spend ceiling or a per-system cap is now shaping what gets analysed.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
@@ -1093,7 +1108,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (reason) (rate(insightsd_budget_rejections_total[$__rate_interval]))",
@@ -1194,7 +1209,7 @@
       "description": "This queue bounds how many sanitized reports may wait on the single SQLite writer at once. It is not there to hide latency -- there is no LLM call on this path.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -1206,7 +1221,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "threatd_queue_depth{queue=\"threat_events\"}",
@@ -1217,7 +1232,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "threatd_queue_capacity{queue=\"threat_events\"}",
@@ -1228,7 +1243,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "threatd_queue_workers{queue=\"threat_events\"}",
@@ -1363,7 +1378,7 @@
       "description": "POST /v1/events answered 503 because the queue was saturated. The reporter is expected to retry; a batch lost here is not compensated, which is tolerable only because promotion needs three distinct systems.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -1375,7 +1390,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (queue) (rate(threatd_ingestq_full_total[$__rate_interval]))",
@@ -1476,7 +1491,7 @@
       "description": "A miss is not a failure -- it is a credential the cache had not seen inside its TTL, and it becomes an upstream call.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -1488,7 +1503,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (result) (rate(authd_cache_results_total[$__rate_interval]))",
@@ -1590,7 +1605,7 @@
       "description": "What AUTH_VALIDATE_URL answered. 'unavailable' is the fail-closed path: authd answers 503 and every pipeline behind it rejects the request.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -1602,7 +1617,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (result) (rate(authd_upstream_results_total[$__rate_interval]))",
@@ -1732,7 +1747,7 @@
       "description": "A failing consensus or cohort pass is silent otherwise: the blocklist feed keeps serving its previous snapshot rather than going blank.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 6,
@@ -1744,7 +1759,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (pass) (increase({__name__=~\"(insightsd|threatd|sizingd|authd)_pass_runs_total\", result=\"failure\"}[24h]))",
@@ -1805,7 +1820,7 @@
       "description": "Each binary runs exactly one periodic pass, on its own interval.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 6,
@@ -1817,7 +1832,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (pass, result) (rate({__name__=~\"(insightsd|threatd|sizingd|authd)_pass_runs_total\"}[$__rate_interval]) * 3600)",
@@ -1919,7 +1934,7 @@
       "description": "A pass that grows towards its own interval is the first sign the fleet has outgrown a single instance -- none of these passes take a distributed lock.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 6,
@@ -1931,7 +1946,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.95, sum by (pass, le) (rate({__name__=~\"(insightsd|threatd|sizingd|authd)_pass_duration_seconds_bucket\"}[$__rate_interval])))",
@@ -2061,7 +2076,7 @@
       "description": "Everything arriving on :443. A 401 here is the proxy doing its job: an unauthenticated request never reached a backend.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -2073,7 +2088,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (code) (rate(traefik_entrypoint_requests_total{entrypoint=\"websecure\"}[$__rate_interval]))",
@@ -2205,7 +2220,7 @@
       "description": "Which router actually carried the traffic. One hue: the bars encode magnitude, and each one already names its own backend.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
@@ -2217,7 +2232,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(sum by (service) (increase(traefik_service_requests_total[$__range])), \"backend\", \"$1\", \"service\", \"(.*)@file\")",
@@ -2272,7 +2287,7 @@
       "description": "Let's Encrypt renews at 30 days remaining. Amber here means a renewal has not happened when it should have.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
@@ -2284,7 +2299,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "min(traefik_tls_certs_not_after) - time()",
@@ -2345,7 +2360,7 @@
       "description": "Traefik's own resident set. It is kept out of the per-service panels below so those stay within a colour set that a colourblind reader can separate.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
@@ -2357,7 +2372,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "process_resident_memory_bytes{job=\"nethesis-insights-traefik\"}",
@@ -2410,7 +2425,7 @@
       "description": "The metrics entrypoint is loopback-only and normally shows the scrape in flight.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
@@ -2422,7 +2437,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "sum by (entrypoint) (traefik_open_connections)",
@@ -2552,7 +2567,7 @@
       "description": "Every pipeline holds its SQLite page cache here, so a flat line well above idle is normal.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 7,
@@ -2564,7 +2579,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(process_resident_memory_bytes{job=~\"nethesis-insights-(logs|threat|sizing|authd)\"}, \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",
@@ -2696,7 +2711,7 @@
       "description": "Core-seconds per second: 1.0 is one core fully used.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 7,
@@ -2708,7 +2723,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(rate(process_cpu_seconds_total{job=~\"nethesis-insights-(logs|threat|sizing|authd)\"}[$__rate_interval]), \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",
@@ -2840,7 +2855,7 @@
       "description": "A count that climbs and never falls is a leak -- most often a response body or a row set that is not being closed.",
       "datasource": {
         "type": "prometheus",
-        "uid": "insights-prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 7,
@@ -2852,7 +2867,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "insights-prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
           "expr": "label_replace(go_goroutines{job=~\"nethesis-insights-(logs|threat|sizing|authd)\"}, \"svc\", \"$1\", \"job\", \"nethesis-insights-(.*)\")",

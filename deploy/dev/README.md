@@ -51,7 +51,13 @@ eight rows: **Overview** (scrape targets, pass staleness, process uptime),
 backend, certificate expiry, open connections) and **Go runtime** (memory,
 CPU, goroutines).
 
-Because it is provisioned read-only, editing a panel in the browser offers
+The same file imports by hand into a Grafana you already run — every panel
+queries through a datasource variable rather than this stack's datasource uid,
+so nothing in it is specific to this host. See "The dashboard" in
+[the administrator guide](../../docs/admin-guide.md#metrics) for that route;
+the rest of this section is about the provisioned copy.
+
+Because it is provisioned read-only here, editing a panel in the browser offers
 "Save as" a copy rather than silently overwriting the file — so the running
 dashboard and git cannot disagree. Iterate by editing the JSON here and
 re-installing it; Grafana re-reads the file without a restart.
