@@ -315,7 +315,7 @@ depth. It never logs a credential: the model API key appears only as
 | Variable | Purpose |
 |---|---|
 | `AUTH_LISTEN_ADDR` | bind address (default `:9590`) |
-| `AUTH_VALIDATE_URL` | the external validator (default `https://my.nethesis.it/auth`) |
+| `AUTH_VALIDATE_URL` | the external validator (default `https://my.nethesis.it/auth`). Entitlement checks call `<this>/service/<name>` — see "Authentication" |
 | `AUTH_PEPPER` | HMAC pepper for the credential cache — secret. Unset gets a random, process-lifetime one, which empties the cache on every restart |
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | how long a positive/negative validator outcome is cached (default `5m`/`30s`) |
 | `AUTH_CACHE_MAX_ENTRIES`, `AUTH_NEG_CACHE_MAX_ENTRIES` | cache size caps, counted separately so a flood of wrong credentials cannot evict the fleet's valid entries (default `8192`/`4096`, about 3 MB together) |
@@ -397,6 +397,29 @@ outcome. A `2xx` lets the request through unchanged, a `401` rejects it, and a
 treated as a rejected credential. That distinction matters: a node retries a
 gap, but a false `401` is a customer-visible outage.
 
+**Two Threat Shield routes need more than a subscription.** Every machine with
+a subscription sends data to the server; only a machine with the Threat Shield
+entitlement can download the list. So `GET /blocklist/v1/feed` and
+`POST /blocklist/v1/allowlist-requests` are validated against
+`AUTH_VALIDATE_URL/service/ng-blacklist` rather than `AUTH_VALIDATE_URL`, while
+`POST /blocklist/v1/events` and every log and sizing route use the plain check.
+The node sends exactly the same credential either way — there is no second
+token to distribute — and it is the proxy that picks which check runs.
+
+A subscriber without the entitlement gets **`403`, not `401`**. The difference
+is the whole point: `401` means the credential is wrong and somebody should go
+looking at the node's configuration, `403` means the credential is fine and the
+customer needs the entitlement. Neither is retryable, but they end in different
+places. If a customer reports that the blocklist stopped updating, check for
+`403` first — the node will still be reporting its own bans successfully, which
+makes the credential look healthy from every other angle.
+
+Adding a future entitlement is a Traefik change, not a release: `authd` builds
+the upstream URL from the service name in its own path
+(`/auth/service/<name>`), so a new route needs a new `forwardAuth` middleware
+and nothing else. Names are limited to lowercase letters, digits and inner
+dashes.
+
 The validator only ever answers yes or no; it never returns an identity. So
 each pipeline still reads the machine's identity itself, from the Basic
 username of the same header, without re-checking the secret — `authd` already
@@ -443,8 +466,8 @@ prefix on the one served hostname:
 | `POST /logs/v1/bundles` | `ns8-loki`'s collector ships a 15-minute bundle |
 | `GET /logs/v1/findings` | a node reads its own findings, never anyone else's |
 | `POST /blocklist/v1/events` | `ns8-crowdsec` reports ban decisions |
-| `GET /blocklist/v1/feed` | a node fetches the consensus blocklist |
-| `POST /blocklist/v1/allowlist-requests` | a node asks for an address to be left alone |
+| `GET /blocklist/v1/feed` | a node fetches the consensus blocklist — **needs the Threat Shield entitlement** |
+| `POST /blocklist/v1/allowlist-requests` | a node asks for an address to be left alone — **needs the Threat Shield entitlement** |
 | `POST /sizing/v1/reports` | a cluster leader posts a complete UTC day |
 
 `POST /logs/v1/bundles` answers immediately with "accepted" or "try later",
@@ -587,7 +610,8 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
-| `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered |
+| `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
+| `authd_http_requests_total{route="/auth/service/{service}",status}` | `authd` | entitlement checks by outcome; the `403` share is how much of the fleet is asking for Threat Shield without holding it |
 
 No metric anywhere carries a `system_id` label, a raw request path, a
 scenario, a template or a module name — the same cardinality and
@@ -1105,9 +1129,11 @@ collected, counted and handed back.
    24 hours after the last sighting, so an address that has been reassigned to
    somebody innocent does not stay blocked forever.
 
-4. **Nodes fetch the result.** `GET /blocklist/v1/feed` returns a plain list of
-   addresses, which the node imports into CrowdSec. Every subscriber gets the
-   same list.
+4. **Nodes fetch the result.** Entitled nodes, that is: this is the one step
+   that needs the Threat Shield entitlement and not merely a subscription (see
+   "Authentication"). `GET /blocklist/v1/feed` returns a plain list of
+   addresses, which the node imports into CrowdSec. Every entitled node gets
+   the same list — there is no per-customer or per-tier filtering of it.
 
 ### The safety net
 

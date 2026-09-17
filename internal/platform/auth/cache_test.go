@@ -143,7 +143,7 @@ func TestForwardAuthCapsItsNegativeCache(t *testing.T) {
 	a.MaxNegativeEntries = 2
 
 	for i := 0; i < 100; i++ {
-		_, _ = a.Validate(context.Background(), basicHeader(fmt.Sprintf("sys-%d", i), "wrong"))
+		_, _ = a.Validate(context.Background(), basicHeader(fmt.Sprintf("sys-%d", i), "wrong"), "")
 	}
 
 	if got := a.cache.len(); got > 2 {

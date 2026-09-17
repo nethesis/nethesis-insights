@@ -22,7 +22,10 @@ info:
       `/blocklist/v1/allowlist-requests`): a separate pipeline with no LLM
       and no fingerprint. Edges report CrowdSec ban decisions; the server
       publishes a fleet-consensus blocklist once an address is independently
-      reported by enough distinct systems.
+      reported by enough distinct systems. Reporting and consuming are
+      separately authorised: every subscriber posts events, only a node
+      carrying the Threat Shield entitlement may fetch the feed or ask for
+      an allowlist entry.
     - **Fleet sizing** (`sizingd`, prefix `/sizing`: `/sizing/v1/reports`): a
       third pipeline, also with no LLM, no gate, no fingerprint and no queue.
       NS8 cluster leaders post one complete-UTC-day workload and performance
@@ -58,7 +61,11 @@ tags:
   - name: log-pipeline
     description: Bundle ingest and finding retrieval, authenticated via forward-auth Basic credentials.
   - name: threat-shield
-    description: CrowdSec ban-decision ingest and the fleet-consensus blocklist feed, same credentials as the log pipeline.
+    description: >-
+      CrowdSec ban-decision ingest and the fleet-consensus blocklist feed.
+      Same credentials as the log pipeline; the feed and the allowlist
+      request additionally require the Threat Shield entitlement
+      (`entitledBasicAuth`).
   - name: sizing
     description: NS8 cluster workload/performance report ingest, same credentials as the log pipeline.
   - name: observability
@@ -418,8 +425,13 @@ paths:
         Order is deterministic: IPv4 before IPv6, numeric within each
         family. The list is capped at `BLOCKLIST_MAX_ENTRIES` (default
         50000).
+
+        **Requires the Threat Shield entitlement**, not merely a
+        subscription: every subscriber reports ban decisions through
+        `/blocklist/v1/events`, but only an entitled node may download the
+        result. See the `entitledBasicAuth` scheme.
       security:
-        - basicAuth: []
+        - entitledBasicAuth: []
       parameters:
         - name: If-None-Match
           in: header
@@ -471,6 +483,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "invalid credentials" }
+        "403":
+          description: >-
+            Valid subscription credential, but this system does not carry
+            the Threat Shield entitlement. Not retryable, and distinct from
+            `401`: the credential is fine, the entitlement is missing.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "forbidden"
         "405":
           description: Method other than `GET` or `HEAD`.
           content:
@@ -526,8 +547,13 @@ paths:
         `reason` is free text from a customer: length-capped, and rendered
         escaped wherever the operator UI shows it, never trusted or
         interpreted.
+
+        **Requires the Threat Shield entitlement**, like the feed and unlike
+        `/blocklist/v1/events`: only a node consuming the feed can be harmed
+        by a false positive in it, so asking for an exemption presupposes
+        the same entitlement. See the `entitledBasicAuth` scheme.
       security:
-        - basicAuth: []
+        - entitledBasicAuth: []
       requestBody:
         required: true
         content:
@@ -564,6 +590,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "invalid credentials" }
+        "403":
+          description: >-
+            Valid subscription credential, but this system does not carry
+            the Threat Shield entitlement. Not retryable, and distinct from
+            `401`: the credential is fine, the entitlement is missing.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "forbidden"
         "405":
           description: Method other than `POST`.
           content:
@@ -896,8 +931,26 @@ components:
       description: >-
         `system_id:auth_token` HTTP Basic, forward-auth validated against
         `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`) with a
-        TTL cache. Fail-closed: a rejected credential is `401`, a validator
-        that cannot be reached is `503` (retryable), never a silent `401`.
+        TTL cache. This is the plain subscription check -- is this credential
+        a subscriber at all -- and it is what every ingest route uses,
+        because every subscriber ships data. Fail-closed: a rejected
+        credential is `401`, a validator that cannot be reached is `503`
+        (retryable), never a silent `401`.
+    entitledBasicAuth:
+      type: http
+      scheme: basic
+      description: >-
+        The same `system_id:auth_token` credential as `basicAuth`, checked
+        against `AUTH_VALIDATE_URL`**`/service/ng-blacklist`** instead: a
+        subscription *and* the Threat Shield entitlement. A subscriber
+        without the entitlement is `403`, kept distinct from the `401` a
+        wrong credential gets, because the two send an administrator to
+        opposite places -- buy the entitlement, or fix the credential.
+        Nothing changes for the client otherwise: same header, same URL,
+        same `503`-on-validator-outage rule. The split is enforced at the
+        proxy (a second `forwardAuth` middleware) and cached under a key
+        that includes the service, so a node whose ingest credential is
+        already cached as valid still gets the entitlement checked.
     metricsAuth:
       type: http
       scheme: basic

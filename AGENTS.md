@@ -127,6 +127,28 @@ Threat Shield rules that are as load-bearing as the gate's:
   re-alerting. This is a different queue type from the log pipeline's
   `internal/queue` — no window claim, no idempotency logic, because threat
   events don't need it and rewriting working code for symmetry buys nothing.
+- **Reporting needs a subscription; downloading needs the entitlement.** Every
+  machine with a subscription posts to `POST /blocklist/v1/events`, but
+  `GET /blocklist/v1/feed` and `POST /blocklist/v1/allowlist-requests` are
+  validated against `AUTH_VALIDATE_URL/service/ng-blacklist` — a second Traefik
+  `forwardAuth` middleware pointing at `authd`'s `/auth/service/{service}`
+  route. Three parts of this are load-bearing and none is visible from the
+  handlers, which are identical whichever check ran. **The service is part of
+  `ForwardAuth`'s cache key**: a node posts events minutes before it polls the
+  feed, so keyed on the credential alone the subscription positive would answer
+  the entitlement check from cache and the entitlement would never be checked
+  for any node that also reports — silently, for exactly the population it
+  applies to. **`403` is kept distinct from `401`** the whole way to the node
+  (`auth.ErrForbidden`, a flag on the cached negative entry so the outage
+  fallback replays the right one): the two send an administrator to opposite
+  places, buy the entitlement or fix a credential that is in fact working.
+  **The service name is a closed charset, never a list of known entitlements**
+  — `cmd/authd` refuses anything outside `[a-z0-9-]` with a 404 and no upstream
+  call, because the name becomes a path component of an outbound URL, but a new
+  entitlement must stay one line of Traefik config rather than a release of the
+  binary. Never narrow event reporting to entitled nodes: promotion is measured
+  against three *distinct* systems, and shrinking the reporting pool weakens
+  the rule the feed's value rests on.
 - **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.
@@ -325,7 +347,7 @@ against, before assuming a bug:
 | Area | Built | Not built / decided otherwise |
 |---|---|---|
 | Ingest → analysis | asynchronous: `internal/queue`, an in-memory bounded channel — this is the permanent design | same |
-| Auth | moved to the proxy: `cmd/authd` is a caching forward-auth service (`internal/platform/auth.ForwardAuth`) that Traefik calls as a `forwardAuth` middleware — forwards to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, cred)`, fail-closed 503 — this is the permanent design. Each pipeline no longer validates a credential itself: it reads `system_id` from the already-forwarded Basic username via `httpx.SystemID`, trusting it only when the request arrived from `TRUSTED_PROXY_CIDRS` — that check is the whole security boundary, so a pipeline reached directly (bypassing authd/Traefik) accepts any password | same |
+| Auth | moved to the proxy: `cmd/authd` is a caching forward-auth service (`internal/platform/auth.ForwardAuth`) that Traefik calls as a `forwardAuth` middleware — forwards to `AUTH_VALIDATE_URL` (default `https://my.nethesis.it/auth`), TTL cache keyed on `HMAC(pepper, service+NUL+cred)`, fail-closed 503. A second route, `GET /auth/service/{service}`, adds a named entitlement check against `<base>/service/<name>` and answers 403 rather than 401 when the credential is valid but unentitled — this is the permanent design. Each pipeline no longer validates a credential itself: it reads `system_id` from the already-forwarded Basic username via `httpx.SystemID`, trusting it only when the request arrived from `TRUSTED_PROXY_CIDRS` — that check is the whole security boundary, so a pipeline reached directly (bypassing authd/Traefik) accepts any password | same |
 | Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` — **this is now the permanent design**. `golang-migrate` was built and discarded with Postgres (see Backends) |
 | Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | **Postgres was dropped as a goal** 2026-09-10. There is no `pgStore` and none is planned; the per-pipeline `Store` interfaces stay because each consumer's narrow interface is what makes the tests run with nothing running, not because a second backend is coming |
 | Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |

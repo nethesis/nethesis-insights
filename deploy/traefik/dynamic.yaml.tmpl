@@ -52,9 +52,23 @@ http:
         average: 5
         period: 1s
         burst: 200
+    # The plain subscription check: is this system_id/secret a subscriber at
+    # all. Every ingest route uses it, because every subscriber ships data.
     system-auth:
       forwardAuth:
         address: "http://127.0.0.1:9590/auth"
+    # The subscription check PLUS the Threat Shield entitlement. Reporting
+    # threat events and consuming the fleet's consensus are different
+    # privileges: any subscriber contributes, only an entitled node
+    # downloads. authd derives the upstream URL from this path segment
+    # (AUTH_VALIDATE_URL + /service/ng-blacklist) and caches the outcome
+    # under a key that includes the service, so a node's ingest credential
+    # being cached as valid cannot answer this check -- which is exactly the
+    # way this would otherwise fail silently, letting every reporting node
+    # through.
+    ng-blacklist-auth:
+      forwardAuth:
+        address: "http://127.0.0.1:9590/auth/service/ng-blacklist"
     operator-auth:
       basicAuth:
         usersFile: /etc/traefik/operators.htpasswd
@@ -109,17 +123,19 @@ http:
         prefix: "/metrics"
 
   routers:
-    # Priority is explicit on all eleven: /blocklist/v1/ and /blocklist/
-    # share a prefix, and getting the order backwards would put operator
-    # BasicAuth on the ingest path, or the fleet's system credentials on the
-    # operator UI. The five metrics-* routers below do not share a prefix
-    # with anything else (their rule matches an exact `/metrics/<name>`
-    # path, disjoint from /logs, /blocklist and /sizing), but every router
-    # in this file still gets an explicit priority -- so a sixth router
-    # added later, sharing a prefix with one of these, does not fall back to
+    # Priority is explicit on all twelve: /blocklist/v1/feed, /blocklist/v1/
+    # and /blocklist/ all share a prefix, and getting the order backwards
+    # would put operator BasicAuth on the ingest path, the fleet's system
+    # credentials on the operator UI, or -- the silent one -- the plain
+    # subscription check on the two routes that are supposed to require the
+    # Threat Shield entitlement. The five metrics-* routers below do not
+    # share a prefix with anything else (their rule matches an exact
+    # `/metrics/<name>` path, disjoint from /logs, /blocklist and /sizing),
+    # but every router in this file still gets an explicit priority -- so a
+    # later router sharing a prefix with one of these does not fall back to
     # Traefik's rule-specificity-length tiebreak by accident.
     #
-    # entryPoints is pinned to websecure on all eleven for the same reason:
+    # entryPoints is pinned to websecure on all twelve for the same reason:
     # without it a router also attaches to web (plain :80), and its safety
     # over cleartext then rests on the web entrypoint's redirect router
     # happening to carry a higher default priority than this file's explicit
@@ -136,6 +152,31 @@ http:
       priority: 100
       middlewares: [rate-limit, operator-auth, strip-logs]
       service: logs-ui
+    # The two Threat Shield routes that need the entitlement, above
+    # blocklist-api so they win the shared /blocklist/v1/ prefix. Exact
+    # Path matches, not a prefix: a prefix here would silently cover any
+    # route added under it later, and the direction of that accident is
+    # towards locking a new route rather than leaking one, but the mistake
+    # would still be invisible until a customer hit it.
+    #
+    # The feed is the download this split exists for. allowlist-requests
+    # rides with it because only a node consuming the feed can be harmed by
+    # a false positive in it, so asking for an exemption presupposes the
+    # same entitlement.
+    #
+    # It points at the blocklist-api service: same threatd, same handlers --
+    # threatd still reads system_id off the forwarded Basic username and
+    # knows nothing about entitlements. Only which forwardAuth ran differs.
+    blocklist-entitled:
+      rule: "Host(`${INSIGHTS_HOST}`) && (Path(`/blocklist/v1/feed`) || Path(`/blocklist/v1/allowlist-requests`))"
+      entryPoints: [websecure]
+      priority: 250
+      middlewares: [rate-limit, ng-blacklist-auth, strip-blocklist]
+      service: blocklist-api
+    # POST /blocklist/v1/events stays here, on the plain subscription check:
+    # every subscriber reports, and narrowing the reporting pool to entitled
+    # nodes would shrink the evidence base that promotion's three-distinct-
+    # systems rule is measured against.
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
       entryPoints: [websecure]

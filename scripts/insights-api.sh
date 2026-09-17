@@ -87,7 +87,9 @@ events)
     ;;
 
 feed)
-    # feed [etag]   — fetch the consensus feed; with an etag, expect 304
+    # feed [etag]   — fetch the consensus feed; with an etag, expect 304.
+    # Needs the Threat Shield entitlement, not just a subscription: a
+    # subscriber without it gets 403 here while `events` keeps working.
     need_cred
     etag=${1:-}
     if [ -n "$etag" ]; then
@@ -104,6 +106,7 @@ feed)
 allowlist-request)
     # allowlist-request <cidr> [reason]   — ask for an address to be exempted.
     # This only queues a request: nothing is ever allowlisted automatically.
+    # Entitlement-gated like `feed`, and for the feed's reason.
     need_cred
     cidr=${1:?usage: allowlist-request <cidr> [reason]}
     reason=${2:-}

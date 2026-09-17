@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -32,6 +33,14 @@ var ErrInvalidCredentials = errors.New("invalid credentials")
 // is recoverable, a false reject is not (spec §4, "fail closed").
 var ErrUnavailable = errors.New("validator unavailable")
 
+// ErrForbidden is returned when the validator answered 403: the credential
+// is genuine, but it does not carry the entitlement the requested service
+// needs. It is deliberately distinct from ErrInvalidCredentials -- the two
+// send an administrator to opposite places, one to buy an entitlement and
+// one to fix a credential, and collapsing them into a single 401 makes a
+// missing entitlement look exactly like a typo in a password that is fine.
+var ErrForbidden = errors.New("not entitled")
+
 const (
 	defaultPositiveTTL = 5 * time.Minute
 	defaultNegativeTTL = 30 * time.Second
@@ -45,6 +54,7 @@ const (
 const (
 	UpstreamValid       = "valid"
 	UpstreamInvalid     = "invalid"
+	UpstreamForbidden   = "forbidden"
 	UpstreamUnavailable = "unavailable"
 )
 
@@ -131,21 +141,29 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 // (cmd/authd/handler.go), so a *ForwardAuth drops straight into authd's
 // handler, which is tested against a fake implementing that interface
 // instead of a real ForwardAuth.
-func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, error) {
+//
+// service selects what is being checked. Empty means the plain subscription
+// check against the configured URL -- does this system_id/secret belong to a
+// subscriber at all -- which is what every ingest route uses. A non-empty
+// service additionally asks whether that subscriber carries a named
+// entitlement, by calling <base>/service/<name>; "ng-blacklist" is the
+// Threat Shield feed's. The caller supplies it; this package never guesses
+// one from a path.
+func (a *ForwardAuth) Validate(ctx context.Context, authHeader, service string) (string, error) {
 	systemID, secret, err := ParseBasic(authHeader)
 	if err != nil {
 		return "", err
 	}
-	key := a.cacheKey(systemID, secret)
+	key := a.cacheKey(service, systemID, secret)
 	a.cache.setLimits(a.MaxPositiveEntries, a.MaxNegativeEntries)
 
 	if e, fresh, found := a.cache.get(key); found && fresh {
 		a.Metrics.cacheHit()
-		return outcomeFromEntry(e, systemID)
+		return outcomeFromEntry(e, systemID, service)
 	}
 	a.Metrics.cacheMiss()
 
-	switch a.fwd.check(ctx, authHeader) {
+	switch a.fwd.check(ctx, a.validateURL(service), authHeader) {
 	case outcomeValid:
 		a.Metrics.upstream(UpstreamValid)
 		a.cache.set(key, entry{ok: true, systemID: systemID, expiresAt: a.now().Add(a.PositiveTTL)})
@@ -156,26 +174,57 @@ func (a *ForwardAuth) Validate(ctx context.Context, authHeader string) (string, 
 		a.cache.set(key, entry{ok: false, expiresAt: a.now().Add(a.NegativeTTL)})
 		return "", fmt.Errorf("%w: validator rejected system_id %q", ErrInvalidCredentials, systemID)
 
+	case outcomeForbidden:
+		a.Metrics.upstream(UpstreamForbidden)
+		// Cached on the negative TTL like any other reject, and in the same
+		// tier: an unentitled system can be minted as freely as a wrong
+		// password can, so it must not be able to evict positives.
+		a.cache.set(key, entry{ok: false, forbidden: true, expiresAt: a.now().Add(a.NegativeTTL)})
+		return "", fmt.Errorf("%w: system_id %q lacks the %q entitlement", ErrForbidden, systemID, service)
+
 	default: // outcomeUnavailable
 		a.Metrics.upstream(UpstreamUnavailable)
 		if e, _, found := a.cache.get(key); found {
 			// Stale beats unavailable: see the cache's doc comment.
-			return outcomeFromEntry(e, systemID)
+			return outcomeFromEntry(e, systemID, service)
 		}
 		return "", fmt.Errorf("%w: system_id %q", ErrUnavailable, systemID)
 	}
 }
 
-func outcomeFromEntry(e entry, systemID string) (string, error) {
-	if e.ok {
+// outcomeFromEntry replays a cached verdict, preserving which negative it
+// was. The distinction has to survive the outage fallback too: a validator
+// hiccup is not a reason to report an unentitled system as having a bad
+// credential, any more than it is a reason to let it through.
+func outcomeFromEntry(e entry, systemID, service string) (string, error) {
+	switch {
+	case e.ok:
 		return e.systemID, nil
+	case e.forbidden:
+		return "", fmt.Errorf("%w: cached, system_id %q lacks the %q entitlement", ErrForbidden, systemID, service)
+	default:
+		return "", fmt.Errorf("%w: cached rejection for system_id %q", ErrInvalidCredentials, systemID)
 	}
-	return "", fmt.Errorf("%w: cached rejection for system_id %q", ErrInvalidCredentials, systemID)
 }
 
-func (a *ForwardAuth) cacheKey(systemID, secret string) string {
+// cacheKey derives the outcome-cache key for one credential checked against
+// one service.
+//
+// Folding service in is not a refinement, it is the correctness of the whole
+// per-service split. A node posts threat events (checked against the base
+// URL) minutes before it polls the blocklist feed; keyed on the credential
+// alone, that base positive would answer the feed's entitlement check out of
+// cache and the entitlement would never be checked for any node that also
+// reports. The mirror holds too: one service's entitlement would unlock
+// every other one.
+//
+// service goes in first, NUL-separated, and the separator is unforgeable
+// here rather than merely unlikely: cmd/authd admits only [a-z0-9-] service
+// names, so no service name can contain the delimiter or the ":" that
+// separates the two credential halves.
+func (a *ForwardAuth) cacheKey(service, systemID, secret string) string {
 	mac := hmac.New(sha256.New, []byte(a.pepper))
-	mac.Write([]byte(systemID + ":" + secret))
+	mac.Write([]byte(service + "\x00" + systemID + ":" + secret))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -213,4 +262,22 @@ func ParseBasic(authHeader string) (systemID, secret string, err error) {
 		return "", "", fmt.Errorf("%w: credentials are not system_id:secret", ErrInvalidCredentials)
 	}
 	return systemID, secret, nil
+}
+
+// validateURL is the configured base for the plain subscription check, or
+// <base>/service/<name> for an entitlement.
+//
+// PathEscape is belt to cmd/authd's braces: the only caller that derives a
+// service name from a request path already rejects anything outside
+// [a-z0-9-], but this package builds an outbound URL and must not be the
+// place where a "../" in some future caller's argument turns into a request
+// to a different upstream endpoint. TrimSuffix covers a base configured with
+// a trailing slash, which would otherwise produce a doubled separator that
+// some routers 404 -- degrading every entitlement check to "unavailable",
+// and so 503-ing the feed for the whole fleet.
+func (a *ForwardAuth) validateURL(service string) string {
+	if service == "" {
+		return a.fwd.url
+	}
+	return strings.TrimSuffix(a.fwd.url, "/") + "/service/" + url.PathEscape(service)
 }

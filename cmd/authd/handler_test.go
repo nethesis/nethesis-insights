@@ -19,10 +19,12 @@ type fakeValidator struct {
 	systemID string
 	err      error
 	calls    int
+	services []string // the service argument of every call, in order
 }
 
-func (f *fakeValidator) Validate(ctx context.Context, authHeader string) (string, error) {
+func (f *fakeValidator) Validate(ctx context.Context, authHeader, service string) (string, error) {
 	f.calls++
+	f.services = append(f.services, service)
 	return f.systemID, f.err
 }
 
@@ -184,5 +186,134 @@ func TestAuthEndpoint401OmitsWWWAuthenticate(t *testing.T) {
 				t.Errorf("WWW-Authenticate = %q, want it absent from a 401 to a reporter", got)
 			}
 		})
+	}
+}
+
+// /auth checks a subscription; /auth/service/<name> additionally checks a
+// named entitlement. The handler's only job on the second route is to hand
+// the path segment to the validator -- it never decides what a service means
+// or which ones exist, so a new entitlement is one line of proxy config and
+// no release of this binary.
+func TestServiceRoutePassesTheServiceNameToTheValidator(t *testing.T) {
+	v := &fakeValidator{systemID: "sys-1"}
+	h := newHandler(v, nil, nil)
+
+	for _, path := range []string{"/auth", "/auth/service/ng-blacklist"} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.SetBasicAuth("sys-1", "secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", path, w.Code)
+		}
+	}
+
+	want := []string{"", "ng-blacklist"}
+	if len(v.services) != len(want) || v.services[0] != want[0] || v.services[1] != want[1] {
+		t.Fatalf("validator called with services %q, want %q", v.services, want)
+	}
+}
+
+// The service name lands in an outbound URL path, so the charset is closed:
+// [a-z0-9-], not starting or ending with a dash, and bounded in length.
+// Anything else is a proxy misconfiguration rather than a verdict on the
+// caller's credential, so it is a 404 and the validator is never called --
+// spending an upstream request to learn that our own config is wrong.
+func TestServiceRouteRejectsAMalformedServiceName(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"empty", "/auth/service/"},
+		{"uppercase", "/auth/service/NG-Blacklist"},
+		{"underscore", "/auth/service/ng_blacklist"},
+		{"leading dash", "/auth/service/-ng-blacklist"},
+		{"trailing dash", "/auth/service/ng-blacklist-"},
+		{"dot", "/auth/service/ng.blacklist"},
+		{"traversal", "/auth/service/..%2F..%2Fadmin"},
+		{"extra segment", "/auth/service/ng-blacklist/extra"},
+		{"too long", "/auth/service/" + strings.Repeat("a", 65)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := &fakeValidator{systemID: "sys-1"}
+			h := newHandler(v, nil, nil)
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			r.SetBasicAuth("sys-1", "secret")
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want 404", w.Code)
+			}
+			if v.calls != 0 {
+				t.Errorf("validator calls = %d, want 0", v.calls)
+			}
+		})
+	}
+}
+
+// Traefik passes this status straight back to the node, so a subscriber
+// without the Threat Shield entitlement gets a 403 on the feed and not the
+// 401 a wrong password gets. The two send an administrator to different
+// places, which is the whole reason auth.ErrForbidden exists.
+func TestForbiddenAnswers403(t *testing.T) {
+	for _, path := range []string{"/auth", "/auth/service/ng-blacklist"} {
+		t.Run(path, func(t *testing.T) {
+			h := newHandler(&fakeValidator{err: auth.ErrForbidden}, nil, nil)
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			r.SetBasicAuth("sys-1", "secret")
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", w.Code)
+			}
+		})
+	}
+}
+
+// A missing Authorization header is rejected locally on the service route
+// too, for the same reason it is on /auth: there is nothing to validate.
+func TestServiceRouteRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.T) {
+	v := &fakeValidator{systemID: "sys-1"}
+	h := newHandler(v, nil, nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/service/ng-blacklist", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if v.calls != 0 {
+		t.Errorf("validator calls = %d, want 0", v.calls)
+	}
+}
+
+// The metrics route label comes from the matched ServeMux pattern, never the
+// request path (httpx.RouteLabel), so the service route contributes one
+// bounded label however many entitlements exist -- and
+// authd_http_requests_total{route="/auth/service/{service}",status="403"} is
+// how "how much of the fleet lacks an entitlement" is answered without a
+// per-service counter.
+func TestServiceRouteMetricsLabelIsThePatternNotThePath(t *testing.T) {
+	reg := metrics.NewRegistry("authd")
+	rec := metrics.NewHTTP(reg)
+	h := newHandler(&fakeValidator{systemID: "sys-1"}, metrics.Handler(reg), rec)
+
+	r := httptest.NewRequest(http.MethodGet, "/auth/service/ng-blacklist", nil)
+	r.SetBasicAuth("sys-1", "secret")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	const want = `authd_http_requests_total{method="GET",route="/auth/service/{service}",status="200"} 1`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Errorf("scrape body missing %q\nbody:\n%s", want, w.Body.String())
 	}
 }

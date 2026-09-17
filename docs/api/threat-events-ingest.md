@@ -18,10 +18,10 @@ client needs to build a request. The reasoning behind each rule is in
 - [`GET /blocklist/v1/feed`](#get-blocklistv1feed)
 - [Promotion rule](#promotion-rule)
 
-| method | path | who |
-|---|---|---|
-| `POST` | `/blocklist/v1/events` | the edge reports ban decisions |
-| `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed |
+| method | path | who | needs |
+|---|---|---|---|
+| `POST` | `/blocklist/v1/events` | the edge reports ban decisions | a subscription |
+| `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed | a subscription **and** the Threat Shield entitlement |
 
 `threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
 behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
@@ -30,14 +30,42 @@ the request reaches it, so these two paths are what a client sends and
 
 ## Authentication
 
-HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`.
+HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`
+— one credential for both endpoints, with no separate key and no API token.
 Traefik calls `authd`, a shared forward-auth cache, before either request
-reaches a pipeline; there is no separate key, no API token and no per-tier
-feed — every subscriber fetches the same global list.
+reaches a pipeline.
 
-Both endpoints are fail-closed on authentication: `401` on a rejected
+**Reporting and downloading are authorised separately.** Every machine with a
+subscription sends data; only a machine carrying the Threat Shield entitlement
+may download the list.
+
+| path | validated against |
+|---|---|
+| `POST /blocklist/v1/events` | `https://my.nethesis.it/auth` |
+| `GET /blocklist/v1/feed` | `https://my.nethesis.it/auth/service/ng-blacklist` |
+| `POST /blocklist/v1/allowlist-requests` | `https://my.nethesis.it/auth/service/ng-blacklist` |
+
+(`https://my.nethesis.it/auth` is the default; the deployment sets it with
+`AUTH_VALIDATE_URL`. `/blocklist/v1/allowlist-requests` is documented in full
+in `docs/api/openapi.yaml`; it is listed here only for the entitlement rule,
+which is the feed's — only a node consuming the feed can be harmed by a false
+positive in it.)
+
+There is still no per-tier feed: an entitled node fetches the same global list
+as every other entitled node.
+
+All three endpoints are fail-closed on authentication: `401` on a rejected
 credential, `503` when the validator itself is unreachable. A `503` is
 retryable; a `401` is not.
+
+**`403` on the feed means "not entitled", not "bad credential".** The
+credential is valid and works for `/blocklist/v1/events`; this system simply
+does not carry the Threat Shield entitlement. A client must not retry it, must
+not treat it as a credential problem, and must not prompt for a new token — the
+resolution is commercial, not technical. It is also not a transient failure, so
+the "never write an empty list on error" rule below applies to it unchanged: on
+a `403` keep whatever list is already on disk and log the reason once, rather
+than logging it every poll.
 
 ## `POST /blocklist/v1/events`
 
@@ -116,7 +144,7 @@ the case that page exists for.
 | `202` | accepted (possibly with everything dropped — see the counters) |
 | `400` | unparseable body, bad gzip, or wrong `schema_version` |
 | `401` | invalid credential |
-| `403` | `system_id` does not match the authenticated system |
+| `403` | `system_id` does not match the authenticated system — this route checks no entitlement, so its `403` never means "not entitled" |
 | `405` | method other than `POST` |
 | `429` | rate limited by the edge proxy |
 | `503` | validator unreachable, or the ingest queue is at capacity |
@@ -227,12 +255,15 @@ Vary: Accept-Encoding
 - Order is deterministic: IPv4 before IPv6, numeric within each family.
 - The list is capped at `BLOCKLIST_MAX_ENTRIES` (50 000 by default).
 - `503` means no consensus pass has succeeded yet. It never means "empty".
+- `403` means this system is a subscriber without the Threat Shield
+  entitlement. Unlike `503` it will not clear on its own.
 
 | status | meaning |
 |---|---|
 | `200` | the current feed |
 | `304` | unchanged since the client's `ETag` |
 | `401` | invalid credential |
+| `403` | valid credential, no Threat Shield entitlement — see [Authentication](#authentication) |
 | `405` | method other than `GET` or `HEAD` |
 | `429` | rate limited by the edge proxy |
 | `503` | validator unreachable, or no snapshot generated yet |

@@ -48,7 +48,7 @@ func NewAuth(reg *Registry, upstreamResults ...string) *Auth {
 		}, []string{"result"}),
 		upstream: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "upstream_results_total",
-			Help: "Upstream validator calls, by result (valid, invalid, unavailable).",
+			Help: "Upstream validator calls, by result (valid, invalid, forbidden, unavailable).",
 		}, []string{"result"}),
 	}
 	reg.prefixed.MustRegister(a.cache, a.upstream)
@@ -69,6 +69,6 @@ func (a *Auth) CacheHit() { a.cache.WithLabelValues(authCacheHit).Inc() }
 func (a *Auth) CacheMiss() { a.cache.WithLabelValues(authCacheMiss).Inc() }
 
 // Upstream records what the upstream validator answered: "valid",
-// "invalid" or "unavailable" -- auth.outcome's three values, spelled out
-// here rather than importing that unexported type.
+// "invalid", "forbidden" or "unavailable" -- auth.outcome's four values,
+// spelled out here rather than importing that unexported type.
 func (a *Auth) Upstream(result string) { a.upstream.WithLabelValues(result).Inc() }

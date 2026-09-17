@@ -46,6 +46,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 - [Determinism](#determinism)
 - [LLM integration](#llm-integration)
 - [Authentication](#authentication)
+  - [Entitlements: a second route, one cache](#entitlements-a-second-route-one-cache)
 - [Configuration and wiring](#configuration-and-wiring)
 - [Testing strategy](#testing-strategy)
 - [Known limits](#known-limits)
@@ -91,7 +92,8 @@ edge (ns8-loki)          edge (ns8-crowdsec)         edge (ns8-core, leader)
    ▼                        ▼                            ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                               Traefik                                 │
-│  strips the pipeline prefix; forwardAuth → authd on every /v1/* route;│
+│  strips the pipeline prefix; forwardAuth → authd on every /v1/* route  │
+│  (entitlement variant on the two Threat Shield consumer routes);      │
 │  BasicAuth (ADMIN_API_KEY as the htpasswd password) on every UI path  │
 └──────────┬────────────────────────┬───────────────────────┬──────────┘
            │ /v1/bundles            │ /v1/events            │ /v1/reports
@@ -110,11 +112,12 @@ edge (ns8-loki)          edge (ns8-crowdsec)         edge (ns8-core, leader)
    └────────────────┘      │ (/blocklist)      │      │ (/sizing)        │
                              └─────────────────┘      └─────────────────┘
                     ▲
-                    │ GET /auth (forwardAuth request)
+                    │ GET /auth                     (subscription)
+                    │ GET /auth/service/<name>      (subscription + entitlement)
              ┌──────┴──────┐
              │    authd     │──► AUTH_VALIDATE_URL (external,
              │ cache + TTL  │    default https://my.nethesis.it/auth)
-             └─────────────┘
+             └─────────────┘    └► …/service/ng-blacklist for the feed
 ```
 
 One edge node ships one bundle per 15-minute window. The server never
@@ -188,7 +191,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | Package | Responsibility |
 |---|---|
 | `internal/model` | Wire types (`Bundle`, `Finding`, `Template`, …) and the pure helpers (`SortFindings`, `SeverityRank`) that operate on them. |
-| `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
+| `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. `Validate` takes a service: empty for the plain subscription check, a name for `<base>/service/<name>`, which is both the URL and part of the cache key. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. `Logging` takes an optional `MetricsRecorder` (`*metrics.HTTP` satisfies it) and feeds it method/route/status/duration for every request after logging it -- `RouteLabel` derives the metrics label from the matched `net/http` `ServeMux` pattern (`Request.Pattern`), never `r.URL.Path`, so the label set stays the small fixed list of registered routes instead of being unbounded. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
 | `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
@@ -210,13 +213,13 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/store/sizing` | sizingd's only store package: ingest, the cohort pass's inputs and outputs, and the rollups that outlive the daily rows. |
 | `internal/api/logs` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz`, `/metrics` (registered unprefixed; Traefik adds `/logs` to the first two, and routes `/metrics` separately under `/metrics/logs` -- see "Metrics" below). |
-| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics` (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
+| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings, systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines. Read-only — no write routes. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
-| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
+| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
@@ -597,6 +600,13 @@ previous list with its original `generated:` timestamp.
 Before the first successful pass the snapshot is not ready and the handler
 answers `503`. That distinction matters: to a client importing the list, an
 empty body means "no threats" and silently disables protection.
+
+**This route requires the Threat Shield entitlement**, and so does
+`POST /v1/allowlist-requests`; `POST /v1/events` requires only a subscription.
+Nothing in this handler implements that — it is a second `forwardAuth`
+middleware in front of it, pointing at `authd`'s `/auth/service/ng-blacklist`.
+An unentitled subscriber gets `403`, which is not `401` and not retryable; see
+"Entitlements: a second route, one cache" under Authentication.
 
 ### Sizing ingest: `POST /v1/reports` (public path `/sizing/v1/reports`)
 
@@ -1468,7 +1478,8 @@ run.
 | Failure | Consequence |
 |---|---|
 | edge sends no `expected` | the server's EWMA baseline covers the deviation condition |
-| validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window |
+| validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window. A stale entry replays as the verdict it was, so an unentitled node stays `403` rather than being promoted by an outage |
+| subscriber without the Threat Shield entitlement | `403` on `/blocklist/v1/feed` and `/blocklist/v1/allowlist-requests`, never `401`; `POST /blocklist/v1/events` is unaffected, so the node keeps contributing to consensus while it cannot consume it |
 | `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
 | LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
 | LLM provider returns a permanent error | the window is finalized and closed — retrying would hit the same wall forever |
@@ -1556,8 +1567,8 @@ Authentication moved to the proxy. `cmd/authd` is a thin HTTP shell over
 `internal/platform/auth.ForwardAuth`, which forwards the edge's
 `Authorization: Basic` header verbatim to `AUTH_VALIDATE_URL` (default
 `https://my.nethesis.it/auth`) and caches the outcome, keyed by
-`HMAC(AUTH_PEPPER, "system_id:secret")` so the in-memory cache cannot be
-reverse-engineered into a credential list. Positive and negative TTLs are
+`HMAC(AUTH_PEPPER, "service\x00system_id:secret")` so the in-memory cache
+cannot be reverse-engineered into a credential list. Positive and negative TTLs are
 independently configurable (`AUTH_CACHE_TTL`/`AUTH_NEG_CACHE_TTL`), and so
 are the two size caps.
 
@@ -1586,7 +1597,55 @@ gap, but a false `401` is a customer-visible outage), while
 `ErrUnavailable` when the validator is down and something was cached before.
 Traefik's `forwardAuth` middleware calls `GET /auth` on `authd` and passes its
 status straight back to the client on anything but `2xx`, which is what keeps
-this `401`/`503` distinction visible at the edge instead of being collapsed.
+this `401`/`403`/`503` distinction visible at the edge instead of being
+collapsed.
+
+### Entitlements: a second route, one cache
+
+A subscription is not always enough. `GET /auth/service/{service}` is the same
+check plus a named entitlement: `authd` calls
+`AUTH_VALIDATE_URL/service/<name>` instead of `AUTH_VALIDATE_URL`, and a `403`
+from there becomes `auth.ErrForbidden` and a `403` to the node. Threat Shield
+is the only user today — every subscriber posts ban decisions through
+`POST /blocklist/v1/events`, but `GET /blocklist/v1/feed` and
+`POST /blocklist/v1/allowlist-requests` are routed through a second
+`forwardAuth` middleware pointing at `/auth/service/ng-blacklist`. Reporting
+and consuming are different privileges: narrowing the reporting pool to
+entitled nodes would shrink the evidence base that promotion's
+three-distinct-systems rule is measured against, while leaving the feed open
+would give away the thing being sold.
+
+Three properties of that design are load-bearing:
+
+- **The service is part of the cache key.** A node posts threat events minutes
+  before it polls the feed. Keyed on the credential alone, the subscription
+  positive would answer the entitlement check out of cache and the entitlement
+  would never be checked for any node that also reports — the feature would
+  silently no-op for precisely the population it applies to. The mirror holds
+  too: one service's entitlement must not unlock the next one. The service goes
+  in first, NUL-separated, and the separator is unforgeable rather than merely
+  unlikely because `cmd/authd` admits only `[a-z0-9-]` service names.
+- **`403` is kept apart from `401` all the way to the node.** They send an
+  administrator to opposite places — buy the entitlement, or fix a credential
+  that is in fact working — so collapsing them into one `401` turns a
+  commercial answer into a support ticket. `auth.ErrForbidden` is a distinct
+  sentinel, the cached negative entry records which negative it was, and the
+  outage fallback replays it as `403` rather than promoting or demoting it.
+- **The service name is a closed charset, not a list of known entitlements.**
+  It becomes a path component of an outbound URL, so `cmd/authd` rejects
+  anything outside `[a-z0-9-]` (no leading or trailing dash, 64 characters) with
+  a `404` and no upstream call — a name this handler will not accept is our own
+  proxy configuration being wrong, not a verdict on the caller's credential.
+  It is deliberately not an allowlist of services: adding an entitlement
+  upstream should be one line of Traefik config, not a release of this binary,
+  and an unknown name simply fails upstream, which is the right place for that
+  verdict.
+
+One cache and one upstream serve both; only the URL and the key differ. No
+pipeline learns anything about entitlements — `threatd` still reads `system_id`
+off the forwarded Basic username and knows only that the request arrived, which
+keeps the whole split in the proxy layer where it can be changed without a
+schema or a handler.
 
 **The validator only ever answered yes/no; it never returned an identity.**
 Traefik forwards the original `Authorization` header through to the pipeline

@@ -18,19 +18,25 @@ type outcome int
 const (
 	outcomeValid outcome = iota
 	outcomeInvalid
+	outcomeForbidden
 	outcomeUnavailable
 )
 
 // forwarder calls the external validator with the Authorization header
 // forwarded verbatim -- the Traefik forwardAuth pattern (spec §4). It never
 // parses, decodes or re-encodes the credential itself.
+//
+// url is the base validator URL. check takes the URL to call as an argument
+// rather than reading this field, because one ForwardAuth serves both the
+// plain subscription check and every per-service entitlement check from a
+// single cache -- see ForwardAuth.validateURL.
 type forwarder struct {
 	url    string
 	client *http.Client
 }
 
-func (f *forwarder) check(ctx context.Context, authHeader string) outcome {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url, nil)
+func (f *forwarder) check(ctx context.Context, validateURL, authHeader string) outcome {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validateURL, nil)
 	if err != nil {
 		return outcomeUnavailable
 	}
@@ -48,8 +54,12 @@ func (f *forwarder) check(ctx context.Context, authHeader string) outcome {
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return outcomeValid
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return outcomeInvalid
+	case http.StatusForbidden:
+		// Authenticated, but not entitled to what was asked for. Kept apart
+		// from 401 all the way to the node: see ErrForbidden.
+		return outcomeForbidden
 	default:
 		// Anything else -- 5xx, an unexpected 2xx/3xx/4xx -- is the
 		// validator misbehaving, not a verdict on these credentials.

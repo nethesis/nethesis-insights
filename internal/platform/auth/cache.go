@@ -23,10 +23,14 @@ const (
 )
 
 // entry is one cached validation outcome, keyed on HMAC(pepper,
-// system_id+":"+secret) -- see ForwardAuth.cacheKey. A positive entry
-// carries the system_id; a negative entry (ok == false) does not need one.
+// service+NUL+system_id+":"+secret) -- see ForwardAuth.cacheKey. A positive
+// entry carries the system_id; a negative entry (ok == false) does not need
+// one, but does record which negative it was, because "subscribed but not
+// entitled" and "not a subscriber" are answered to the node as different
+// statuses and the cached replay must not blur them.
 type entry struct {
 	ok        bool
+	forbidden bool
 	systemID  string
 	expiresAt time.Time
 }

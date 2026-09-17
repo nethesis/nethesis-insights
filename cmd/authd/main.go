@@ -132,7 +132,7 @@ func main() {
 	reg := metrics.NewRegistry("authd")
 	httpMetrics := metrics.NewHTTP(reg)
 	authMetrics := metrics.NewAuth(reg,
-		auth.UpstreamValid, auth.UpstreamInvalid, auth.UpstreamUnavailable)
+		auth.UpstreamValid, auth.UpstreamInvalid, auth.UpstreamForbidden, auth.UpstreamUnavailable)
 	fa.Metrics = &auth.Metrics{
 		CacheHit:  authMetrics.CacheHit,
 		CacheMiss: authMetrics.CacheMiss,

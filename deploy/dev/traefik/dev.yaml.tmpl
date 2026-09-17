@@ -34,7 +34,7 @@ http:
     # cleartext then depends on an undefined ordering against the redirect
     # router.
     #
-    # Neither router carries the rate-limit middleware the eleven production
+    # Neither router carries the rate-limit middleware the twelve production
     # routers all carry. That middleware is sized for fleet traffic -- 5
     # req/s per source -- and a single Grafana page load pulls dozens of
     # assets and fires a query per panel, so it would throttle the dashboard
