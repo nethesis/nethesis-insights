@@ -147,6 +147,23 @@ func TestExcludeServicesDropsOnlyTheNamedService(t *testing.T) {
 	}
 }
 
+// The service axis is not host-only. alert-proxy runs inside the metrics
+// module, so its masked lines carry a module id ("metrics1") *and* a service
+// tag; the module axis could only reach them by excluding the whole metrics
+// family, which would also drop Grafana, Prometheus and node-exporter. This is
+// why PIPELINE_EXCLUDE_SERVICES defaults to "insights,alert-proxy".
+func TestExcludeServicesReachesTemplatesInAModule(t *testing.T) {
+	in := Bundle{Templates: []Template{
+		{Template: `<3> [alert-proxy] ALERT CRITICAL swap:node:<NUM>`, ModuleID: "metrics1"},
+		{Template: `<6> [grafana] logger=http.server msg=<*>`, ModuleID: "metrics1"},
+	}}
+	got := in.ExcludeServices(map[string]bool{"alert-proxy": true})
+
+	if len(got.Templates) != 1 || got.Templates[0].Template != `<6> [grafana] logger=http.server msg=<*>` {
+		t.Fatalf("expected only the alert-proxy line dropped, got %+v", got.Templates)
+	}
+}
+
 // A line ServiceTag cannot parse must be kept. Dropping it would silently
 // discard evidence; failing open toward analysis is the safe direction.
 func TestExcludeServicesKeepsUnparseableLines(t *testing.T) {

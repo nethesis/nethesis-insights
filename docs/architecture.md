@@ -294,11 +294,14 @@ the body.
    scope. CrowdSec is excluded by default because it already has its own
    pipeline (`POST /blocklist/v1/events` → the blocklist); analysing its log
    lines as well pays twice for one signal. `PIPELINE_EXCLUDE_SERVICES`
-   (default `insights`) then filters on a second axis — the `[service]` tag
-   `model.ServiceTag` reads off each masked host record — because host records
-   all carry `module_id: ""` and the module filter cannot reach them. A line
-   whose shape `ServiceTag` does not recognise is kept, and digest entries are
-   not filtered by service since they carry no service dimension.
+   (default `insights,alert-proxy`) then filters on a second axis — the
+   `[service]` tag `model.ServiceTag` reads off each masked record — which
+   exists because host records all carry `module_id: ""` and the module filter
+   cannot reach them. The tag is read off **every** record, not only host ones,
+   which is what lets `alert-proxy` be excluded without excluding the `metrics`
+   module that hosts it (see "A tagged line need not be a host line" below). A
+   line whose shape `ServiceTag` does not recognise is kept, and digest entries
+   are not filtered by service since they carry no service dimension.
 4. The bundle is handed to `queue.Publish`, which either enqueues it or
    returns `queue.ErrFull`.
 5. The handler answers **immediately** — `202 Accepted` on success, `503` if
@@ -991,6 +994,36 @@ empty `module_id` matches no module name — which is why the service axis
 exists as a second filter. And the host bucket is the reason the security gate
 condition has to be novelty-scoped: continuous failed-authentication traffic
 means a bucket that is never quiet.
+
+### A tagged line need not be a host line
+
+The service axis was built for the host bucket, but `ExcludeServices` reads the
+`[service]` tag off **every** masked record and never looks at `module_id`.
+That is deliberate, and `alert-proxy` — the second default exclusion — is the
+case that needs it.
+
+`alert-proxy` is the process that forwards an NS8 cluster's Alertmanager
+notifications. It runs inside the `metrics` module, so its lines arrive both
+tagged (`<3> [alert-proxy] ALERT CRITICAL swap:node:<NUM>`) and carrying the
+module id of the metrics instance. Excluding it on the module axis is therefore
+impossible without excluding the whole `metrics` family, which would also
+silence Grafana, Prometheus and node-exporter — real logs about the monitoring
+stack itself. Excluding it on the service axis costs exactly the lines it
+wrote.
+
+It is excluded because those lines are, by construction, duplicates of a
+notification the administrator has already had. Every one of them is an alert a
+Prometheus rule fired and Alertmanager delivered; re-deriving it from the log
+text produces a second, slower, vaguer copy. Measured on the dev fleet before
+the exclusion: 94 stored templates across 4 systems, and roughly 100 findings —
+"Swap Memory Alert", "Critical Disk Space Alert", "TLS Certificate Expiry
+Alert", "Backup Job Failure" — each the restatement of a rule that had already
+alerted. The pipeline exists for the conditions monitoring has no rule for.
+
+A corollary worth stating because it has already been written into a deployed
+env file: `PIPELINE_EXCLUDE_MODULES=alert-proxy` excludes nothing. No module id
+and no `ModuleFamily` is ever `alert-proxy`, and an entry matching nothing is
+silent — the only visible symptom is that the findings keep arriving.
 
 ### Scenarios are not interpreted
 

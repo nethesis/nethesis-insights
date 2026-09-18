@@ -208,10 +208,23 @@ func main() {
 	// CrowdSec has its own pipeline (threatd's /v1/events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
 	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec")
-	// Host records name their unit, e.g. "<3> [insights] ...". Excluding this
+	// Masked records name their unit, e.g. "<3> [insights] ...". Excluding this
 	// server's own identifier stops a co-located deployment (the dev machine)
 	// from analysing its own log output and re-firing the gate forever.
-	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights")
+	//
+	// alert-proxy is excluded for the opposite reason: every line it writes is
+	// an alert the cluster's monitoring stack has already raised and already
+	// delivered to the administrator, so analysing them buys a second, slower,
+	// less specific copy of a notification that was sent hours earlier. On the
+	// dev fleet it produced 94 templates and ~100 findings -- "Swap Memory
+	// Alert", "Critical Disk Space Alert", "TLS Certificate Expiry Alert" --
+	// each a restatement of an Alertmanager rule. It has to be excluded on the
+	// service axis rather than the module one: its lines carry the module id of
+	// the metrics instance that hosts it (family "metrics"), so the only module
+	// entry that would reach them is "metrics", which would also drop Grafana,
+	// Prometheus and node-exporter. The service axis is not host-only -- the
+	// tag is read off any masked record, whatever its module.
+	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights,alert-proxy")
 	staleAfter := getenvDuration("STALE_AFTER", 24*time.Hour)
 	ewmaAlpha := getenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := getenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)

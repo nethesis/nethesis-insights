@@ -558,16 +558,31 @@ only templates leaves the digest firing deviation reasons for a module the
 prompt never mentions.
 
 **Services are excluded on a second axis**, `PIPELINE_EXCLUDE_SERVICES`
-(default `insights`) via `model.Bundle.ExcludeServices`. Host records all carry
-`module_id: ""`, so the module filter cannot reach them; the only service
-dimension on the wire is the `[service]` tag the collector puts on each masked
-host line (`model.ServiceTag`). This exists because a co-located deployment
-analyses its own log output: on the dev machine 452 of 564 host templates were
-`insights` lines, 204 of them its own `gate decision` messages, each new
-template re-firing the gate that produced it. A line `ServiceTag` cannot parse
-is **kept** — failing open toward analysis is the safe direction. Digest and
-truncation records have no service dimension and are passed through, so an
-excluded service still contributes to its bucket's volume.
+(default `insights,alert-proxy`) via `model.Bundle.ExcludeServices`. Host
+records all carry `module_id: ""`, so the module filter cannot reach them; the
+only service dimension on the wire is the `[service]` tag the collector puts on
+each masked line (`model.ServiceTag`). This exists because a co-located
+deployment analyses its own log output: on the dev machine 452 of 564 host
+templates were `insights` lines, 204 of them its own `gate decision` messages,
+each new template re-firing the gate that produced it. A line `ServiceTag`
+cannot parse is **kept** — failing open toward analysis is the safe direction.
+Digest and truncation records have no service dimension and are passed through,
+so an excluded service still contributes to its bucket's volume.
+
+**The service axis is not host-only, and `alert-proxy` is why.** `ServiceTag`
+is read off every masked record, whatever its `module_id`, and that is what
+makes the second default entry possible: `alert-proxy` runs inside the
+`metrics` module, so its lines arrive tagged **and** carrying `metrics1` —
+the only module entry that would reach them is the whole `metrics` family,
+which would also drop Grafana, Prometheus and node-exporter. It is excluded
+because every line it writes is an alert the cluster's monitoring stack
+already raised and already delivered: on the dev fleet, 94 templates and ~100
+findings ("Swap Memory Alert", "Critical Disk Space Alert", "TLS Certificate
+Expiry Alert") that each restate an Alertmanager rule, hours later and less
+specifically. Insights is for what monitoring has **no** rule for. Note that
+`PIPELINE_EXCLUDE_MODULES=alert-proxy` is a **dead entry** — it matches no
+module id and no family — so if you find one in a deployed env file, it never
+did anything.
 
 **Gate reasons carry no computed values** — `new_templates` has no count,
 `deviation:<module>/<priority>` no ratio. The UI's `/gate` rollup groups on the
