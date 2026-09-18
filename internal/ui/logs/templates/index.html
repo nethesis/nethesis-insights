@@ -9,7 +9,9 @@ server-computed fingerprint (never the AI's wording), so the same problem recurr
 <strong>occurrences</strong> instead of adding a new row. <strong>open</strong> means it's
 active or recent; <strong>stale</strong> means it hasn't reoccurred in a while and is
 presumed resolved &mdash; it can later reopen. Expand a row (click the title) for the
-summary, evidence and suggested action.</small></p>
+summary, evidence and suggested action. <strong>Nodes</strong> are the cluster machines the
+cited log lines came from in the most recent occurrence &mdash; where it is happening now, not
+everywhere it has ever happened.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, partial ok, any if blank">
@@ -37,7 +39,7 @@ summary, evidence and suggested action.</small></p>
 <thead>
 <tr>
 <th scope="col">ID</th><th scope="col">System</th><th scope="col">Severity</th><th scope="col">Status</th>
-<th scope="col" class="num">Occurrences</th><th scope="col">Title</th><th scope="col">Last seen</th>
+<th scope="col" class="num">Occurrences</th><th scope="col">Nodes</th><th scope="col">Title</th><th scope="col">Last seen</th>
 </tr>
 </thead>
 <tbody>
@@ -47,7 +49,7 @@ summary, evidence and suggested action.</small></p>
 <td class="mono">{{.SystemID}}</td>
 <td><span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span></td>
 <td><span class="pill" data-status="{{.Status}}">{{.Status}}</span></td>
-<td class="num">{{.OccurrenceCount}}</td>
+<td class="mono">{{range .NodeRefs}}<div title="{{if .FQDN}}{{.FQDN}}{{else}}no name reported{{end}}">{{.NodeID}}{{if .FQDN}} {{shortHost .FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
 <td>
 <details>
 <summary class="truncate" title="{{.Title}}">{{truncate .Title 80}}</summary>
@@ -55,6 +57,8 @@ summary, evidence and suggested action.</small></p>
 <dt>Summary</dt><dd>{{.Summary}}</dd>
 <dt>Evidence</dt>
 <dd>{{range .Evidence}}<div class="mono">{{.}}</div>{{else}}&mdash;{{end}}</dd>
+<dt>Nodes</dt>
+<dd>{{range .NodeRefs}}<div class="mono">{{.NodeID}}{{if .FQDN}} &mdash; {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</dd>
 <dt>Suggested action</dt><dd>{{.SuggestedAction}}</dd>
 <dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>
 <dt>Occurrence count</dt><dd>{{.OccurrenceCount}}</dd>

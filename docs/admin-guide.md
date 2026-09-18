@@ -799,8 +799,8 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. Click a row to see the full summary, suggested action, evidence and fingerprint. |
-| `/logs/systems` | Every machine the server has ever heard from, with a quick summary: how many templates, findings, analysis windows, and how much it's cost so far. |
+| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on; click a row for the full summary, suggested action, evidence, fingerprint and the nodes' full names. |
+| `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
 | `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/logs/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
@@ -851,7 +851,24 @@ already stripped out before it ever leaves the machine. A bundle contains:
 - a list of **templates**: the distinct *shapes* of log lines seen (see
   below), each with a count;
 - bookkeeping about how much the node had to truncate to stay within its own
-  budget.
+  budget;
+- the **node roster**: for each machine in the cluster, its node number and
+  the name it reports for itself, plus — on each template — which of those
+  machines produced it.
+
+That last item is worth being precise about, because it is the one place the
+server learns a customer machine's name. What a subscription identifies is an
+NS8 **cluster**, not a machine, and one collector reports for the whole
+cluster. Without the node numbers a finding could say what happened and when,
+but not *where* — which on a multi-node cluster is the first thing you need.
+
+The names do **not** come from your logs. Hostnames appearing inside a log
+line are still masked out before the bundle leaves the machine, exactly as
+before. The name is read separately from the cluster's own inventory (the
+`ns8_node_info` metric every NS8 node publishes about itself), checked to be a
+plausible hostname and nothing else, and stored once per machine rather than
+copied into every finding — so renaming a node updates it everywhere within a
+window. The AI is never shown either the names or the node numbers.
 
 ### 2. Templates: the shape of a log line, not the line itself
 
@@ -1061,7 +1078,19 @@ pages.
 
 A **finding** is one reported problem: a title, a plain-language summary, a
 suggested action, a severity (critical/high/medium/low), which log modules
-it involves, and the evidence (which templates) it's based on.
+it involves, the evidence (which templates) it's based on, and **which nodes
+of the cluster it was seen on** — by number and, when known, by name.
+
+Those nodes are the *most recent* occurrence's, not every node the problem has
+ever touched. The column answers "where is this happening now": a condition
+that moved from node 1 to node 3 reads as node 3. Accumulating instead would
+mean a long-lived finding eventually listing every machine in the cluster and
+telling you nothing. A node with no name yet shows as a bare number — the
+number is the answer, the name is a convenience on top of it.
+
+Deliberately, the node set is **not** part of a finding's identity (below). A
+problem that spreads to a second machine is the same problem, with more
+occurrences, not a new finding.
 
 The key trick here is **identity**: the server computes a fingerprint for
 each finding from the machine, the modules involved, the evidence and the

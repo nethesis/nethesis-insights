@@ -40,6 +40,7 @@ type Publisher interface {
 // instead of the whole store. *logsstore.Store satisfies it.
 type Store interface {
 	ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error)
+	ResolveNodes(ctx context.Context, systemID string, findings []model.Finding) error
 }
 
 // Config carries the ingest-time module/service exclusion sets.
@@ -248,6 +249,12 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 	receivedTemplates, receivedDigest := len(b.Templates), len(b.Digest)
 	b = b.ExcludeModules(s.cfg.ExcludeModules)
 	b = b.ExcludeServices(s.cfg.ExcludeServices)
+	// Validate node attribution here, in front of the queue, for the same
+	// reason the exclusions are applied here: everything downstream reads
+	// from what is queued, so nothing further in can see an unvalidated
+	// FQDN. This is the only customer-identifying string the pipeline
+	// stores -- see model/nodes.go.
+	b = b.SanitizeNodes()
 
 	slog.Debug("bundle accepted for analysis",
 		"system_id", b.SystemID,
@@ -305,6 +312,13 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 		slog.Error("list findings failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable")
 		return
+	}
+	// Names are joined at read time, never stored on the finding, so a
+	// renamed machine reads correctly everywhere at once. A roster failure
+	// costs the names and not the findings: the node ids are already on the
+	// rows and are the attribution that matters.
+	if err := s.store.ResolveNodes(r.Context(), authenticatedSystemID, findings); err != nil {
+		slog.Warn("resolving node names failed", "system_id", authenticatedSystemID, "error", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

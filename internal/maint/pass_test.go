@@ -24,10 +24,10 @@ import (
 type recordingReader struct {
 	calls []string
 
-	templatesErr, findingsErr, analysesErr error
+	templatesErr, findingsErr, analysesErr, nodesErr error
 	// olderThan captures what each call was asked to prune before, so a test
 	// can assert Run derived it from `now` and the right Config field.
-	templatesOlderThan, findingsOlderThan, analysesOlderThan int64
+	templatesOlderThan, findingsOlderThan, analysesOlderThan, nodesOlderThan int64
 }
 
 func (r *recordingReader) PruneTemplates(_ context.Context, olderThan int64) (int, error) {
@@ -40,6 +40,12 @@ func (r *recordingReader) PruneFindings(_ context.Context, olderThan int64) (int
 	r.calls = append(r.calls, "findings")
 	r.findingsOlderThan = olderThan
 	return 2, r.findingsErr
+}
+
+func (r *recordingReader) PruneNodes(_ context.Context, olderThan int64) (int, error) {
+	r.calls = append(r.calls, "nodes")
+	r.nodesOlderThan = olderThan
+	return 4, r.nodesErr
 }
 
 func (r *recordingReader) PruneAnalyses(_ context.Context, olderThan int64) (int, error) {

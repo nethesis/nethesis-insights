@@ -31,6 +31,12 @@ type Template struct {
 	FirstSeen int64    `json:"first_seen"`
 	LastSeen  int64    `json:"last_seen"`
 	Samples   []string `json:"samples,omitempty"`
+	// Nodes lists the cluster node ids this template was seen on in the
+	// window, sorted and deduplicated. Empty from a collector older than
+	// node attribution, which costs the finding its "where", not its
+	// analysis. See nodes.go for why this never reaches the prompt or the
+	// fingerprint.
+	Nodes []int `json:"nodes,omitempty"`
 }
 
 type TruncatedModule struct {
@@ -55,6 +61,10 @@ type Bundle struct {
 	Digest           []DigestEntry `json:"digest"`
 	Templates        []Template    `json:"templates"`
 	Budget           Budget        `json:"budget"`
+	// Nodes is the reporting cluster's node roster, resent every window so
+	// a rename propagates on its own. Optional: a collector that cannot
+	// reach a node's exporter sends what it has.
+	Nodes []NodeInfo `json:"nodes,omitempty"`
 }
 
 type Finding struct {
@@ -74,6 +84,14 @@ type Finding struct {
 	ReopenedAt      *int64   `json:"reopened_at,omitempty"`
 	LLMModel        string   `json:"llm_model"`
 	PromptVersion   string   `json:"prompt_version"`
+	// Nodes holds the node ids the cited templates were last seen on --
+	// replaced, not accumulated, on each occurrence, so it answers "where is
+	// this happening now" and stays bounded.
+	Nodes []int `json:"nodes,omitempty"`
+	// NodeRefs is the read-time resolution of Nodes against the roster. It
+	// is never stored: names live in one place (system_nodes) so a rename is
+	// not frozen into every finding that ever cited the machine.
+	NodeRefs []NodeInfo `json:"node_refs,omitempty"`
 }
 
 var Severities = []string{"critical", "high", "medium", "low"}

@@ -1007,6 +1007,16 @@ components:
           type: array
           items: { type: string }
           description: Raw masked sample lines. Never persisted server-side -- they live only in the bundle in flight.
+        nodes:
+          type: array
+          items: { type: integer, minimum: 1 }
+          maxItems: 64
+          description: >-
+            Cluster node ids this template was seen on in the window, sorted
+            and deduplicated. Optional: a collector older than node
+            attribution omits it, which costs the resulting finding its
+            "where", not its analysis. Ids below 1 are dropped at ingest.
+            Never reaches the prompt or the fingerprint.
 
     TruncatedModule:
       type: object
@@ -1061,6 +1071,33 @@ components:
           items: { $ref: "#/components/schemas/Template" }
           maxItems: 1000
         budget: { $ref: "#/components/schemas/Budget" }
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/NodeInfo" }
+          maxItems: 64
+          description: >-
+            The reporting cluster's node roster, resent every window so a
+            rename propagates on its own. Optional.
+
+    NodeInfo:
+      type: object
+      description: >-
+        One node of the reporting cluster. A `system_id` is an NS8 *cluster*,
+        so this is what turns it into a list of machines.
+      required: [node_id]
+      properties:
+        node_id: { type: integer, minimum: 1, description: The cluster-scoped numeric NS8 node id. }
+        fqdn:
+          type: string
+          maxLength: 253
+          description: >-
+            The node's own name, taken from the cluster's node roster --
+            never scraped out of log text, where hostnames stay masked to
+            `<HOST>` on both sides. Validated at ingest against
+            `[a-z0-9.-]` with DNS label rules and at least one letter, which
+            no log line, URL or credential can satisfy; a name that fails is
+            dropped while its `node_id` is kept. May be absent when the
+            collector could not reach that node's exporter.
 
     Finding:
       type: object
@@ -1109,6 +1146,26 @@ components:
           description: Set when a finding that had gone stale (absent past STALE_AFTER) recurred.
         llm_model: { type: string }
         prompt_version: { type: string, description: Code constant stamped at analysis time, never configuration. }
+        nodes:
+          type: array
+          items: { type: integer, minimum: 1 }
+          maxItems: 64
+          description: >-
+            The cluster node ids the cited templates were seen on. Replaced
+            on every occurrence, never accumulated, so it answers "where is
+            this happening now" rather than "everywhere it has ever been".
+            Deliberately NOT part of the fingerprint: a node set moves
+            between windows, and folding it into identity would re-raise the
+            same condition every time it moved.
+        node_refs:
+          type: array
+          items: { $ref: "#/components/schemas/NodeInfo" }
+          maxItems: 64
+          description: >-
+            `nodes` resolved against the cluster roster at read time. Never
+            stored on the finding, so one machine has exactly one name in the
+            database and a rename shows up everywhere at once. An id with no
+            roster entry still appears here, with no `fqdn`.
 
     Decision:
       type: object

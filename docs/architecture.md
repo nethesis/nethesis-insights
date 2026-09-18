@@ -33,6 +33,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 - [Data model and storage](#data-model-and-storage)
   - [The EWMA baseline formula](#the-ewma-baseline-formula)
   - [The empty module is a real bucket](#the-empty-module-is-a-real-bucket)
+  - [Node attribution: which machine, and what it is called](#node-attribution-which-machine-and-what-it-is-called)
   - [Scenarios are not interpreted](#scenarios-are-not-interpreted)
   - [Local origin only](#local-origin-only)
   - [The two consensus rules are not symmetric](#the-two-consensus-rules-are-not-symmetric)
@@ -893,9 +894,10 @@ without a goroutine to leak.
 |---|---|
 | `systems` | One row per system seen; first/last-seen timestamps, collector version. |
 | `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. Pruned past `TEMPLATE_RETENTION` by `maint.Runner`; see "Maintenance pass" for why that default is 400 days and not shorter. |
+| `system_nodes` | The reporting cluster's node roster: `(system_id, node_id)` plus the `fqdn` that node reports for itself, and first/last-seen. A `system_id` is an NS8 *cluster*, so this is the dimension that lets a finding name a machine. It is the **only** table in this pipeline holding a customer-identifying string — see "Node attribution" below and "Data protection". Names live here and nowhere else: `findings` stores node ids and joins this table at read time. Pruned on the `TEMPLATE_RETENTION` cutoff by `maint.Runner`, which it shares rather than having a knob of its own. |
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. Deliberately **not** pruned by `maint.Runner` — it does not grow per event the way `system_templates` and `analyses` do, only with the number of distinct buckets a system has, so it has no comparable backlog problem. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
-| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
+| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
@@ -994,6 +996,75 @@ empty `module_id` matches no module name — which is why the service axis
 exists as a second filter. And the host bucket is the reason the security gate
 condition has to be novelty-scoped: continuous failed-authentication traffic
 means a bucket that is never quiet.
+
+### Node attribution: which machine, and what it is called
+
+A `system_id` is an NS8 **cluster**, not a machine. One collector runs per
+cluster, on whichever node holds Loki, and reads a stream that already
+aggregates every node. Loki labels every record with `node_id`, and the
+collector used to discard it — `sum by (module_id, priority)` in the digest,
+and `tail()` reading only `module_id` and `category` off each series. So a
+finding could say *what* and *when* but not *where*, on a cluster where
+"where" is the first thing an administrator needs.
+
+`Template.Nodes` and `Bundle.Nodes` carry it. Reading `node_id` costs **no
+extra query** — it is in the same per-series label map the other two labels
+come from. The digest and the baseline queries are deliberately unchanged, so
+gating stays cluster-wide.
+
+**The FQDN comes from the cluster's inventory, never from log text.** Both
+sides still mask every hostname in a log line to `<HOST>` (the collector's
+`_mask_hostname`, the server's `replaceHostnames` in `internal/model/canonical.go`,
+kept in agreement on purpose). The name is a separate structured field read
+from node_exporter's `ns8_node_info{fqdn=...}` metric, which `ns8-core`'s
+`refresh-node-info` writes on every node. Both are **core** systemd units, and
+node_exporter runs `--network=host` with no `--web.listen-address`, so it binds
+`:9100` on every interface including WireGuard — reachable cluster-wide from
+whichever node runs Loki, with no module installed, no configuration and no
+credential. Prometheus was the obvious alternative and is the wrong one: it
+binds `127.0.0.1:9091` inside the metrics module, so it is reachable only from
+its own node, and its cluster-wide Traefik route exists only when an
+administrator has set `prometheus_path` — and is then behind `forward_auth`.
+
+Four rules hold this together, and none of them is visible from the handlers:
+
+- **Nodes never reach the prompt.** `prompt.Select` carries them — that is how
+  `ResolveEvidence` hands the analyzer a cited template's attribution — but
+  `prompt.Render` never emits them. The golden files are the executable proof,
+  and a model that cannot see a node cannot author one. This is the same
+  discipline that keeps model-authored text out of the fingerprint.
+- **Nodes are not part of a finding's identity.** `fingerprint.Compute` does
+  not take them, and `fingerprint.Version` did not change. A node set moves
+  between windows — a condition spreads, or clears on one machine and not
+  another — and folding that into the hash would re-raise the same condition
+  every time it moved. That is exactly the `v1` failure that hashing the whole
+  cited set already caused once. Attribution is what a finding *shows*, never
+  what it *is*.
+- **Nodes are not a gate input, and novelty stays cluster-scoped.** Keying
+  `system_templates` on the node would make every template on a newly added
+  node novel at once and re-fire the gate for the whole machine.
+- **A finding stores ids; names are joined at read time.** One machine has
+  exactly one name in the database, so a rename shows up everywhere at once
+  and there is no set of stale copies to migrate. A node with no roster entry
+  still resolves, to a bare id — the id is the attribution, the name is a
+  convenience on top of it.
+
+Two degradation rules, both of the "cost the detail, never the run" kind the
+rest of the collector follows: a roster lookup that fails leaves the previous
+roster in place rather than publishing a cluster that appears to have lost its
+nodes, and an incoming entry with an empty name never erases a name an earlier
+window established (`COALESCE(NULLIF(...))` in `UpsertNodes`), or the UI would
+flicker between a name and a number. The roster is recorded **before the
+gate**, because it is a fact about the cluster rather than a product of the
+analysis: a gated-out window still says what the machines are called.
+
+`model.SanitizeFQDN` is what makes the field safe to store. The charset is the
+entire control — a name is accepted only as `[a-z0-9.-]` with DNS label rules
+and at least one letter, so a log line, a URL, a credential, a file path or a
+masked template cannot be smuggled through it, which is a stronger guarantee
+than any list of forbidden substrings somebody has to keep current. It is the
+same argument `sizing.Sanitize` makes for accepting only numbers. A name that
+fails is dropped while its node id is kept: failing toward less stored data.
 
 ### A tagged line need not be a host line
 
@@ -1244,9 +1315,20 @@ What each pipeline keeps:
 
 | Pipeline | Persisted | Never persisted |
 |---|---|---|
-| logs | masked template text, counts, digest entries, findings | raw `samples`, unmasked lines |
+| logs | masked template text, counts, digest entries, findings, and the cluster's node roster (`node_id` + `fqdn`) | raw `samples`, unmasked lines, any hostname appearing *inside* a line |
 | Threat Shield | public attacker address, scenario name, ban duration | usernames, URIs, user agents, any other CrowdSec metadata field |
 | fleet sizing | numeric measurements, module family names, instance counts | anything non-numeric in the workload map |
+
+The logs row is the one that changed, and deliberately: the node `fqdn` is the
+only customer-identifying string this pipeline stores. Hostname masking is
+unchanged — a name appearing inside a log line is still collapsed to `<HOST>`
+on both sides. What is stored is a separate structured field read from the
+cluster's own inventory (node_exporter's `ns8_node_info`), validated by
+`model.SanitizeFQDN` against a charset no log line, URL or credential can
+satisfy, held in one table (`system_nodes`) rather than copied onto every
+finding, and never shown to the LLM. It exists because a finding that cannot
+name the machine it concerns is not actionable on a multi-node cluster. See
+"Node attribution" for the four rules that keep it narrow.
 
 Three rules do the work:
 

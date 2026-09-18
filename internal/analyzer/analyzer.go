@@ -33,6 +33,7 @@ var ErrPermanent = errors.New("permanent failure")
 // satisfies it.
 type Store interface {
 	UpsertSystem(ctx context.Context, s logsstore.System) error
+	UpsertNodes(ctx context.Context, systemID string, nodes []model.NodeInfo, now int64) error
 	KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error)
 	UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error
 	Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error)
@@ -178,6 +179,14 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		LastSeen:         now,
 	}); err != nil {
 		return fmt.Errorf("analyzer: upsert system: %w", err)
+	}
+
+	// The roster is recorded here, before the gate, because it is a fact
+	// about the cluster rather than a product of the analysis: a gated-out
+	// window still tells us what the machines are called, and a node that
+	// only ever appears in quiet windows would otherwise never get a name.
+	if err := a.store.UpsertNodes(ctx, b.SystemID, b.Nodes, now); err != nil {
+		return fmt.Errorf("analyzer: upsert nodes: %w", err)
 	}
 
 	// 3. Read prior state BEFORE writing anything -- if templates were
@@ -377,8 +386,14 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		category := ""
 		evidence := make([]string, 0, len(cited))
 		moduleSet := map[string]bool{}
+		// Attribution is derived from the resolved templates, exactly like
+		// evidence and the module set -- so it comes from the server's own
+		// record of where the lines were, never from anything the model
+		// wrote. It does not reach the fingerprint: see model/nodes.go.
+		var nodes []int
 		for _, t := range cited {
 			evidence = append(evidence, t.Template)
+			nodes = model.MergeNodeIDs(nodes, t.Nodes)
 			// Families, not instances: one condition seen on 71 openldap
 			// instances is one finding, the same way it is one template row.
 			// prompt.Select already rewrote ModuleID to the family, so this
@@ -410,6 +425,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			SuggestedAction: pf.SuggestedAction,
 			Modules:         modules,
 			Evidence:        evidence,
+			Nodes:           nodes,
 			LLMModel:        resp.Model,
 			PromptVersion:   prompt.Version,
 		}, now)

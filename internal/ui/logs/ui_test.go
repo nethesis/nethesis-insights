@@ -32,6 +32,7 @@ type fakeReader struct {
 	findings  []model.Finding
 	templates []logsstore.TemplateRow
 	baselines []logsstore.BaselineRow
+	roster    map[string]map[int]string
 
 	err error // when set, every method returns this error instead
 }
@@ -68,6 +69,13 @@ func (f *fakeReader) GateRollup(ctx context.Context, since int64) ([]logsstore.G
 
 func (f *fakeReader) CostRollup(ctx context.Context) ([]logsstore.CostRow, error) {
 	return f.cost, f.err
+}
+
+func (f *fakeReader) ResolveNodesFleet(_ context.Context, findings []model.Finding) error {
+	for i := range findings {
+		findings[i].NodeRefs = model.ResolveNodeRefs(findings[i].Nodes, f.roster[findings[i].SystemID])
+	}
+	return nil
 }
 
 func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sortMode string, limit int) ([]model.Finding, error) {
@@ -596,5 +604,47 @@ func TestEmptyStoreRendersEveryPage(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s against an empty store: status = %d, want 200", rt.path, rec.Code)
 		}
+	}
+}
+
+// The operator's actual question -- "which machine?" -- has to be answerable
+// from the findings page without expanding anything, and the full name has to
+// be there once expanded.
+func TestFindingsPageShowsNodeAttribution(t *testing.T) {
+	r := seededReader()
+	r.findings = []model.Finding{{
+		ID: "01FINDINGID0000000000000000", SystemID: "sys-1", Fingerprint: "abcd1234",
+		Severity: "high", Title: "t", Summary: "s", Status: "open",
+		OccurrenceCount: 1, FirstSeen: 1700000000000, LastSeen: 1700000100000,
+		Nodes: []int{2},
+	}}
+	r.roster = map[string]map[int]string{"sys-1": {2: "node2.example.org"}}
+
+	body := get(t, newTestServer(t, r, nil), "/").Body.String()
+
+	if !strings.Contains(body, "node2") {
+		t.Error("findings page does not show the node's name")
+	}
+	if !strings.Contains(body, "node2.example.org") {
+		t.Error("findings page does not carry the full FQDN")
+	}
+}
+
+// A node with no name reported must still show its id: the id is the
+// attribution, the name is a convenience on top of it.
+func TestFindingsPageShowsABareNodeIDWhenUnnamed(t *testing.T) {
+	r := seededReader()
+	r.findings = []model.Finding{{
+		ID: "01FINDINGID0000000000000000", SystemID: "sys-1", Fingerprint: "abcd1234",
+		Severity: "high", Title: "t", Summary: "s", Status: "open",
+		OccurrenceCount: 1, FirstSeen: 1700000000000, LastSeen: 1700000100000,
+		Nodes: []int{7},
+	}}
+	r.roster = nil
+
+	body := get(t, newTestServer(t, r, nil), "/").Body.String()
+
+	if !strings.Contains(body, "no name reported") {
+		t.Error("expected an unnamed node to be marked as such")
 	}
 }

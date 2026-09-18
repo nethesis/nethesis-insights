@@ -126,6 +126,25 @@ func (s *Store) Init(ctx context.Context) error {
 			total_count INTEGER,
 			PRIMARY KEY (system_id, module_id, template_key)
 		)`,
+		// The reporting cluster's node roster. A system_id is a cluster,
+		// so this is the (system_id, node_id) dimension that lets a finding
+		// name a machine.
+		//
+		// The fqdn is the ONLY customer-identifying string this pipeline
+		// stores -- see model/nodes.go for why it is a deliberate exception
+		// to the hostname masking both sides apply, and what validates it.
+		// It lives here and nowhere else: findings store node ids and join
+		// this table at read time, so a renamed machine reads correctly
+		// instead of leaving a stale name frozen into every finding that
+		// ever cited it.
+		`CREATE TABLE IF NOT EXISTS system_nodes (
+			system_id TEXT,
+			node_id INTEGER,
+			fqdn TEXT,
+			first_seen INTEGER,
+			last_seen INTEGER,
+			PRIMARY KEY (system_id, node_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS module_baselines (
 			system_id TEXT,
 			module_id TEXT,
@@ -150,7 +169,8 @@ func (s *Store) Init(ctx context.Context) error {
 			last_seen INTEGER,
 			reopened_at INTEGER,
 			llm_model TEXT,
-			prompt_version TEXT
+			prompt_version TEXT,
+			nodes TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_system_fingerprint ON findings(system_id, fingerprint)`,
 		// Supports PruneTemplates' `last_seen < ?` scan (see prune.go) --
@@ -444,7 +464,7 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 }
 
 func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
-	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
+	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
 }
 
 func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
@@ -477,6 +497,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	if err != nil {
 		return "", fmt.Errorf("store: marshal evidence: %w", err)
 	}
+	// Replaced on every occurrence, never accumulated: the column answers
+	// "where is this happening now", and a union would grow until a
+	// long-lived finding listed the whole cluster and discriminated nothing.
+	nodesJSON, err := json.Marshal(model.SanitizeNodeIDs(f.Nodes))
+	if err != nil {
+		return "", fmt.Errorf("store: marshal nodes: %w", err)
+	}
 
 	id := f.ID
 	if id == "" {
@@ -488,8 +515,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	// stamped when actually reopening -- a plain bump must leave whatever
 	// reopened_at value the row already has untouched.
 	baseSQL := `
-		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?)
+		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
 		ON CONFLICT(system_id, fingerprint) DO UPDATE SET
 			severity = excluded.severity,
 			title = excluded.title,
@@ -499,9 +526,10 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 			evidence = excluded.evidence,
 			status = ?,
 			occurrence_count = findings.occurrence_count + 1,
-			last_seen = ?%s
+			last_seen = ?,
+			nodes = excluded.nodes%s
 	`
-	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, model.StatusOpen, now}
+	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), model.StatusOpen, now}
 
 	var extraSet string
 	if outcome == OutcomeReopened {
@@ -535,7 +563,7 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 }
 
 func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
-	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version FROM findings WHERE system_id = ? AND last_seen >= ?`
+	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes FROM findings WHERE system_id = ? AND last_seen >= ?`
 	args := []any{systemID, since}
 	if status != "" {
 		query += ` AND status = ?`
@@ -561,11 +589,17 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
+		var nodesJSON sql.NullString
 		var reopenedAt sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
-			&f.LLMModel, &f.PromptVersion); err != nil {
+			&f.LLMModel, &f.PromptVersion, &nodesJSON); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
+		}
+		if nodesJSON.Valid && nodesJSON.String != "" {
+			if err := json.Unmarshal([]byte(nodesJSON.String), &f.Nodes); err != nil {
+				return nil, fmt.Errorf("store: unmarshal nodes: %w", err)
+			}
 		}
 		if err := json.Unmarshal([]byte(modulesJSON), &f.Modules); err != nil {
 			return nil, fmt.Errorf("store: unmarshal modules: %w", err)
@@ -580,6 +614,86 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 		result = append(result, f)
 	}
 	return result, rows.Err()
+}
+
+// UpsertNodes records the reporting cluster's node roster. It is called on
+// every bundle, so a rename propagates on its own within one window.
+//
+// A node absent from this bundle is left alone rather than deleted: the
+// collector's roster lookup is allowed to fail per node (an exporter that did
+// not answer), and deleting on absence would drop the name of every node that
+// happened to be busy, then restore it on the next window. Staleness is
+// handled by last_seen and the maintenance pass instead.
+func (s *Store) UpsertNodes(ctx context.Context, systemID string, nodes []model.NodeInfo, now int64) error {
+	nodes = model.SanitizeRoster(nodes)
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	for _, n := range nodes {
+		// A node whose name could not be resolved this window must not
+		// erase the name stored from an earlier one: COALESCE(NULLIF(...))
+		// keeps the prior value when the incoming one is empty. The
+		// alternative -- blanking on every failed lookup -- would make the
+		// UI flicker between a name and a bare id.
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO system_nodes (system_id, node_id, fqdn, first_seen, last_seen)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(system_id, node_id) DO UPDATE SET
+				fqdn = COALESCE(NULLIF(excluded.fqdn, ''), system_nodes.fqdn),
+				last_seen = excluded.last_seen
+		`, systemID, n.NodeID, n.FQDN, now, now); err != nil {
+			return fmt.Errorf("store: upsert node: %w", err)
+		}
+	}
+	return nil
+}
+
+// NodeRoster returns a system's node_id -> fqdn map. An entry with no
+// resolved name is present with an empty string, so a caller can tell a known
+// node from an unknown one.
+func (s *Store) NodeRoster(ctx context.Context, systemID string) (map[int]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT node_id, fqdn FROM system_nodes WHERE system_id = ?`, systemID)
+	if err != nil {
+		return nil, fmt.Errorf("store: query node roster: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[int]string{}
+	for rows.Next() {
+		var id int
+		var fqdn sql.NullString
+		if err := rows.Scan(&id, &fqdn); err != nil {
+			return nil, fmt.Errorf("store: scan node: %w", err)
+		}
+		out[id] = fqdn.String
+	}
+	return out, rows.Err()
+}
+
+// ResolveNodes fills NodeRefs on each finding from the system's roster.
+//
+// Names are joined here rather than stored on the finding row so that one
+// machine has exactly one name in the database: a rename then shows up
+// everywhere at once, and there is no set of stale copies to migrate. A node
+// with no roster entry still resolves, to a NodeRef carrying the bare id --
+// attribution the operator can act on, just without the convenience.
+func (s *Store) ResolveNodes(ctx context.Context, systemID string, findings []model.Finding) error {
+	if len(findings) == 0 {
+		return nil
+	}
+	roster, err := s.NodeRoster(ctx, systemID)
+	if err != nil {
+		return err
+	}
+	for i := range findings {
+		findings[i].NodeRefs = model.ResolveNodeRefs(findings[i].Nodes, roster)
+	}
+	return nil
 }
 
 func boolToInt(b bool) int {

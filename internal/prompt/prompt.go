@@ -179,12 +179,19 @@ func Select(b model.Bundle, sel Selection) []Line {
 			cp := t
 			cp.ModuleID = k.moduleID
 			cp.Samples = nil
+			cp.Nodes = model.SanitizeNodeIDs(t.Nodes)
 			grouped[k] = &Line{Template: cp, Variants: 1}
 			order = append(order, k)
 			continue
 		}
 		line.Variants++
 		line.Template.Count += t.Count
+		// Node attribution is a union across the group, not a property of
+		// the representative: the same condition can surface as different
+		// masked variants on different nodes, and taking only the winner's
+		// set would silently attribute the line to wherever the busiest
+		// variant happened to be. Carried, never rendered -- see nodes.go.
+		nodes := model.MergeNodeIDs(line.Template.Nodes, t.Nodes)
 		// The representative is the busiest variant; ties break on template
 		// order so the choice does not depend on map or slice iteration.
 		if t.Count > line.Template.Count-t.Count ||
@@ -195,6 +202,7 @@ func Select(b model.Bundle, sel Selection) []Line {
 			line.Template.Samples = nil
 			line.Template.Count = count
 		}
+		line.Template.Nodes = nodes
 		if t.Category == "security" {
 			line.Template.Category = "security"
 		}

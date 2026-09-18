@@ -3,7 +3,11 @@
 
 package fingerprint
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/nethesis/nethesis-insights/internal/model"
+)
 
 func TestStableAcrossReordering(t *testing.T) {
 	a := Compute("sys1", []string{"mod1", "mod2"}, []string{"ev1", "ev2"}, "cat1")
@@ -51,5 +55,26 @@ func TestAllHexChars(t *testing.T) {
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("non-hex char in fingerprint: %q", a)
 		}
+	}
+}
+
+// Node attribution must not touch identity. A finding's node set moves
+// between windows -- a condition spreads, or clears on one machine and not
+// another -- and folding that into the hash would re-raise the same condition
+// as a new finding every time it moved, which is the v1 failure that splitting
+// on the cited set already caused once.
+func TestNodeAttributionDoesNotChangeIdentity(t *testing.T) {
+	base := []model.Template{
+		{Template: "sshd: Failed password for <USER> from <IP>", ModuleID: "", Priority: 5, Category: "security"},
+	}
+	withNodes := []model.Template{
+		{Template: "sshd: Failed password for <USER> from <IP>", ModuleID: "", Priority: 5, Category: "security", Nodes: []int{1, 4, 7}},
+	}
+
+	a := Compute("sys-1", []string{""}, EvidenceKey(base), "security")
+	b := Compute("sys-1", []string{""}, EvidenceKey(withNodes), "security")
+
+	if a != b {
+		t.Errorf("node set changed the fingerprint: %q != %q", a, b)
 	}
 }

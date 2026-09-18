@@ -4,15 +4,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Systems</h1>
-<p><small>One row per machine that has ever sent a bundle, with fleet-wide totals for it:
+<p><small>One row per NS8 cluster that has ever sent a bundle, with fleet-wide totals for it:
 known templates, currently-open findings, all-time findings, analyzed windows, LLM calls
 and spend. Use it to spot which systems are actually costing money or generating
-findings.</small></p>
+findings. <strong>Nodes</strong> lists the machines in the cluster and the name each one
+reports for itself; a node shows as a bare number when no name has reached us yet.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr>
-<th scope="col">System</th><th scope="col">Tenant</th><th scope="col">Collector</th><th scope="col">First seen</th><th scope="col">Last seen</th>
+<th scope="col">System</th><th scope="col">Tenant</th><th scope="col">Nodes</th><th scope="col">Collector</th><th scope="col">First seen</th><th scope="col">Last seen</th>
 <th scope="col" class="num">Templates</th><th scope="col" class="num">Open</th><th scope="col" class="num">Findings</th>
 <th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th><th scope="col" class="num">Cost</th>
 </tr>
@@ -22,6 +23,7 @@ findings.</small></p>
 <tr>
 <td class="mono">{{.SystemID}}</td>
 <td>{{.TenantID}}</td>
+<td>{{range .Nodes}}<div class="mono">{{.NodeID}}{{if .FQDN}} &mdash; {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
 <td>{{.CollectorVersion}}</td>
 <td class="mono">{{fmtTime .FirstSeen}}</td>
 <td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>

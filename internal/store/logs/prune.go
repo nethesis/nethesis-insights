@@ -99,6 +99,25 @@ func (s *Store) PruneTemplates(ctx context.Context, olderThan int64) (int, error
 	`, olderThan)
 }
 
+// PruneNodes deletes system_nodes rows not seen since olderThan.
+//
+// Shares TemplateRetention's cutoff rather than having a knob of its own: a
+// roster entry is only useful while some finding still cites the node, and
+// findings outlive templates by less than the template cutoff. Dropping a
+// name early would leave a bare id on an otherwise readable finding, so this
+// deliberately errs long -- the table holds one row per machine, not per
+// event, so keeping it is nearly free.
+func (s *Store) PruneNodes(ctx context.Context, olderThan int64) (int, error) {
+	return s.pruneLoop(ctx, `
+		DELETE FROM system_nodes
+		WHERE (system_id, node_id) IN (
+			SELECT system_id, node_id FROM system_nodes
+			WHERE last_seen < ?
+			LIMIT ?
+		)
+	`, olderThan)
+}
+
 // PruneFindings deletes findings rows past olderThan (by last_seen) that are
 // NOT open. An open finding is current by definition, however old its
 // first_seen is, and is never a candidate no matter how far olderThan

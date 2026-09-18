@@ -37,11 +37,19 @@ func (f *fakePublisher) Publish(b model.Bundle) error {
 // construction, but NewServer takes one Store for both routes.
 type fakeStore struct {
 	findings []model.Finding
+	roster   map[int]string
 	err      error
 }
 
 func (f *fakeStore) ListFindings(_ context.Context, _ string, _ int64, _ string) ([]model.Finding, error) {
 	return f.findings, f.err
+}
+
+func (f *fakeStore) ResolveNodes(_ context.Context, _ string, findings []model.Finding) error {
+	for i := range findings {
+		findings[i].NodeRefs = model.ResolveNodeRefs(findings[i].Nodes, f.roster)
+	}
+	return nil
 }
 
 // The credential is never verified in this process -- authd and the

@@ -38,6 +38,7 @@ const PassName = "log maintenance"
 // with a fake and the layering stays a DAG. *logsstore.Store satisfies it.
 type Reader interface {
 	PruneTemplates(ctx context.Context, olderThan int64) (int, error)
+	PruneNodes(ctx context.Context, olderThan int64) (int, error)
 	PruneFindings(ctx context.Context, olderThan int64) (int, error)
 	PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 }
@@ -91,11 +92,15 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	templatesPruned := r.prune(ctx, "templates", r.store.PruneTemplates, now-r.cfg.TemplateRetention.Milliseconds())
 	findingsPruned := r.prune(ctx, "findings", r.store.PruneFindings, now-r.cfg.FindingRetention.Milliseconds())
 	analysesPruned := r.prune(ctx, "analyses", r.store.PruneAnalyses, now-r.cfg.AnalysisRetention.Milliseconds())
+	// The node roster shares the template cutoff -- see PruneNodes for why
+	// it has no retention knob of its own.
+	nodesPruned := r.prune(ctx, "nodes", r.store.PruneNodes, now-r.cfg.TemplateRetention.Milliseconds())
 
 	slog.Info("log maintenance pass",
 		"templates_pruned", templatesPruned,
 		"findings_pruned", findingsPruned,
-		"analyses_pruned", analysesPruned)
+		"analyses_pruned", analysesPruned,
+		"nodes_pruned", nodesPruned)
 	return nil
 }
 

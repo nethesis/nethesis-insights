@@ -33,6 +33,7 @@ import (
 	"context"
 	"embed"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -58,6 +59,7 @@ type Reader interface {
 	GateRollup(ctx context.Context, since int64) ([]logsstore.GateRow, error)
 	CostRollup(ctx context.Context) ([]logsstore.CostRow, error)
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
+	ResolveNodesFleet(ctx context.Context, findings []model.Finding) error
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error)
 }
@@ -283,6 +285,13 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.chrome.StoreError(w, "index", err)
 		return
+	}
+	// Names are joined here, not stored on the finding: one machine has one
+	// name in the database, so a rename shows up everywhere at once. Losing
+	// the join costs the names, never the page -- the node ids are on the
+	// rows already and are the attribution that matters.
+	if err := s.reader.ResolveNodesFleet(r.Context(), findings); err != nil {
+		slog.Warn("resolving node names failed", "error", err)
 	}
 	s.chrome.Render(w, "index.html", findingsPageData{
 		PageData:   s.chrome.PageData(r, "index"),

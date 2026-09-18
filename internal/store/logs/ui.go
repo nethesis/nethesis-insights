@@ -56,6 +56,9 @@ type SystemRow struct {
 	Templates, OpenFindings, Findings    int
 	Windows, LLMCalls                    int
 	CostMicros                           int64
+	// Nodes is the cluster's roster, ordered by node id. A system_id names
+	// a cluster, so this is what turns it into a list of machines.
+	Nodes []model.NodeInfo
 }
 
 // AnalysisRow is one row of the cost ledger, including the columns the
@@ -203,6 +206,18 @@ func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list systems: %w", err)
+	}
+
+	// Read the rosters in one pass rather than a correlated subquery per
+	// system: the column is a list, and GROUP_CONCAT would both flatten it
+	// into a string this code would have to parse back and tie the schema to
+	// a non-portable function.
+	bySystem, err := s.nodeRosters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range result {
+		result[i].Nodes = bySystem[result[i].SystemID]
 	}
 	return result, nil
 }
@@ -385,7 +400,7 @@ const SortRecent = "recent"
 // as is.
 func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
 	query := `
-		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version
+		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes
 		FROM findings
 		WHERE (? = '' OR system_id LIKE ?) AND (? = '' OR status = ?) AND (? = '' OR severity = ?)
 		  AND (? = '' OR id LIKE ? OR fingerprint LIKE ?)
@@ -464,4 +479,60 @@ func (s *Store) ListBaselines(ctx context.Context, systemID string) ([]BaselineR
 		return nil, fmt.Errorf("store: list baselines: %w", err)
 	}
 	return result, nil
+}
+
+// nodeRosters returns every system's node roster, ordered by node id within
+// each system.
+//
+// Fleet-wide and unfiltered: the table holds one row per machine, not per
+// event, so it is a few rows per cluster -- small enough that scoping the
+// query to a page's systems would cost more in complexity than it saves.
+func (s *Store) nodeRosters(ctx context.Context) (map[string][]model.NodeInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT system_id, node_id, fqdn FROM system_nodes ORDER BY system_id, node_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list node rosters: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string][]model.NodeInfo{}
+	for rows.Next() {
+		var systemID string
+		var n model.NodeInfo
+		var fqdn sql.NullString
+		if err := rows.Scan(&systemID, &n.NodeID, &fqdn); err != nil {
+			return nil, fmt.Errorf("store: scan node roster: %w", err)
+		}
+		n.FQDN = fqdn.String
+		out[systemID] = append(out[systemID], n)
+	}
+	return out, rows.Err()
+}
+
+// ResolveNodesFleet fills NodeRefs on findings that may span systems, which
+// is what the operator UI's fleet-wide findings page holds. The per-system
+// counterpart is Store.ResolveNodes.
+func (s *Store) ResolveNodesFleet(ctx context.Context, findings []model.Finding) error {
+	if len(findings) == 0 {
+		return nil
+	}
+	rosters, err := s.nodeRosters(ctx)
+	if err != nil {
+		return err
+	}
+	// One map per system, built once, so a page of 200 findings does not
+	// rebuild the same lookup 200 times.
+	byID := make(map[string]map[int]string, len(rosters))
+	for systemID, nodes := range rosters {
+		m := make(map[int]string, len(nodes))
+		for _, n := range nodes {
+			m[n.NodeID] = n.FQDN
+		}
+		byID[systemID] = m
+	}
+	for i := range findings {
+		findings[i].NodeRefs = model.ResolveNodeRefs(findings[i].Nodes, byID[findings[i].SystemID])
+	}
+	return nil
 }
