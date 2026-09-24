@@ -301,7 +301,10 @@ paths:
         manufacture agreement between systems that never independently
         observed anything) → `value` must be a public unicast IP → `created_at`
         must parse as RFC3339 (a value more than 24h in the future is
-        clamped to server time rather than dropped).
+        clamped to server time rather than dropped; a value older than
+        `THREAT_EVENT_RETENTION`, 7 days by default, is dropped and counted
+        as `dropped_time` -- the server would delete it on its next prune
+        anyway).
 
         Body may be `Content-Encoding: gzip`. Request body capped at 8 MiB
         after decompression, and at most `THREAT_MAX_DECISIONS_PER_REQUEST`
@@ -1180,7 +1183,7 @@ components:
         scenario: { type: string, description: Free text, trimmed and capped at 128 runes. Every scenario is accepted -- there is no fixed category set. }
         origin: { type: string, description: "Must be `crowdsec`, `cscli` (CrowdSec reporters) or `banip` (NethSecurity reporters)." }
         duration: { type: string, description: "Go duration string, e.g. `3h59m59s`." }
-        created_at: { type: string, format: date-time, description: RFC3339. More than 24h in the future is clamped to server time. }
+        created_at: { type: string, format: date-time, description: RFC3339. More than 24h in the future is clamped to server time. Older than THREAT_EVENT_RETENTION (7 days by default) is dropped (dropped_time). }
 
     ThreatReport:
       type: object
