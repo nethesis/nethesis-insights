@@ -88,6 +88,13 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 	if cfg.Window <= 0 {
 		errs = append(errs, fmt.Errorf("BLOCKLIST_WINDOW must be positive, got %s", cfg.Window))
 	}
+	if interval > 0 && cfg.Window > 0 && interval > cfg.Window {
+		// A pass counts ConsensusCandidates(now - Window); a sighting that
+		// both lands and ages out of the window between two passes is never
+		// seen by any of them. Equal is fine -- every sighting is still
+		// inside the window for at least one pass.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_CONSENSUS_INTERVAL (%s) must not exceed BLOCKLIST_WINDOW (%s)", interval, cfg.Window))
+	}
 	if cfg.TTL < cfg.Window {
 		// A listing expires TTL after its last sighting, which is inside the
 		// window: a shorter TTL writes an entry already expired.

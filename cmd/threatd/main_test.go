@@ -55,6 +55,16 @@ func TestValidateConfigAcceptsTheDefaults(t *testing.T) {
 	}
 }
 
+// A consensus interval equal to the window is fine -- every sighting is
+// still inside the window for at least one pass. Only exceeding it leaves a
+// gap no pass ever counts.
+func TestValidateConfigAcceptsAnIntervalEqualToTheWindow(t *testing.T) {
+	cfg := validConsensus()
+	if err := validateConfig(cfg, cfg.Window, validLimits()); err != nil {
+		t.Fatalf("interval == window refused: %v", err)
+	}
+}
+
 func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -71,6 +81,9 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		{name: "zero interval", interval: 0, wantVar: "BLOCKLIST_CONSENSUS_INTERVAL"},
 		{name: "negative interval", interval: -time.Minute, wantVar: "BLOCKLIST_CONSENSUS_INTERVAL"},
 		{name: "zero window", mutateCfg: func(c *blocklist.Config) { c.Window = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_WINDOW"},
+		// A pass every 2h cannot count a sighting that lands inside a 1h
+		// window and ages back out of it before the next pass runs.
+		{name: "interval longer than window", interval: 2 * time.Hour, wantVar: "must not exceed BLOCKLIST_WINDOW"},
 		// promote would write an expires_at already in the past, and the
 		// same pass's ExpireBlocklist would delete it.
 		{name: "ttl below window", mutateCfg: func(c *blocklist.Config) { c.TTL = 30 * time.Minute }, interval: time.Minute, wantVar: "BLOCKLIST_TTL"},

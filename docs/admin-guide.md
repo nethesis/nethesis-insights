@@ -357,7 +357,7 @@ the stated limits stops it with an error naming the variable, visible in
 | Variable | Purpose |
 |---|---|
 | `ADMIN_API_KEY` | password for the blocklist dashboard's write routes — secret. Unset means those routes answer `405`, never a default credential. Only `threatd` reads this |
-| `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`). Must be positive |
+| `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`). Must be positive, and must not exceed `BLOCKLIST_WINDOW` — a longer interval leaves sightings that land and age out between two passes uncounted by either |
 | `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`). Must be positive |
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
