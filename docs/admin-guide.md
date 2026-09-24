@@ -339,6 +339,7 @@ depth. It never logs a credential: the model API key appears only as
 | `PIPELINE_EXCLUDE_MODULES` | modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline). Matches a module **family** or an exact instance id — configure the family, since NS8 numbers instances per cluster and `crowdsec1` excludes nothing on a node running `crowdsec3` |
 | `PIPELINE_EXCLUDE_SERVICES` | syslog identifiers dropped the same way, matched against the `[tag]` on each masked log line (default `insights,alert-proxy`). `insights` stops a co-located server from analysing its own logs; `alert-proxy` stops the fleet re-reporting alerts your monitoring stack has already raised and already sent you. The tag is matched on every line, not only host ones — which is how `alert-proxy` is excluded without excluding the `metrics` module it runs inside. Note `PIPELINE_EXCLUDE_MODULES=alert-proxy` would match nothing: it is not a module |
 | `STALE_AFTER` | how long without a recurrence before a finding is presumed resolved (default `24h`) |
+| `TRIGGER_REUSE_WINDOW` | how long after the AI was asked about a trigger on a machine that the same trigger on the same machine is answered from memory instead of asked again, counted from that paid call (default `24h`; `0` turns reuse off — ignores still apply). See "Trigger memory" below |
 | `EWMA_ALPHA` | baseline smoothing weight, must be in `(0, 1]` (default `0.3`). Not validated — a value outside that range silently produces a nonsensical baseline |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
@@ -623,6 +624,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_events"`) | the bundle/ingest queue's live state |
 | `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
+| `insightsd_trigger_suppressions_total{reason}` | `insightsd` | windows the gate fired on that were answered without calling the AI: `trigger_hit` (already asked, answer still current) or `trigger_ignored` (an operator ignored that trigger) |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -635,7 +637,8 @@ gate reasons and findings.
 
 **Counters start at 0, not missing.** Every counter above whose labels are a
 known list — the four `insightsd_llm_calls_total` outcomes, the
-`insightsd_budget_rejections_total` reason, both `authd_*` families,
+`insightsd_budget_rejections_total` reason, both
+`insightsd_trigger_suppressions_total` reasons, both `authd_*` families,
 `threatd_ingestq_full_total`, and both `<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
 counts has ever happened. That is what lets an alert like
@@ -819,8 +822,8 @@ the effective configuration, lives alongside it.
 |---|---|
 | `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on; click a row for the full summary, suggested action, evidence, fingerprint and the nodes' full names. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
-| `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
-| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every listed row with reasons went to the AI; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
+| `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, the window's **trigger**, and whether a spending limit or the trigger memory suppressed it. This answers "what did we spend, and on what." |
+| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI except the ones counted under **Suppressed** — answered from trigger memory or ignored by an operator; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/logs/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/logs/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
 | `/logs/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
@@ -1006,8 +1009,10 @@ the fact from stored data — see the `/analyses` and `/gate` pages below.
 Two things to know when reading those reasons. First, **a reason is the trigger,
 not a description**: the gate calls the AI if and only if at least one reason
 fired, so "this window has reasons" and "this window cost money" are the same
-statement. Counting them as two separate numbers tells you nothing; the useful
-number is what share of windows had *no* reasons.
+statement — with one exception, marked in `suppressed_by`: a window the trigger
+memory answered (see "Trigger memory" below) keeps the reasons the gate fired
+with, but made no call. The useful numbers are what share of windows had *no*
+reasons, and what share of the rest was suppressed.
 
 Second, **reasons are stored spelled the way the gate spelled them at the time**.
 When a gate rule changes, old rows keep the old wording — rows written before the
@@ -1036,6 +1041,47 @@ limits do:
 
 The counts come from the stored ledger, not from memory, so restarting the
 server does not hand anybody a fresh allowance.
+
+### 3b. Trigger memory: not paying twice for the same thing
+
+The gate decides each window on its own, so it cannot know that it already
+paid to ask about exactly this condition an hour ago. On the development
+fleet that was a quarter of the bill: the same module surging on the same
+machine, asked about again every 15 minutes while the finding from the first
+answer was still open.
+
+So every window the gate fires on gets a **trigger**: a name for *why* the
+gate fired — which new log lines (only when the new lines are what fired it),
+which modules were unusually loud and at what priority, and whether a security
+line was involved. It does not include the machine, so the same condition on
+two customers' clusters is one trigger. Before asking the AI, the server checks
+it:
+
+- **Ignored.** An operator has marked the trigger as not worth asking about,
+  for everyone, until a date. The window is recorded but the AI is not called.
+  An ignore always has an end date, and it is written to an audit trail with
+  who set it.
+- **Already answered.** This machine asked about this exact trigger within
+  `TRIGGER_REUSE_WINDOW` (a day, by default) of the last time it actually
+  paid, and every finding that answer produced is still open — or it produced
+  none. The window bumps those findings the way a recurrence would, and costs
+  nothing. The day counts from the last *paid* answer, so a condition that
+  never goes away is still looked at again at least once a day.
+- Otherwise the AI is asked as before.
+
+Security triggers are the exception to review: they are never held back and
+can never be ignored, though an unchanged one can be answered from memory like
+any other.
+
+A suppressed window is recorded like a gated-out one — its lines are learnt
+and its volumes counted — and shows up in `/analyses` with `trigger_hit` or
+`trigger_ignored` in the *Suppressed* column. Nothing an operator decides here
+is ever shown to the AI.
+
+What is **not** built yet: the review pages where an operator decides whether a
+trigger's findings go to the customer, stay internal, are ignored or are merged
+into another trigger. Today an ignore can only be set by the server's own
+tests, so in practice the saving comes from the "already answered" rule.
 
 ### 4. Baselines: "what's normal" for a module
 

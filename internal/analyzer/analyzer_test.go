@@ -540,8 +540,9 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 // call, so a test can assert what Process fed it without a real prometheus
 // registry.
 type recordingAnalyzerMetrics struct {
-	budgetRejections []string
-	llmCalls         []struct {
+	budgetRejections    []string
+	triggerSuppressions []string
+	llmCalls            []struct {
 		result string
 		cost   int64
 	}
@@ -550,6 +551,9 @@ type recordingAnalyzerMetrics struct {
 func (r *recordingAnalyzerMetrics) hooks() *Metrics {
 	return &Metrics{
 		BudgetRejected: func(reason string) { r.budgetRejections = append(r.budgetRejections, reason) },
+		TriggerSuppressed: func(reason string) {
+			r.triggerSuppressions = append(r.triggerSuppressions, reason)
+		},
 		LLMCall: func(result string, cost int64) {
 			r.llmCalls = append(r.llmCalls, struct {
 				result string

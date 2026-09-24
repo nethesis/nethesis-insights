@@ -235,3 +235,70 @@ func TestPruneLoopsAcrossMultipleBatches(t *testing.T) {
 		t.Fatalf("expected nothing left to prune, got %d", remaining)
 	}
 }
+
+func TestPruneSystemTriggersByLastSeen(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, sg := range []TriggerSighting{
+		{SystemID: "old", Key: "t1:k", Called: true, Now: 1000},
+		{SystemID: "new", Key: "t1:k", Called: true, Now: 9000},
+	} {
+		if err := s.RecordTriggerSighting(ctx, sg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.PruneSystemTriggers(ctx, 5000)
+	if err != nil || n != 1 {
+		t.Fatalf("pruned %d, err %v; want 1", n, err)
+	}
+	if look, _ := s.LookupTrigger(ctx, "new", "t1:k"); !look.SystemSeen {
+		t.Fatal("a recent system trigger was pruned")
+	}
+}
+
+// A trigger an operator decided on is never pruned, however old: the
+// decision is the only thing that makes the next sighting cheap, and the
+// audit trail would point at nothing. Neither is one that anything still
+// references -- a system row, an alias, a finding.
+func TestPruneTriggersNeverTouchesADecidedOrReferencedTrigger(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for _, key := range []string{"t1:orphan", "t1:decided", "t1:system", "t1:aliased", "t1:finding", "t1:recent"} {
+		now := int64(1000)
+		if key == "t1:recent" {
+			now = 9000
+		}
+		if err := s.RecordTriggerSighting(ctx, TriggerSighting{SystemID: "sys1", Key: key, Called: true, Now: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.IgnoreTrigger(ctx, "t1:decided", 99999, "op", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO trigger_aliases (alias_key, canonical_key, created_at) VALUES ('t1:gone', 't1:aliased', 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertFinding(ctx, model.Finding{SystemID: "sys1", Fingerprint: "fp", Severity: "low",
+		Modules: []string{}, Evidence: []string{}, TriggerKey: "t1:finding"}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	// Every per-system row is gone except the one this case keeps on purpose.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM system_triggers WHERE trigger_key != 't1:system'`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.PruneTriggers(ctx, 5000)
+	if err != nil || n != 1 {
+		t.Fatalf("pruned %d, err %v; want exactly the orphan", n, err)
+	}
+	if _, ok, _ := s.GetTrigger(ctx, "t1:orphan"); ok {
+		t.Fatal("the unreferenced, undecided, old trigger survived")
+	}
+	for _, key := range []string{"t1:decided", "t1:system", "t1:aliased", "t1:finding", "t1:recent"} {
+		if _, ok, _ := s.GetTrigger(ctx, key); !ok {
+			t.Fatalf("%s was pruned", key)
+		}
+	}
+}

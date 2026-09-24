@@ -43,6 +43,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 - [Cost control: the gate](#cost-control-the-gate)
   - [What the prompt carries](#what-the-prompt-carries)
 - [Cost control: the ceiling](#cost-control-the-ceiling)
+- [Cost control: trigger memory](#cost-control-trigger-memory)
 - [Degradation and failure modes](#degradation-and-failure-modes)
 - [Determinism](#determinism)
 - [LLM integration](#llm-integration)
@@ -167,6 +168,7 @@ internal/platform/svc                    Getenv/GetenvInt/GetenvDuration and
 
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
+trigger                     PURE — the trigger key, derived from gate.Decision — logs only
 threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohort keying
 llm  queue  budget          logs only; interfaces where I/O is needed
@@ -195,17 +197,18 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. `Validate` takes a service: empty for the plain subscription check, a name for `<base>/service/<name>`, which is both the URL and part of the cache key. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. `Logging` takes an optional `MetricsRecorder` (`*metrics.HTTP` satisfies it) and feeds it method/route/status/duration for every request after logging it -- `RouteLabel` derives the metrics label from the matched `net/http` `ServeMux` pattern (`Request.Pattern`), never `r.URL.Path`, so the label set stays the small fixed list of registered routes instead of being unbounded. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
-| `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
+| `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Trigger`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
 | `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `<svc>_http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
 | `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `<svc>_pass_runs_total`/`_pass_duration_seconds`/`_pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
+| `internal/trigger` | `trigger.Key` — the fleet-wide name of the condition that made the gate fire, derived from `gate.Decision` alone; `trigger.IsSecurity`. Pure, sha256-based, prefixed by `trigger.Version`. See "Cost control: trigger memory". |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
-| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneFindings`/`PruneAnalyses`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
+| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`) and the trigger memory (`triggers.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneAnalyses`/`PruneSystemTriggers`/`PruneTriggers`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
-| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `LLMCall`) reports one call per budget-suppressed window and one per LLM attempt, classed `success`/`transient`/`permanent`/`parse` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.LLM`. |
-| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings` and `analyses` against their own independent retention windows (`maint.Config`). Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
+| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, trigger, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `TriggerSuppressed`, `LLMCall`) reports one call per budget-suppressed window, one per window the trigger memory answered, and one per LLM attempt, classed `success`/`transient`/`permanent`/`parse` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.Trigger`/`metrics.LLM`. |
+| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `analyses`, `system_nodes`, `system_triggers` and `triggers` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
@@ -327,7 +330,7 @@ This is the pipeline's core, and its step order is a correctness requirement.
 Two of the steps must not move:
 
 - **Prior state is read before any is written.** `KnownTemplates` (step 3)
-  must precede `UpsertTemplates` (step 6 or 10). Reversed, every template
+  must precede `UpsertTemplates` (step 6, 7 or 12). Reversed, every template
   looks known and the gate never fires again.
 - **Templates are recorded only after a fully successful analysis.**
   `record()` is the sole caller of `UpsertTemplates`/`UpsertBaselines`, and it
@@ -350,7 +353,18 @@ In order:
 5. **Gate** (`gate.Evaluate`) using that prior state.
 6. If the gate declines: **record** bookkeeping (templates, baselines, stale
    sweep, the `analyses` ledger row) and return. No LLM call, no cost.
-7. If the gate fires: build one `prompt.Selection` from what the gate found,
+7. If the gate fires: **consult the trigger memory.** `trigger.Key` names the
+   condition from the gate's decision alone; `LookupTrigger` resolves it
+   through `trigger_aliases` and reads its fleet-wide and per-system state.
+   An unexpired ignore (never for a security trigger) or a reuse — this
+   system paid for the same trigger within `TRIGGER_REUSE_WINDOW` of the last
+   paid call, and every finding that call raised is still open — records a
+   sighting (`RecordTriggerSighting`, which bumps those findings on a reuse)
+   and then **records** the window like a gated-out one, but with
+   `suppressed_by = trigger_ignored|trigger_hit`, the gate reasons kept,
+   `trigger_key` set and `llm_called = 0`. No prompt is rendered, no cost.
+   See "Cost control: trigger memory".
+8. Otherwise build one `prompt.Selection` from what the gate found,
    render the prompt (`prompt.Render`, including currently-open findings so the
    model doesn't re-report them), take a slot from the budget's concurrency
    bound, and call the LLM.
@@ -359,14 +373,19 @@ In order:
    - A **permanent** failure (`llm.HTTPError.Permanent()`, or a schema/parse
      failure) finalizes and closes the window — retrying would hit the same
      wall forever.
-8. Parse the strict-JSON response (`prompt.Parse`), resolve each finding's
+9. Parse the strict-JSON response (`prompt.Parse`), resolve each finding's
    cited template IDs back to real templates (`prompt.ResolveEvidence`, given
    the **same** `Selection` used to render) — this is the *only* path from
    model output to stored data, and it is what keeps model-authored prose out
    of the fingerprint.
-9. Compute the fingerprint (`fingerprint.Compute`) and `UpsertFinding` —
-   insert, bump the occurrence count, or reopen a stale finding.
-10. **Record** bookkeeping now that the whole analysis succeeded — this is the
+10. Compute the fingerprint (`fingerprint.Compute`) and `UpsertFinding` —
+   insert, bump the occurrence count, or reopen a stale finding. Each finding
+   carries the window's trigger key, which is how the next window's reuse
+   check finds the findings this call raised.
+11. **Remember the trigger** (`RecordTriggerSighting` with `Called`) now that
+   its call succeeded. A failed call answered nothing and is never recorded
+   as one, so it can never be reused.
+12. **Record** bookkeeping now that the whole analysis succeeded — this is the
    only path that writes templates/baselines after an LLM call, and it is
    what makes a failed call retry-safe: nothing looks "known" that wasn't
    actually processed.
@@ -390,23 +409,37 @@ housekeeping at all before this: `internal/store/logs` carried zero `DELETE`
 statements, so with the fleet feeding it every 15 minutes,
 `system_templates`, `findings` and `analyses` all grew without bound.
 
-Unlike the consensus and cohort passes, its three prunes have **no ordering
+Unlike the consensus and cohort passes, its prunes have **no ordering
 constraint** between them — neither dictates the other's correctness, because
 `sizing_node_monthly`'s situation (a rollup that must run before its prune, or
 the dropped day's history is lost for good) does not apply here: the logs
-pipeline keeps no rollup table for any of the three (deliberately out of
+pipeline keeps no rollup table for any of them (deliberately out of
 scope; see below), and neither does threatd's, so there is nothing a prune
 could run ahead of and invalidate. `maint.Runner.Run` therefore just prunes
-all three independently
+each table independently
 and logs, rather than aborts, on a failure in any one — pruning is this
 pass's entire job, not a secondary step guarding a published artifact the
 way baseline's rollup-then-prune steps are.
 
 ```
 1. PruneTemplates(now - TEMPLATE_RETENTION)
-2. PruneFindings(now - FINDING_RETENTION)   -- open findings are never candidates
+2. PruneFindings(now - FINDING_RETENTION)        -- open findings are never candidates
 3. PruneAnalyses(now - ANALYSIS_RETENTION)
+4. PruneNodes(now - TEMPLATE_RETENTION)
+5. PruneSystemTriggers(now - FINDING_RETENTION)
+6. PruneTriggers(now - TEMPLATE_RETENTION)      -- never one with an operator decision
 ```
+
+The trigger memory has no retention knobs of its own. `system_triggers`
+links a trigger to the findings its last call raised, so it lives as long as
+they do; `triggers` describes what the gate saw, the way `system_templates`
+does, so it shares that retention — and `PruneTriggers` spares any trigger
+with a row in `trigger_decisions`, an alias on either side, a remaining
+`system_triggers` row or a finding still naming it. A decided trigger is
+never pruned however old: the decision is what makes its next sighting
+cheap, and the append-only audit trail would otherwise name nothing. Step 5
+runs before step 6 only so a trigger it frees is collected in the same pass;
+there is still no ordering constraint for correctness.
 
 Each call is itself internally batched (`logsstore.pruneBatchSize`, 5000 rows
 per `DELETE`, looped with the write lock released between batches) rather
@@ -956,8 +989,12 @@ without a goroutine to leak.
 | `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. Pruned past `TEMPLATE_RETENTION` by `maint.Runner`; see "Maintenance pass" for why that default is 400 days and not shorter. |
 | `system_nodes` | The reporting cluster's node roster: `(system_id, node_id)` plus the `fqdn` that node reports for itself, and first/last-seen. A `system_id` is an NS8 *cluster*, so this is the dimension that lets a finding name a machine. It is the **only** table in this pipeline holding a customer-identifying string — see "Node attribution" below and "Data protection". Names live here and nowhere else: `findings` stores node ids and joins this table at read time. Pruned on the `TEMPLATE_RETENTION` cutoff by `maint.Runner`, which it shares rather than having a knob of its own. |
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. Deliberately **not** pruned by `maint.Runner` — it does not grow per event the way `system_templates` and `analyses` do, only with the number of distinct buckets a system has, so it has no comparable backlog problem. |
-| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
-| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
+| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, `suppressed_by` when a budget limit refused the window (`system_call_cap`, no reasons) or the trigger memory answered it (`trigger_ignored`/`trigger_hit`, reasons kept), and `trigger_key` for every window the gate fired on. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
+| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `trigger_key` names the trigger of the LLM call that last raised it: the join the reuse check goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
+| `triggers` | Fleet-wide, one row per trigger key: `security`, `status` (`active`/`ignored`) with `ignore_until`, `visibility` (`pending`/`customer`/`operator` — a security trigger starts `customer`), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen, `distinct_systems`, `count`. Holds the current effect of every operator decision. Pruned only when undecided and unreferenced. |
+| `system_triggers` | Per `(system_id, trigger_key)`: first/last seen, `count`, and `last_called_at` — the last *paid* call, which the reuse window is measured from. Pruned past `FINDING_RETENTION`. |
+| `trigger_aliases` | `alias_key → canonical_key`, always pointing straight at a root, so resolving is one lookup and the read API's filter can be one join. Written by merges (Phase 2); already read by every lookup. Never pruned. |
+| `trigger_decisions` | Append-only audit trail of operator actions on triggers: actor, action, detail, the trigger's `first_prompt_version`, time. Exists because the `UPDATE` on `triggers` destroys the value that would say who changed it. Never pruned. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
@@ -1583,10 +1620,14 @@ refused. It is stored with `gated = 1`, `suppressed_by` naming the limit, and
 
 Two consequences for anything that reads `gate_reasons` back:
 
-- **`llm_called` is derivable from the reason set, and `cost_micros` is not
-  derivable from `llm_called`.** `Call == len(Reasons) > 0` is a `gate.Evaluate`
-  invariant, so a non-empty reason set always means a call — never present
-  windows and calls as independent columns. `llm_called` counts *attempts*: the
+- **`llm_called` is derivable from the reason set and `suppressed_by`, and
+  `cost_micros` is not derivable from `llm_called`.** `Call == len(Reasons) > 0`
+  is a `gate.Evaluate` invariant, so a non-empty reason set with an empty
+  `suppressed_by` always means a call — never present windows and calls as
+  independent columns. A window the trigger memory answered is the one
+  reasoned row without a call: it keeps its reasons, because they are what
+  the saving is measured against, and says so in `suppressed_by`
+  (`store.GateRow.Suppressed`; `/gate` shows it as its own column). `llm_called` counts *attempts*: the
   transient-error, permanent-error and response-parse paths all set it with
   `cost_micros = 0`, so "called and paid" needs a separate count
   (`store.GateRow.PaidCalls`).
@@ -1656,6 +1697,102 @@ A suppressed window still records its templates and baselines. Skipping that
 would leave the system never learning what it saw, so every later window would
 look novel — the cap would make the next day more expensive, not less.
 
+## Cost control: trigger memory
+
+The gate answers "is this window worth money?" per window. It cannot answer
+"has this exact condition already been paid for?", and on the dev fleet
+that was the larger bill: over seven days, 537 of 1,316 deviation-triggered
+calls (26% of spend) repeated a bucket the same system had paid for within
+the previous 24 hours while a finding for that module was still open.
+
+**The key.** `trigger.Key(gate.Decision)` hashes, length-prefixed, sorted and
+deduplicated like the fingerprint:
+
+- the canonical keys of `Decision.Novel`, **only when novelty fired**
+  (`Decision.NoveltyFired`: the quorum was met or a novel template was
+  security-classified). Sub-quorum novelty rides along a deviation window
+  without paying for it; kept in the key, it made 404 of 818 deviation-only
+  windows unique and halved the saving (18% of spend instead of 39%, replayed);
+- `Decision.DeviatingBuckets`, folded to `(model.ModuleFamily, priority)` —
+  the family for the same reason `system_templates` uses one, the priority
+  because an error surge and an info surge are not one condition;
+- one security bit, `security_new || security_surge`.
+
+It carries **no `system_id`**: a trigger is a fleet-wide name, reviewed once.
+It is not a finding's identity and does not replace one —
+`fingerprint.Compute` still names what the model concluded, per system, and
+is unchanged. `trigger.Version` prefixes every key; changing what the key
+hashes renames every trigger and orphans every decision recorded against the
+old names, so, like `fingerprint.Version`, it is bumped deliberately.
+
+**The lookup** runs in `analyzer.Process` after the gate fires and before
+`OpenFindings`/`Render` (step 7 above), and nowhere else — `gate`, `trigger`,
+`fingerprint` and `prompt` stay pure. In order:
+
+1. Resolve the key through `trigger_aliases` to its root. Aliases always point
+   at a root, so this is one lookup.
+2. **Ignored**, and `ignore_until` in the future → no call,
+   `suppressed_by = trigger_ignored`. An ignore is fleet-wide, always expires
+   (`IgnoreTrigger` refuses a past expiry), and is recorded in
+   `trigger_decisions` in the same transaction.
+3. **Reuse** → no call, `suppressed_by = trigger_hit`, when this system paid
+   for the same root within `TRIGGER_REUSE_WINDOW` (default 24h) of
+   `system_triggers.last_called_at` **and** every finding that call raised is
+   still open. The findings are bumped as a recurrence would bump them.
+4. Otherwise call. Only a successful call writes `last_called_at` and links its
+   findings (`findings.trigger_key`).
+
+Four rules in that sequence are load-bearing:
+
+- **The window is measured from the last paid call, never from `last_seen`.**
+  A reuse bumps `last_seen`, so measuring from it would let a reuse renew
+  itself indefinitely: a persistent condition would never be re-analysed and
+  its severity would be frozen at whatever the first call said.
+- **"The findings that call raised" means `last_seen >= last_called_at`.** An
+  older finding under the same key belongs to an earlier call; counting it
+  would let one stale finding block reuse for that key until it was pruned.
+  A finding the last call raised going stale means the condition changed
+  shape, and the window is paid for again.
+- **A call that raised nothing is reusable.** The model looked at exactly this
+  trigger and reported nothing; 42% of paid calls on the dev fleet touched no
+  finding at all, and under an "open finding required" rule none of them could
+  ever have been reused.
+- **Reuse is per system; an ignore is fleet-wide.** A trigger paid for on one
+  cluster is still analysed on the next — the answer may be specific to it —
+  while an operator's "this is noise" is a statement about the condition.
+
+**Security triggers** (the key's security bit) are delivered without review
+(`visibility = customer` on first sight) and can never be ignored:
+`IgnoreTrigger` refuses one with `ErrSecurityTrigger`, and the analyzer does
+not honour an ignore on one even if the store held it — two locks, the same
+arrangement as Threat Shield's allowlist normalisation. They can be reused.
+
+**A suppressed window is recorded like a gated-out one.** `record()` writes
+its templates and baselines, for the reason the budget's suppressed windows
+do: a system that never learns what it saw sees it as novel again next
+window. After an ignore, those templates are known on that system, so
+`ignore_until` expiring matters for other systems and for deviation keys,
+not for the same novelty on the same system. Every window still has exactly
+one `analyses` row.
+
+**Operator decisions never reach the prompt.** The prompt is rendered from
+the bundle and `OpenFindings` only, whatever a finding's trigger or its
+visibility. `TestDecisionsNeverReachThePrompt` renders the same window with
+and without an ignore on the trigger behind an open finding and requires
+byte-identical prompts. A future `severity_override` must be applied when
+findings are read for the customer, never written into `findings.severity`,
+which `Render` prints.
+
+`TRIGGER_REUSE_WINDOW=0` disables reuse; ignores still apply. The counter is
+`insightsd_trigger_suppressions_total{reason}`, labelled only with the two
+`suppressed_by` values — never a trigger key.
+
+**Not built yet.** `visibility`, `severity_override` and `doc_ref` are stored
+but not applied: the read API still returns every finding, and there is no
+route that writes a decision other than `IgnoreTrigger` itself (tests only).
+The review routes on `ui/logs`, merging, the per-`prompt.Version` statistics
+and the `ListFindings` visibility filter are the next step.
+
 ## Degradation and failure modes
 
 Every dependency failure is designed to cost one capability rather than the
@@ -1671,6 +1808,7 @@ run.
 | LLM provider returns a permanent error | the window is finalized and closed — retrying would hit the same wall forever |
 | spend cap reached | the gate narrows to security-only. Genuinely cheap, because the security condition is novelty-scoped |
 | per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates and baselines are still recorded |
+| trigger already paid for, or ignored | the window is recorded `gated = 1`, `suppressed_by = trigger_hit` or `trigger_ignored`, reasons kept, no cost — templates and baselines recorded; a hit bumps the findings the last call raised |
 | consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
 | threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
 | process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |

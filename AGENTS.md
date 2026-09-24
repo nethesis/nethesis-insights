@@ -358,9 +358,10 @@ against, before assuming a bug:
 | Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` — **this is now the permanent design**. `golang-migrate` was built and discarded with Postgres (see Backends) |
 | Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | **Postgres was dropped as a goal** 2026-09-10. There is no `pgStore` and none is planned; the per-pipeline `Store` interfaces stay because each consumer's narrow interface is what makes the tests run with nothing running, not because a second backend is coming |
 | Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |
-| Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings` and `analyses` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings`, `analyses`, `system_nodes`, `system_triggers` and undecided `triggers` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
 | Tooling | built: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `scripts/check-license-headers.sh` | — |
 | Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's enumerated `POST` routes additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | a *consumer* dashboard is a non-goal; these three are not that |
+| Trigger memory | Phase 1 built: `internal/trigger` (pure key: novel canonical keys only when novelty fired, deviating `(family, priority)` buckets, one security bit, no `system_id`), `internal/store/logs/triggers.go` (`triggers`, `system_triggers`, `trigger_aliases`, `trigger_decisions`, `findings.trigger_key`, `analyses.trigger_key`), the lookup in `analyzer.Process` between gate and render (ignore → `trigger_ignored`, reuse within `TRIGGER_REUSE_WINDOW` of the last *paid* call with every linked finding open or none → `trigger_hit`), `IgnoreTrigger` in the store only, maint pruning, `insightsd_trigger_suppressions_total`. See `docs/architecture.md` § "Cost control: trigger memory" | Phase 2: `visibility` applied in `ListFindings`, review routes on `ui/logs` (deliver/internal/ignore/merge/severity/doc_ref) with `writableRoutes` + audit, merge with cycle and cross-security refusal, `/review/stats` per `prompt.Version` |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
 | Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
 | Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
@@ -443,6 +444,7 @@ internal/platform/auth  httpx  sqlitex   shared: ForwardAuth+cache, HTTP
 
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
+trigger                     PURE — the trigger key, from gate.Decision alone — logs only
 threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohorts
 llm  queue  budget          logs only; interfaces where I/O is needed
@@ -475,7 +477,7 @@ discipline, write authentication, base-path-aware link building — and
 `ui/*` copies another package's logging handler any more; `httpx.Logging`
 removed the reason that copy existed.
 
-The purity of `gate`, `fingerprint`, `prompt`, `threat` and `sizing` is the
+The purity of `gate`, `trigger`, `fingerprint`, `prompt`, `threat` and `sizing` is the
 point: each holds all the correctness and privacy logic for its concern and is
 table-driven-testable with no fixtures. `llm` and every `store/*` package being
 interfaces at the consumer is what lets `analyzer_test.go` and each pipeline's
@@ -599,8 +601,14 @@ analyzer built, and per-bucket normals on the UI's `/baselines`.
 
 **A gate reason is the trigger, not a description**: `gate.Evaluate` returns
 `Call: len(reasons) > 0`, and every analyzer path that stores a non-empty
-`gate_reasons` also stores `llm_called = 1`. So "windows" and "LLM calls" are the
-same number for any reasoned row — never present them as independent columns.
+`gate_reasons` **and an empty `suppressed_by`** also stores `llm_called = 1`.
+So "windows" and "LLM calls" are the same number for any reasoned,
+unsuppressed row — never present them as independent columns. The one
+reasoned row without a call is a window the trigger memory answered
+(`suppressed_by = trigger_hit|trigger_ignored`): it keeps its reasons, because
+they are what the saving is measured against, and `/gate` counts it in its own
+**Suppressed** column (`store.GateRow.Suppressed`). Budget-suppressed windows
+still store **no** reasons — the gate never ran for them.
 `llm_called` counts *attempts*: the transient-, permanent- and parse-error paths
 set it with `cost_micros = 0`. And because reasons are stored as the formula that
 produced them spelled them, **any rollup over them must be time-bounded**
@@ -702,6 +710,15 @@ successful no-op, not an error.
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".
+- `trigger` and the trigger memory: `TestTriggerKeyIsStableUnderReordering`,
+  `TestSecurityTriggersAreNeverQueuedIgnoredOrMerged`,
+  `TestIgnoredTriggerRecordsTemplatesAndBaselines`, `TestIgnoreExpires`,
+  `TestStaleFindingIsNotReused`, `TestDecisionsNeverReachThePrompt` (and, in
+  Phase 2, `TestOperatorOnlyFindingsNeverReachTheReadAPI`,
+  `TestMergeResolvesToRootAndRejectsCycles`) are named so deleting one is
+  visible. The reuse window counts from the last paid call
+  (`TestReuseWindowCountsFromTheLastPaidCall`), and a call that raised nothing
+  is reusable (`TestAnEmptyVerdictIsReused`).
 - `sizing`: table-driven, no fixtures. `TestSanitizeAcceptsEveryMetricKey` and
   `TestSanitizeRejectsEveryNonNumericValue` are the executable form of the
   open-vocabulary and privacy rules, following the

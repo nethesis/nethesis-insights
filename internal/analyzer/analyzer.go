@@ -19,11 +19,30 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/prompt"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
+	"github.com/nethesis/nethesis-insights/internal/trigger"
 )
 
 // ErrPermanent marks failures that a retry cannot fix (e.g. a schema
 // rejection from the LLM, or a non-retryable 4xx).
 var ErrPermanent = errors.New("permanent failure")
+
+// The suppressed_by values the trigger memory writes. A window suppressed
+// this way was one the gate fired on: it keeps its gate reasons, unlike a
+// budget-suppressed window, because they are what the saving is measured
+// against.
+const (
+	// SuppressedTriggerIgnored: an operator ignored this trigger fleet-wide
+	// and the ignore has not expired.
+	SuppressedTriggerIgnored = "trigger_ignored"
+	// SuppressedTriggerHit: this system paid for this trigger within
+	// Config.TriggerReuseWindow and every finding that call raised is still
+	// open, so the answer is already known.
+	SuppressedTriggerHit = "trigger_hit"
+)
+
+// TriggerSuppressions lists every value above, for the metrics package to
+// pre-create one child per reason.
+var TriggerSuppressions = []string{SuppressedTriggerIgnored, SuppressedTriggerHit}
 
 // Store is the slice of logsstore.Store the analyzer needs: the write path
 // that records templates, baselines, findings and the analyses ledger, plus
@@ -44,6 +63,8 @@ type Store interface {
 	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (logsstore.Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
+	LookupTrigger(ctx context.Context, systemID, key string) (logsstore.TriggerLookup, error)
+	RecordTriggerSighting(ctx context.Context, sg logsstore.TriggerSighting) error
 }
 
 type Config struct {
@@ -54,10 +75,19 @@ type Config struct {
 	Model         string
 	InputPerMTok  float64
 	OutputPerMTok float64
+
+	// TriggerReuseWindow is how long after a paid call the same trigger on
+	// the same system is answered from memory rather than paid for again.
+	// It counts from the last paid call, never from the last reuse, so a
+	// persistent condition is re-analysed at least this often. Zero
+	// disables reuse; an ignore still applies.
+	TriggerReuseWindow time.Duration
 }
 
 // Metrics is the optional counter set Process reports against: one call to
-// BudgetRejected per window the budget suppressed before the gate ran, and
+// BudgetRejected per window the budget suppressed before the gate ran, one
+// call to TriggerSuppressed per window the trigger memory answered (one of
+// TriggerSuppressions), and
 // one call to LLMCall per attempt -- "success", "transient", "permanent" or
 // "parse" (see the metrics.LLMResult* constants), with costMicros set only
 // on success. Nil fields (or a nil *Metrics, the zero value of Analyzer's
@@ -65,13 +95,20 @@ type Config struct {
 // unaffected by adding this -- the same nil-safe-hook shape
 // internal/platform/auth.ForwardAuth.Metrics uses.
 type Metrics struct {
-	BudgetRejected func(reason string)
-	LLMCall        func(result string, costMicros int64)
+	BudgetRejected    func(reason string)
+	TriggerSuppressed func(reason string)
+	LLMCall           func(result string, costMicros int64)
 }
 
 func (m *Metrics) budgetRejected(reason string) {
 	if m != nil && m.BudgetRejected != nil {
 		m.BudgetRejected(reason)
+	}
+}
+
+func (m *Metrics) triggerSuppressed(reason string) {
+	if m != nil && m.TriggerSuppressed != nil {
+		m.TriggerSuppressed(reason)
 	}
 }
 
@@ -113,6 +150,7 @@ type analysisEntry struct {
 	errMsg       string
 	cachedTokens int
 	suppressedBy string
+	triggerKey   string
 }
 
 // record persists the durable side effects of processing a bundle -- template
@@ -149,6 +187,7 @@ func (a *Analyzer) record(ctx context.Context, b model.Bundle, entry analysisEnt
 		DurationMs:   entry.durationMs,
 		Error:        entry.errMsg,
 		SuppressedBy: entry.suppressedBy,
+		TriggerKey:   entry.triggerKey,
 	}); err != nil {
 		return fmt.Errorf("analyzer: finalize analysis: %w", err)
 	}
@@ -259,7 +298,47 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		})
 	}
 
-	// 7. Call the LLM. The selection is built once and reused for
+	// 7. Trigger memory. The gate says this window is worth money; the
+	// trigger memory asks whether this exact condition has already been
+	// paid for. It runs after the gate (the key is derived from the gate's
+	// decision) and before anything is rendered, and it never changes what
+	// is rendered: an ignored or reused window makes no call at all, and a
+	// window that does call sees the same prompt it would have without it.
+	key := trigger.Key(decision)
+	look, err := a.store.LookupTrigger(ctx, b.SystemID, key)
+	if err != nil {
+		return fmt.Errorf("analyzer: lookup trigger: %w", err)
+	}
+	// Either side saying security is enough: the key's bit and the stored
+	// row agree by construction, and the answer that silences nothing is the
+	// safe one if they ever did not.
+	security := trigger.IsSecurity(decision) || look.Security
+	if suppressed := a.remembered(look, security, now); suppressed != "" {
+		slog.Info("window answered from trigger memory",
+			"system_id", b.SystemID, "window_start", b.Window.Start, "suppressed_by", suppressed)
+		if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
+			SystemID:      b.SystemID,
+			Key:           look.Root,
+			Security:      security,
+			PromptVersion: prompt.Version,
+			Reused:        suppressed == SuppressedTriggerHit,
+			Now:           now,
+		}); err != nil {
+			return fmt.Errorf("analyzer: record trigger sighting: %w", err)
+		}
+		a.Metrics.triggerSuppressed(suppressed)
+		return a.record(ctx, b, analysisEntry{
+			windowStart:  b.Window.Start,
+			windowEnd:    b.Window.End,
+			gated:        true,
+			gateReasons:  decision.Reasons,
+			suppressedBy: suppressed,
+			triggerKey:   look.Root,
+			durationMs:   int(time.Since(start).Milliseconds()),
+		})
+	}
+
+	// 8. Call the LLM. The selection is built once and reused for
 	// ResolveEvidence below: prompt.TemplateID numbers whatever Select
 	// returns, so the identifiers the model cites only resolve against the
 	// same list it was shown.
@@ -319,6 +398,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 				Model:       a.cfg.Model,
 				DurationMs:  durationMs,
 				Error:       err.Error(),
+				TriggerKey:  look.Root,
 			}); finalizeErr != nil {
 				slog.Error("finalize analysis after permanent llm error failed", "error", finalizeErr)
 			}
@@ -344,7 +424,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		"content_bytes", len(resp.Content),
 	)
 
-	// 8. Parse the response.
+	// 9. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
 		a.Metrics.llmCall("parse", 0)
@@ -360,6 +440,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Model:        a.cfg.Model,
 			DurationMs:   int(time.Since(start).Milliseconds()),
 			Error:        err.Error(),
+			TriggerKey:   look.Root,
 		})
 		if finalizeErr != nil {
 			slog.Error("finalize analysis after parse error failed", "error", finalizeErr)
@@ -371,7 +452,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 
 	slog.Debug("response parsed", "system_id", b.SystemID, "findings", len(parsed))
 
-	// 9. Persist each finding, deduplicated by fingerprint.
+	// 10. Persist each finding, deduplicated by fingerprint.
 	for _, pf := range parsed {
 		// The model cites template identifiers; the server resolves them.
 		// Evidence text, module set and category are all derived here, so no
@@ -428,6 +509,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Nodes:           nodes,
 			LLMModel:        resp.Model,
 			PromptVersion:   prompt.Version,
+			TriggerKey:      look.Root,
 		}, now)
 		if err != nil {
 			return fmt.Errorf("analyzer: upsert finding: %w", err)
@@ -437,7 +519,21 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		}
 	}
 
-	// 10. Record bookkeeping now that the analysis fully succeeded.
+	// 11. Remember the trigger now that its call succeeded: this is what the
+	// next window's reuse check reads. Only a successful call is recorded --
+	// a failed one answered nothing and must not be reused.
+	if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
+		SystemID:      b.SystemID,
+		Key:           look.Root,
+		Security:      security,
+		PromptVersion: prompt.Version,
+		Called:        true,
+		Now:           now,
+	}); err != nil {
+		return fmt.Errorf("analyzer: record trigger sighting: %w", err)
+	}
+
+	// 12. Record bookkeeping now that the analysis fully succeeded.
 	// Cached input is billed at half rate. Clamp first: a provider that
 	// reported more cached than prompt tokens would otherwise produce a
 	// negative bill.
@@ -460,6 +556,29 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		cachedTokens: cached,
 		costMicros:   costMicros,
 		model:        resp.Model,
+		triggerKey:   look.Root,
 		durationMs:   int(time.Since(start).Milliseconds()),
 	})
+}
+
+// remembered decides whether the trigger memory answers this window, and
+// returns the suppressed_by value if it does.
+//
+// An ignore is fleet-wide and expires; it never applies to a security
+// trigger, whatever the store says. A reuse is per system: the same trigger,
+// paid for on this system within TriggerReuseWindow of the last PAID call,
+// with every finding that call raised still open. A call that raised nothing
+// is reusable too -- the model looked at exactly this and found nothing --
+// while a finding that went stale means the condition changed shape, and the
+// window is paid for again.
+func (a *Analyzer) remembered(look logsstore.TriggerLookup, security bool, now int64) string {
+	if !security && look.IgnoredUntil > now {
+		return SuppressedTriggerIgnored
+	}
+	window := a.cfg.TriggerReuseWindow.Milliseconds()
+	if window > 0 && look.SystemSeen && look.LastCalledAt > 0 &&
+		now-look.LastCalledAt <= window && look.LinkedNotOpen == 0 {
+		return SuppressedTriggerHit
+	}
+	return ""
 }

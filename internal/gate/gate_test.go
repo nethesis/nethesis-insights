@@ -452,3 +452,102 @@ func TestNoveltyCountsCanonicalKeysNotSpellings(t *testing.T) {
 		t.Fatalf("a known line in a new spelling must not be novel: %v", d.Reasons)
 	}
 }
+
+// The trigger key (internal/trigger) is derived from the Decision, so the
+// Decision must say which security condition fired and which buckets
+// deviated. Both used to exist only inside the reason strings, and parsing
+// those back would be a second definition of the gate.
+func TestDecisionExposesTheSecurityConditions(t *testing.T) {
+	cases := []struct {
+		name          string
+		known         bool
+		observed      int64
+		wantNew       bool
+		wantSurge     bool
+		wantNoveltyOn bool
+	}{
+		{name: "new security template", known: false, observed: 10, wantNew: true, wantNoveltyOn: true},
+		{name: "known security template surging", known: true, observed: 100, wantSurge: true},
+		{name: "known security template steady", known: true, observed: 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := baseBundle()
+			b.Templates[0].Category = "security"
+			b.Digest[0].Observed = tc.observed
+			s := SystemState{
+				KnownTemplates: map[string]bool{},
+				Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
+			}
+			if tc.known {
+				s.KnownTemplates = knownIn("mod1", "t1")
+			}
+			d := Evaluate(b, s, testCfg())
+			if d.SecurityNew != tc.wantNew || d.SecuritySurge != tc.wantSurge {
+				t.Fatalf("SecurityNew=%v SecuritySurge=%v, want %v/%v (reasons %v)",
+					d.SecurityNew, d.SecuritySurge, tc.wantNew, tc.wantSurge, d.Reasons)
+			}
+			if d.NoveltyFired != tc.wantNoveltyOn {
+				t.Fatalf("NoveltyFired=%v, want %v (reasons %v)", d.NoveltyFired, tc.wantNoveltyOn, d.Reasons)
+			}
+		})
+	}
+}
+
+// Sub-quorum novelty must not read as fired: it did not pay for the call.
+func TestNoveltyFiredOnlyWhenTheQuorumIsMet(t *testing.T) {
+	b := baseBundle()
+	b.Digest[0].Observed = 100
+	s := SystemState{
+		KnownTemplates: map[string]bool{},
+		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
+	}
+	cfg := testCfg()
+	cfg.MinNewTemplates = 3
+	d := Evaluate(b, s, cfg)
+	if !d.Call || len(d.Novel) != 1 {
+		t.Fatalf("expected a deviation call carrying one sub-quorum novel template, got %+v", d)
+	}
+	if d.NoveltyFired {
+		t.Fatalf("sub-quorum novelty reported as fired: %v", d.Reasons)
+	}
+}
+
+func TestDecisionExposesDeviatingBucketsSorted(t *testing.T) {
+	b := model.Bundle{
+		Digest: []model.DigestEntry{
+			{ModuleID: "zeta1", Priority: 3, Observed: 100},
+			{ModuleID: "alpha2", Priority: 6, Observed: 100},
+			{ModuleID: "alpha2", Priority: 3, Observed: 100},
+			{ModuleID: "quiet", Priority: 3, Observed: 10},
+		},
+	}
+	s := SystemState{Baselines: map[BaselineKey]float64{
+		{ModuleID: "zeta1", Priority: 3}:  1,
+		{ModuleID: "alpha2", Priority: 6}: 1,
+		{ModuleID: "alpha2", Priority: 3}: 1,
+		{ModuleID: "quiet", Priority: 3}:  10,
+	}}
+	d := Evaluate(b, s, testCfg())
+	want := []BaselineKey{{"alpha2", 3}, {"alpha2", 6}, {"zeta1", 3}}
+	if !reflect.DeepEqual(d.DeviatingBuckets, want) {
+		t.Fatalf("DeviatingBuckets = %v, want %v", d.DeviatingBuckets, want)
+	}
+}
+
+// Security-only mode drops the deviation REASONS but the buckets still
+// deviate, and a security surge is about exactly those buckets.
+func TestSecurityOnlyStillReportsDeviatingBuckets(t *testing.T) {
+	b := baseBundle()
+	b.Templates[0].Category = "security"
+	b.Digest[0].Observed = 100
+	s := SystemState{
+		KnownTemplates: knownIn("mod1", "t1"),
+		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
+		SecurityOnly:   true,
+	}
+	d := Evaluate(b, s, testCfg())
+	if !d.SecuritySurge || !reflect.DeepEqual(d.DeviatingBuckets, []BaselineKey{{"mod1", 3}}) {
+		t.Fatalf("got SecuritySurge=%v DeviatingBuckets=%v", d.SecuritySurge, d.DeviatingBuckets)
+	}
+}

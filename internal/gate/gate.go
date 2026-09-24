@@ -75,6 +75,23 @@ type Decision struct {
 	// the two would eventually disagree.
 	Novel            map[string]bool
 	DeviatingModules map[string]bool
+
+	// NoveltyFired, SecurityNew and SecuritySurge say which conditions
+	// fired, and DeviatingBuckets which (module, priority) buckets were over
+	// tolerance, sorted. internal/trigger derives a window's trigger key from
+	// them. They are returned rather than read back out of Reasons because
+	// parsing the reason strings would be a second definition of the gate.
+	//
+	// NoveltyFired is true only when novelty paid for the call -- the quorum
+	// was met, or a novel template was security-classified -- so a
+	// sub-quorum novel template riding along a deviation window does not
+	// count. DeviatingBuckets is populated in security-only mode too: the
+	// deviation reasons are dropped there, but a security surge is about
+	// exactly those buckets.
+	NoveltyFired     bool
+	SecurityNew      bool
+	SecuritySurge    bool
+	DeviatingBuckets []BaselineKey
 }
 
 // Evaluate decides whether an LLM call is warranted for this bundle. This is
@@ -85,7 +102,7 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 
 	// Deviation is computed first because the security condition below needs
 	// to know which buckets are deviating.
-	deviatingModules, deviationReasons := deviations(b, s, cfg)
+	deviatingModules, deviatingBuckets, deviationReasons := deviations(b, s, cfg)
 
 	// Security condition. A security-category template fires the gate when it
 	// is NEW for this system, or when its bucket is deviating -- never merely
@@ -136,10 +153,15 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 			Reasons:          reasons,
 			Novel:            novel,
 			DeviatingModules: deviatingModules,
+			NoveltyFired:     securityNew,
+			SecurityNew:      securityNew,
+			SecuritySurge:    securitySurge,
+			DeviatingBuckets: deviatingBuckets,
 		}
 	}
 
-	if len(novel) >= cfg.MinNewTemplates && cfg.MinNewTemplates > 0 {
+	noveltyQuorum := len(novel) >= cfg.MinNewTemplates && cfg.MinNewTemplates > 0
+	if noveltyQuorum {
 		// The reason carries no count. The /gate rollup groups on the stored
 		// string, and an embedded number made every window a group of one --
 		// the "new_templates=3" spellings still in the database are the
@@ -167,11 +189,16 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 		Reasons:          reasons,
 		Novel:            novel,
 		DeviatingModules: deviatingModules,
+		NoveltyFired:     securityNew || noveltyQuorum,
+		SecurityNew:      securityNew,
+		SecuritySurge:    securitySurge,
+		DeviatingBuckets: deviatingBuckets,
 	}
 }
 
 // deviations returns the set of modules whose observed volume exceeds
-// tolerance, plus one reason string per deviating bucket.
+// tolerance, the deviating buckets themselves in (module, priority) order,
+// plus one reason string per deviating bucket.
 //
 // Reasons carry the bucket but NOT the computed ratio. The ratio made every
 // deviating window a group of one in the operator UI's gate rollup, which
@@ -183,8 +210,9 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 // "What was unusual in this window" is in the prompt body the analyzer built
 // (internal/prompt), and "what does this bucket normally do" is the /baselines
 // page. Do not put it back into a reason string.
-func deviations(b model.Bundle, s SystemState, cfg Config) (map[string]bool, []string) {
+func deviations(b model.Bundle, s SystemState, cfg Config) (map[string]bool, []BaselineKey, []string) {
 	deviating := map[string]bool{}
+	var buckets []BaselineKey
 	var reasons []string
 
 	// Sort digest entries by (ModuleID, Priority) so reason ordering is
@@ -220,8 +248,9 @@ func deviations(b model.Bundle, s SystemState, cfg Config) (map[string]bool, []s
 		if float64(e.Observed)/expected > cfg.Tolerance {
 			reasons = append(reasons, fmt.Sprintf("%s:%s/%d", ReasonDeviation, e.ModuleID, e.Priority))
 			deviating[e.ModuleID] = true
+			buckets = append(buckets, BaselineKey{ModuleID: e.ModuleID, Priority: e.Priority})
 		}
 	}
 
-	return deviating, reasons
+	return deviating, buckets, reasons
 }

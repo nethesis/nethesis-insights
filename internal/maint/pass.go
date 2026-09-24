@@ -41,6 +41,8 @@ type Reader interface {
 	PruneNodes(ctx context.Context, olderThan int64) (int, error)
 	PruneFindings(ctx context.Context, olderThan int64) (int, error)
 	PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
+	PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error)
+	PruneTriggers(ctx context.Context, olderThan int64) (int, error)
 }
 
 // Config is the pass's three retention windows. Each is independently
@@ -95,12 +97,24 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	// The node roster shares the template cutoff -- see PruneNodes for why
 	// it has no retention knob of its own.
 	nodesPruned := r.prune(ctx, "nodes", r.store.PruneNodes, now-r.cfg.TemplateRetention.Milliseconds())
+	// The trigger memory has no knobs of its own either. The per-system rows
+	// link a trigger to the findings its last call raised, so they share
+	// FindingRetention; the fleet-wide rows describe what the gate saw, the
+	// way system_templates does, so they share TemplateRetention -- and
+	// PruneTriggers spares any with an operator decision or a remaining
+	// reference. system_triggers goes first only so a trigger freed by it
+	// is collected in the same pass rather than the next.
+	systemTriggersPruned := r.prune(ctx, "system_triggers", r.store.PruneSystemTriggers,
+		now-r.cfg.FindingRetention.Milliseconds())
+	triggersPruned := r.prune(ctx, "triggers", r.store.PruneTriggers, now-r.cfg.TemplateRetention.Milliseconds())
 
 	slog.Info("log maintenance pass",
 		"templates_pruned", templatesPruned,
 		"findings_pruned", findingsPruned,
 		"analyses_pruned", analysesPruned,
-		"nodes_pruned", nodesPruned)
+		"nodes_pruned", nodesPruned,
+		"system_triggers_pruned", systemTriggersPruned,
+		"triggers_pruned", triggersPruned)
 	return nil
 }
 

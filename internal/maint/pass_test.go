@@ -24,10 +24,23 @@ import (
 type recordingReader struct {
 	calls []string
 
-	templatesErr, findingsErr, analysesErr, nodesErr error
+	templatesErr, findingsErr, analysesErr, nodesErr, systemTriggersErr, triggersErr error
 	// olderThan captures what each call was asked to prune before, so a test
 	// can assert Run derived it from `now` and the right Config field.
 	templatesOlderThan, findingsOlderThan, analysesOlderThan, nodesOlderThan int64
+	systemTriggersOlderThan, triggersOlderThan                               int64
+}
+
+func (r *recordingReader) PruneSystemTriggers(_ context.Context, olderThan int64) (int, error) {
+	r.calls = append(r.calls, "system_triggers")
+	r.systemTriggersOlderThan = olderThan
+	return 5, r.systemTriggersErr
+}
+
+func (r *recordingReader) PruneTriggers(_ context.Context, olderThan int64) (int, error) {
+	r.calls = append(r.calls, "triggers")
+	r.triggersOlderThan = olderThan
+	return 6, r.triggersErr
 }
 
 func (r *recordingReader) PruneTemplates(_ context.Context, olderThan int64) (int, error) {
@@ -87,7 +100,7 @@ func TestOnePruneFailingDoesNotSkipTheOthers(t *testing.T) {
 	if err := New(r, testConfig()).Run(context.Background(), 0); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	for _, want := range []string{"templates", "findings", "analyses"} {
+	for _, want := range []string{"templates", "findings", "analyses", "system_triggers", "triggers"} {
 		found := false
 		for _, c := range r.calls {
 			if c == want {
@@ -122,6 +135,14 @@ func TestEachTableUsesItsOwnRetention(t *testing.T) {
 	}
 	if r.analysesOlderThan != wantAnalyses {
 		t.Errorf("analyses olderThan = %d, want %d", r.analysesOlderThan, wantAnalyses)
+	}
+	// The per-system trigger memory lives as long as the findings it links;
+	// the fleet-wide rows as long as the novelty memory they describe.
+	if r.systemTriggersOlderThan != wantFindings {
+		t.Errorf("system_triggers olderThan = %d, want %d", r.systemTriggersOlderThan, wantFindings)
+	}
+	if r.triggersOlderThan != wantTemplates {
+		t.Errorf("triggers olderThan = %d, want %d", r.triggersOlderThan, wantTemplates)
 	}
 	// The three retentions differ (400d/180d/90d), so if the cutoffs were
 	// accidentally shared this would already have failed above -- but assert

@@ -77,10 +77,14 @@ type AnalysisRow struct {
 	DurationMs             int
 	Error                  string
 
-	// SuppressedBy names the budget limit that stopped this window, if one
-	// did. A gated row with a value here was not cheap -- it was refused.
+	// SuppressedBy names what stopped this window from being paid for, if
+	// something did -- a budget limit, or the trigger memory. A gated row
+	// with a value here was not cheap: it was refused, or answered from
+	// memory.
 	SuppressedBy string
-	CreatedAt    int64
+	// TriggerKey is the window's trigger key, when the gate fired.
+	TriggerKey string
+	CreatedAt  int64
 }
 
 // GateRow is one distinct gate-reason set, after the three empty spellings
@@ -90,10 +94,15 @@ type AnalysisRow struct {
 // permanent-error and parse-error paths too, and those record no cost. PaidCalls
 // counts only the rows that actually cost money, so LLMCalls-PaidCalls is the
 // number of calls that were made and produced nothing.
+//
+// Suppressed counts the windows something stopped from being paid for --
+// a budget limit (those carry no reasons, so they land in the nil row) or
+// the trigger memory (those keep the reasons the gate fired with). For a
+// reasoned row, Windows == LLMCalls + Suppressed.
 type GateRow struct {
-	Reasons                      []string // nil means "no reasons"
-	Windows, LLMCalls, PaidCalls int
-	CostMicros                   int64
+	Reasons                                  []string // nil means "no reasons"
+	Windows, LLMCalls, PaidCalls, Suppressed int
+	CostMicros                               int64
 }
 
 // CostRow is spend and token totals for one UTC day and model.
@@ -228,7 +237,7 @@ func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, system_id, window_start, window_end, gated, llm_called, completed,
 		       gate_reasons, input_tokens, output_tokens, cached_tokens, cost_micros, model,
-		       duration_ms, error, suppressed_by, created_at
+		       duration_ms, error, suppressed_by, trigger_key, created_at
 		FROM analyses
 		WHERE (? = '' OR system_id = ?)
 		ORDER BY window_start DESC
@@ -244,15 +253,16 @@ func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([
 		var r AnalysisRow
 		var gated, llmCalled, completed int
 		var gateReasons string
-		var errMsg, suppressedBy sql.NullString
+		var errMsg, suppressedBy, triggerKey sql.NullString
 		var cachedTokens sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.SystemID, &r.WindowStart, &r.WindowEnd, &gated, &llmCalled, &completed,
 			&gateReasons, &r.InputTokens, &r.OutputTokens, &cachedTokens, &r.CostMicros, &r.Model,
-			&r.DurationMs, &errMsg, &suppressedBy, &r.CreatedAt); err != nil {
+			&r.DurationMs, &errMsg, &suppressedBy, &triggerKey, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan analysis row: %w", err)
 		}
 		r.CachedTokens = int(cachedTokens.Int64)
 		r.SuppressedBy = suppressedBy.String
+		r.TriggerKey = triggerKey.String
 		r.Gated = gated != 0
 		r.LLMCalled = llmCalled != 0
 		r.Completed = completed != 0
@@ -287,6 +297,7 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 		       count(*) AS windows,
 		       coalesce(sum(llm_called), 0) AS llm_calls,
 		       count(CASE WHEN cost_micros > 0 THEN 1 END) AS paid_calls,
+		       count(CASE WHEN suppressed_by != '' THEN 1 END) AS suppressed,
 		       coalesce(sum(cost_micros), 0) AS cost_micros
 		FROM analyses
 		WHERE created_at >= ?
@@ -304,9 +315,9 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 	merged := map[string]*GateRow{}
 	for rows.Next() {
 		var raw string
-		var windows, llmCalls, paidCalls int
+		var windows, llmCalls, paidCalls, suppressed int
 		var costMicros int64
-		if err := rows.Scan(&raw, &windows, &llmCalls, &paidCalls, &costMicros); err != nil {
+		if err := rows.Scan(&raw, &windows, &llmCalls, &paidCalls, &suppressed, &costMicros); err != nil {
 			return nil, fmt.Errorf("store: scan gate row: %w", err)
 		}
 		reasons := normalizeGateReasons(raw)
@@ -315,6 +326,7 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 			existing.Windows += windows
 			existing.LLMCalls += llmCalls
 			existing.PaidCalls += paidCalls
+			existing.Suppressed += suppressed
 			existing.CostMicros += costMicros
 		} else {
 			merged[key] = &GateRow{
@@ -322,6 +334,7 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 				Windows:    windows,
 				LLMCalls:   llmCalls,
 				PaidCalls:  paidCalls,
+				Suppressed: suppressed,
 				CostMicros: costMicros,
 			}
 		}
@@ -400,7 +413,7 @@ const SortRecent = "recent"
 // as is.
 func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
 	query := `
-		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes
+		SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key
 		FROM findings
 		WHERE (? = '' OR system_id LIKE ?) AND (? = '' OR status = ?) AND (? = '' OR severity = ?)
 		  AND (? = '' OR id LIKE ? OR fingerprint LIKE ?)

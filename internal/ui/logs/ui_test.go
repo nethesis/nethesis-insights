@@ -648,3 +648,15 @@ func TestFindingsPageShowsABareNodeIDWhenUnnamed(t *testing.T) {
 		t.Error("expected an unnamed node to be marked as such")
 	}
 }
+
+// Windows the trigger memory answered are neither gated out nor sent to the
+// AI; folding them into either would misstate what the gate did.
+func TestGateSummarySeparatesSuppressedWindows(t *testing.T) {
+	g := summarizeGate([]logsstore.GateRow{
+		{Reasons: nil, Windows: 10},
+		{Reasons: []string{"deviation:mod1/3"}, Windows: 6, LLMCalls: 2, PaidCalls: 2, Suppressed: 4, CostMicros: 20},
+	})
+	if g.Windows != 16 || g.GatedOut != 10 || g.Called != 2 || g.Suppressed != 4 {
+		t.Fatalf("unexpected summary: %+v", g)
+	}
+}

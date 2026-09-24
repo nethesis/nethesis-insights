@@ -158,3 +158,44 @@ func (s *Store) PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 		)
 	`, olderThan)
 }
+
+// PruneSystemTriggers deletes system_triggers rows not seen since olderThan.
+//
+// This is the per-system half of the trigger memory: when a system last paid
+// for a trigger, which the reuse check measures TriggerReuseWindow against.
+// A row past FindingRetention describes a call whose findings are being
+// pruned too, so it can answer nothing; the only cost of dropping it is that
+// distinct_systems counts the system again if the trigger returns there.
+func (s *Store) PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error) {
+	return s.pruneLoop(ctx, `
+		DELETE FROM system_triggers
+		WHERE (system_id, trigger_key) IN (
+			SELECT system_id, trigger_key FROM system_triggers
+			WHERE last_seen < ?
+			LIMIT ?
+		)
+	`, olderThan)
+}
+
+// PruneTriggers deletes fleet-wide trigger rows not seen since olderThan that
+// nothing depends on. A trigger an operator decided on is never a candidate,
+// however old: the decision is what makes its next sighting cheap, and the
+// append-only trail in trigger_decisions would name a trigger that no longer
+// exists. Nor is one still named by a system_triggers row, an alias on
+// either side, or a finding -- each of those is a join that would silently
+// start matching nothing.
+func (s *Store) PruneTriggers(ctx context.Context, olderThan int64) (int, error) {
+	return s.pruneLoop(ctx, `
+		DELETE FROM triggers
+		WHERE trigger_key IN (
+			SELECT t.trigger_key FROM triggers t
+			WHERE t.last_seen < ?
+			  AND NOT EXISTS (SELECT 1 FROM trigger_decisions d WHERE d.trigger_key = t.trigger_key)
+			  AND NOT EXISTS (SELECT 1 FROM trigger_aliases a
+			                  WHERE a.alias_key = t.trigger_key OR a.canonical_key = t.trigger_key)
+			  AND NOT EXISTS (SELECT 1 FROM system_triggers st WHERE st.trigger_key = t.trigger_key)
+			  AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.trigger_key = t.trigger_key)
+			LIMIT ?
+		)
+	`, olderThan)
+}

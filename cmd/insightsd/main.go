@@ -145,6 +145,14 @@ func main() {
 	// tag is read off any masked record, whatever its module.
 	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights,alert-proxy")
 	staleAfter := svc.GetenvDuration("STALE_AFTER", 24*time.Hour)
+	// TRIGGER_REUSE_WINDOW is how long after a paid call the same trigger on
+	// the same system is answered from memory instead of paid for again,
+	// counted from that call. 24h matches STALE_AFTER: a finding the reuse
+	// keeps open cannot outlive the call it came from by more than a day, so
+	// a persistent condition is re-analysed at least daily. On the dev
+	// fleet a 1-day and a 7-day window saved the same (18.1% vs 18.6% of
+	// spend), so longer buys little. 0 disables reuse; ignores still apply.
+	triggerReuseWindow := svc.GetenvDuration("TRIGGER_REUSE_WINDOW", 24*time.Hour)
 	ewmaAlpha := svc.GetenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := svc.GetenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
 	priceOutput := svc.GetenvFloat("LLM_PRICE_OUTPUT_PER_MTOK", 0)
@@ -234,6 +242,7 @@ func main() {
 	httpMetrics := metrics.NewHTTP(reg)
 	llmMetrics := metrics.NewLLM(reg)
 	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)
+	triggerMetrics := metrics.NewTrigger(reg, analyzer.TriggerSuppressions...)
 	passMetrics := metrics.NewPass(reg, maint.PassName)
 
 	bud := budget.New(s, budget.Config{
@@ -249,17 +258,19 @@ func main() {
 			MinObserved:     gateMinObserved,
 			MinNewTemplates: gateMinNewTemplates,
 		},
-		PromptAmbient: promptMaxAmbient,
-		StaleAfter:    staleAfter,
-		EWMAAlpha:     ewmaAlpha,
-		Model:         llmModel,
-		InputPerMTok:  priceInput,
-		OutputPerMTok: priceOutput,
+		PromptAmbient:      promptMaxAmbient,
+		StaleAfter:         staleAfter,
+		EWMAAlpha:          ewmaAlpha,
+		Model:              llmModel,
+		InputPerMTok:       priceInput,
+		OutputPerMTok:      priceOutput,
+		TriggerReuseWindow: triggerReuseWindow,
 	}
 	az := analyzer.New(s, client, bud, cfg, now)
 	az.Metrics = &analyzer.Metrics{
-		BudgetRejected: budgetMetrics.Rejected,
-		LLMCall:        llmMetrics.Call,
+		BudgetRejected:    budgetMetrics.Rejected,
+		TriggerSuppressed: triggerMetrics.Suppressed,
+		LLMCall:           llmMetrics.Call,
 	}
 
 	// Ingest hands bundles to the queue and answers immediately; the workers
@@ -318,6 +329,7 @@ func main() {
 		{Name: "PIPELINE_EXCLUDE_MODULES", Value: strings.Join(sortedKeys(excludeModules), ",")},
 		{Name: "PIPELINE_EXCLUDE_SERVICES", Value: strings.Join(sortedKeys(excludeServices), ",")},
 		{Name: "STALE_AFTER", Value: staleAfter.String()},
+		{Name: "TRIGGER_REUSE_WINDOW", Value: triggerReuseWindow.String()},
 		{Name: "EWMA_ALPHA", Value: strconv.FormatFloat(ewmaAlpha, 'f', -1, 64)},
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},

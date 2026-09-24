@@ -712,3 +712,33 @@ func TestListBaselinesFilter(t *testing.T) {
 		t.Fatalf("expected only sys1 baseline, got %+v", sys1Only)
 	}
 }
+
+// A window the trigger memory answered keeps its gate reasons but made no
+// call. The rollup must count it apart, or /gate reads it as a call that
+// cost nothing.
+func TestGateRollupCountsSuppressedWindowsApart(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for i, a := range []Analysis{
+		{GateReasons: []string{"deviation:mod1/3"}, LLMCalled: true, CostMicros: 10, TriggerKey: "t1:k"},
+		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_hit", TriggerKey: "t1:k"},
+		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_ignored", TriggerKey: "t1:k"},
+	} {
+		start := int64(100 * (i + 1))
+		if _, err := s.BeginAnalysis(ctx, "sys1", start, start+50, 1000); err != nil {
+			t.Fatal(err)
+		}
+		a.SystemID, a.WindowStart, a.WindowEnd = "sys1", start, start+50
+		if err := s.FinalizeAnalysis(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.GateRollup(ctx, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GateRollup: %+v %v", rows, err)
+	}
+	r := rows[0]
+	if r.Windows != 3 || r.LLMCalls != 1 || r.Suppressed != 2 {
+		t.Fatalf("windows=%d calls=%d suppressed=%d, want 3/1/2", r.Windows, r.LLMCalls, r.Suppressed)
+	}
+}

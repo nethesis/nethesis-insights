@@ -8,8 +8,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 why each window did or did not spend money. <strong>Gated</strong> means the gate decided
 nothing was new or unusual enough to bother the AI; <strong>LLM</strong> shows whether it
 was actually called (skipped windows are gated-out ones handled for free). A window with
-a <strong>suppressed</strong> value was not cheap &mdash; it was refused by a spend limit,
-and carries no gate reasons because no gate decision was acted on. <strong>Cached</strong>
+a <strong>suppressed</strong> value made no AI call: <code>system_call_cap</code> was refused
+by a spend limit and carries no gate reasons; <code>trigger_hit</code> was answered from the
+last call for the same <strong>trigger</strong> on this system, and <code>trigger_ignored</code>
+matched a trigger an operator ignored &mdash; both keep the reasons the gate fired with. <strong>Cached</strong>
 is the part of the input the model provider served from its prompt cache, at half price.
 Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 <form method="get">
@@ -27,7 +29,7 @@ Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 <th scope="col">ID</th><th scope="col">System</th><th scope="col">Window start</th>
 <th scope="col">Gated</th><th scope="col">LLM</th><th scope="col">Completed</th>
 <th scope="col" class="num">In tok</th><th scope="col" class="num">Cached</th><th scope="col" class="num">Out tok</th><th scope="col" class="num">Cost</th><th scope="col" class="num">ms</th>
-<th scope="col">Gate reasons</th><th scope="col">Suppressed</th><th scope="col">Error</th>
+<th scope="col">Gate reasons</th><th scope="col">Trigger</th><th scope="col">Suppressed</th><th scope="col">Error</th>
 </tr>
 </thead>
 <tbody>
@@ -45,11 +47,12 @@ Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 <td class="num">{{fmtCost .CostMicros}}</td>
 <td class="num">{{.DurationMs}}</td>
 <td class="mono truncate" title="{{join .GateReasons ", "}}">{{truncate (join .GateReasons ", ") 40}}</td>
+<td class="mono" title="{{.TriggerKey}}">{{short .TriggerKey 11}}</td>
 <td class="mono">{{.SuppressedBy}}</td>
 <td class="truncate" title="{{.Error}}">{{truncate .Error 30}}</td>
 </tr>
 {{else}}
-<tr><td colspan="14">no analyses yet</td></tr>
+<tr><td colspan="15">no analyses yet</td></tr>
 {{end}}
 </tbody>
 </table>

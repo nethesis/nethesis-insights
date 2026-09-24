@@ -394,6 +394,7 @@ type gateSummary struct {
 	Windows    int
 	GatedOut   int
 	Called     int
+	Suppressed int
 	Paid       int
 	ZeroCost   int
 	CostMicros int64
@@ -401,19 +402,21 @@ type gateSummary struct {
 }
 
 // summarizeGate folds the rollup into the headline. GatedOut is derived as
-// Windows-Called rather than read off the nil-Reasons row: the two agree by
-// the gate's invariant (a non-empty reason set is what makes the call), and
-// deriving it means legacy rows written by an older formula cannot make the
-// summary contradict the table.
+// Windows-Called-Suppressed rather than read off the nil-Reasons row: the
+// two agree by the gate's invariant (a non-empty reason set is what makes
+// the call, unless a budget limit or the trigger memory stopped it, which
+// suppressed_by records), and deriving it means legacy rows written by an
+// older formula cannot make the summary contradict the table.
 func summarizeGate(rows []logsstore.GateRow) gateSummary {
 	var g gateSummary
 	for _, row := range rows {
 		g.Windows += row.Windows
 		g.Called += row.LLMCalls
+		g.Suppressed += row.Suppressed
 		g.Paid += row.PaidCalls
 		g.CostMicros += row.CostMicros
 	}
-	g.GatedOut = g.Windows - g.Called
+	g.GatedOut = g.Windows - g.Called - g.Suppressed
 	g.ZeroCost = g.Called - g.Paid
 	if g.Paid > 0 {
 		g.AvgMicros = g.CostMicros / int64(g.Paid)

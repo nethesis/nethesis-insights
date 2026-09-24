@@ -92,6 +92,11 @@ type Finding struct {
 	// is never stored: names live in one place (system_nodes) so a rename is
 	// not frozen into every finding that ever cited the machine.
 	NodeRefs []NodeInfo `json:"node_refs,omitempty"`
+	// TriggerKey is the trigger (internal/trigger) of the LLM call that
+	// last raised this finding. Server-internal: it is the join the trigger
+	// memory's reuse check and review decisions go through, never part of
+	// the read API.
+	TriggerKey string `json:"-"`
 }
 
 var Severities = []string{"critical", "high", "medium", "low"}

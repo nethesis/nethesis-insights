@@ -58,10 +58,17 @@ type Analysis struct {
 	// inferred so the cost column stays arithmetic anyone can check.
 	CachedTokens int
 
-	// SuppressedBy names the budget limit that stopped this window, if one
-	// did. A suppressed window carries no gate reasons: the gate is why a
-	// window is worth money, and this is why it did not get any.
+	// SuppressedBy names what stopped this window from being paid for,
+	// when something did: a budget limit (budget.Suppressed*), in which
+	// case the gate never ran and the row carries no gate reasons, or the
+	// trigger memory (analyzer.SuppressedTrigger*), in which case the gate
+	// fired, the reasons are kept -- they are what the saving is measured
+	// against -- and llm_called stays 0.
 	SuppressedBy string
+
+	// TriggerKey is the trigger key (internal/trigger) of a window the gate
+	// fired on, resolved to its root; empty for a window it did not.
+	TriggerKey string
 }
 
 // Store is insightsd's SQLite-backed store: ingest bookkeeping, the analyses
@@ -170,7 +177,8 @@ func (s *Store) Init(ctx context.Context) error {
 			reopened_at INTEGER,
 			llm_model TEXT,
 			prompt_version TEXT,
-			nodes TEXT
+			nodes TEXT,
+			trigger_key TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_system_fingerprint ON findings(system_id, fingerprint)`,
 		// Supports PruneTemplates' `last_seen < ?` scan (see prune.go) --
@@ -197,13 +205,67 @@ func (s *Store) Init(ctx context.Context) error {
 			cached_tokens INTEGER,
 			suppressed_by TEXT,
 			completed INTEGER NOT NULL DEFAULT 0,
-			created_at INTEGER
+			created_at INTEGER,
+			trigger_key TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_analyses_system_window ON analyses(system_id, window_start)`,
 		// Supports PruneAnalyses' `created_at < ?` scan, and also
 		// DailySpendMicros/SystemCallsSince/CostRollup/GateRollup, all of
 		// which already filter or group on this column.
 		`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at)`,
+		// Trigger memory: see triggers.go. triggers is fleet-wide, one row
+		// per trigger key, and carries every operator decision's current
+		// effect; system_triggers is the per-system half the reuse check
+		// reads; trigger_aliases maps a merged key straight to its root
+		// (never to another alias, so resolving is one lookup); and
+		// trigger_decisions is the append-only audit trail -- an UPDATE
+		// destroys the value that would otherwise say who changed it.
+		`CREATE TABLE IF NOT EXISTS triggers (
+			trigger_key TEXT PRIMARY KEY,
+			security INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			ignore_until INTEGER,
+			visibility TEXT NOT NULL,
+			severity_override TEXT,
+			doc_ref TEXT,
+			first_prompt_version TEXT,
+			first_seen INTEGER,
+			last_seen INTEGER,
+			distinct_systems INTEGER NOT NULL DEFAULT 0,
+			count INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_triggers_last_seen ON triggers(last_seen)`,
+		`CREATE TABLE IF NOT EXISTS trigger_aliases (
+			alias_key TEXT PRIMARY KEY,
+			canonical_key TEXT NOT NULL,
+			created_at INTEGER
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_trigger_aliases_canonical ON trigger_aliases(canonical_key)`,
+		`CREATE TABLE IF NOT EXISTS system_triggers (
+			system_id TEXT,
+			trigger_key TEXT,
+			first_seen INTEGER,
+			last_seen INTEGER,
+			last_called_at INTEGER,
+			count INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (system_id, trigger_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_triggers_last_seen ON system_triggers(last_seen)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_triggers_key ON system_triggers(trigger_key)`,
+		`CREATE TABLE IF NOT EXISTS trigger_decisions (
+			id TEXT PRIMARY KEY,
+			trigger_key TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			detail TEXT,
+			prompt_version TEXT,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_trigger_decisions_key ON trigger_decisions(trigger_key)`,
+		// The reuse check counts the findings one trigger raised on one
+		// system, and PruneTriggers asks whether any finding still names a
+		// trigger; trigger_key leads so the one index serves both.
+		`CREATE INDEX IF NOT EXISTS idx_findings_trigger ON findings(trigger_key, system_id)`,
 	}
 
 	for _, stmt := range stmts {
@@ -425,10 +487,10 @@ func (s *Store) FinalizeAnalysis(ctx context.Context, a Analysis) error {
 		UPDATE analyses SET
 			gated = ?, gate_reasons = ?, llm_called = ?, input_tokens = ?, output_tokens = ?,
 			cached_tokens = ?, cost_micros = ?, model = ?, duration_ms = ?, error = ?,
-			suppressed_by = ?, completed = 1
+			suppressed_by = ?, trigger_key = ?, completed = 1
 		WHERE system_id = ? AND window_start = ?
 	`, boolToInt(a.Gated), string(reasonsJSON), boolToInt(a.LLMCalled), a.InputTokens, a.OutputTokens,
-		a.CachedTokens, a.CostMicros, a.Model, a.DurationMs, a.Error, a.SuppressedBy,
+		a.CachedTokens, a.CostMicros, a.Model, a.DurationMs, a.Error, a.SuppressedBy, a.TriggerKey,
 		a.SystemID, a.WindowStart)
 	if err != nil {
 		return fmt.Errorf("store: finalize analysis: %w", err)
@@ -464,7 +526,7 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 }
 
 func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
-	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
+	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
 }
 
 func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
@@ -515,8 +577,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	// stamped when actually reopening -- a plain bump must leave whatever
 	// reopened_at value the row already has untouched.
 	baseSQL := `
-		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
+		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?)
 		ON CONFLICT(system_id, fingerprint) DO UPDATE SET
 			severity = excluded.severity,
 			title = excluded.title,
@@ -527,9 +589,10 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 			status = ?,
 			occurrence_count = findings.occurrence_count + 1,
 			last_seen = ?,
-			nodes = excluded.nodes%s
+			nodes = excluded.nodes,
+			trigger_key = excluded.trigger_key%s
 	`
-	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), model.StatusOpen, now}
+	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.TriggerKey), model.StatusOpen, now}
 
 	var extraSet string
 	if outcome == OutcomeReopened {
@@ -563,7 +626,7 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 }
 
 func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
-	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes FROM findings WHERE system_id = ? AND last_seen >= ?`
+	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key FROM findings WHERE system_id = ? AND last_seen >= ?`
 	args := []any{systemID, since}
 	if status != "" {
 		query += ` AND status = ?`
@@ -589,13 +652,14 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
-		var nodesJSON sql.NullString
+		var nodesJSON, triggerKey sql.NullString
 		var reopenedAt sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
-			&f.LLMModel, &f.PromptVersion, &nodesJSON); err != nil {
+			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
 		}
+		f.TriggerKey = triggerKey.String
 		if nodesJSON.Valid && nodesJSON.String != "" {
 			if err := json.Unmarshal([]byte(nodesJSON.String), &f.Nodes); err != nil {
 				return nil, fmt.Errorf("store: unmarshal nodes: %w", err)
