@@ -53,9 +53,6 @@ func TestThreatMethodsOnEmptyDatabase(t *testing.T) {
 	if rows, err := s.ListThreatAllowlist(ctx); err != nil || len(rows) != 0 {
 		t.Fatalf("ListThreatAllowlist: %v, %d rows", err, len(rows))
 	}
-	if err := s.RollupThreatDailyStats(ctx); err != nil {
-		t.Fatalf("RollupThreatDailyStats: %v", err)
-	}
 }
 
 // The whole point of the unique index: a reporter that retries a batch must
@@ -391,9 +388,10 @@ func TestListThreatSystemsIncludesSystemsWithNoStoredEvents(t *testing.T) {
 	}
 }
 
-// The rollup is what turns a blocklist into fleet threat-trend data, and it
-// only works if it runs before the prune.
-func TestRollupSurvivesThePrune(t *testing.T) {
+// Daily stats are read from the retained raw events themselves: there is no
+// rollup table, so nothing has to run first and nothing can go stale -- a
+// pruned day simply leaves the page.
+func TestThreatDailyStatsIsComputedFromTheRawEvents(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
@@ -404,41 +402,37 @@ func TestRollupSurvivesThePrune(t *testing.T) {
 		threatEvent("203.0.113.8", "ssh_bruteforce", day1+1000, 6),
 		threatEvent("203.0.113.9", "port_scan", day2, 2),
 	})
-
-	if err := s.RollupThreatDailyStats(ctx); err != nil {
-		t.Fatalf("RollupThreatDailyStats: %v", err)
-	}
-	// Recomputing must converge, not double count.
-	if err := s.RollupThreatDailyStats(ctx); err != nil {
-		t.Fatalf("second rollup: %v", err)
-	}
-
-	pruned, err := s.PruneThreatEvents(ctx, day2)
-	if err != nil {
-		t.Fatalf("PruneThreatEvents: %v", err)
-	}
-	if pruned != 2 {
-		t.Fatalf("pruned: got %d, want 2", pruned)
-	}
+	// The same address from a second system is one distinct IP, two hits' worth.
+	_, _, _ = s.InsertThreatEvents(ctx, "sys-b", []model.ThreatEvent{
+		threatEvent("203.0.113.7", "ssh_bruteforce", day1+2000, 1),
+	})
 
 	stats, err := s.ThreatDailyStats(ctx, 0)
 	if err != nil {
 		t.Fatalf("ThreatDailyStats: %v", err)
 	}
-	if len(stats) != 2 {
-		t.Fatalf("daily stats: got %+v, want 2 rows", stats)
+	want := []ThreatDailyRow{
+		{Day: "2026-08-27", Scenario: "port_scan", DistinctIPs: 1, TotalHits: 2},
+		{Day: "2026-08-20", Scenario: "ssh_bruteforce", DistinctIPs: 2, TotalHits: 11},
 	}
-	var found bool
-	for _, r := range stats {
-		if r.Day == "2026-08-20" && r.Scenario == "ssh_bruteforce" {
-			found = true
-			if r.DistinctIPs != 2 || r.TotalHits != 10 {
-				t.Fatalf("2026-08-20 rollup: got %+v, want 2 ips / 10 hits", r)
-			}
+	if len(stats) != len(want) {
+		t.Fatalf("daily stats: got %+v, want %+v", stats, want)
+	}
+	for i := range want {
+		if stats[i] != want[i] {
+			t.Fatalf("row %d: got %+v, want %+v", i, stats[i], want[i])
 		}
 	}
-	if !found {
-		t.Fatalf("the pruned day lost its rollup: %+v", stats)
+
+	if _, err := s.PruneThreatEvents(ctx, day2); err != nil {
+		t.Fatalf("PruneThreatEvents: %v", err)
+	}
+	stats, err = s.ThreatDailyStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ThreatDailyStats after the prune: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Day != "2026-08-27" {
+		t.Fatalf("after the prune: got %+v, want only 2026-08-27", stats)
 	}
 }
 

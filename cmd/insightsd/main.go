@@ -253,8 +253,8 @@ func main() {
 	// LLM call, so it can be shorter than TEMPLATE_RETENTION. 180 days.
 	findingRetention := getenvDuration("FINDING_RETENTION", 180*24*time.Hour)
 	// ANALYSIS_RETENTION prunes the cost/gate-reason ledger. There is no
-	// rollup table for this pipeline (unlike threatd's threat_daily_stats or
-	// sizingd's sizing_node_monthly), so every row pruned here is gone for
+	// rollup table for this pipeline (unlike sizingd's
+	// sizing_node_monthly), so every row pruned here is gone for
 	// good: the operator UI's /cost page (CostRollup has no time bound at
 	// all) and /gate page (GateRollup already windows to 7 days by default)
 	// both silently lose history older than this. 90 days keeps a quarter

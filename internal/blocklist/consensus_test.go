@@ -403,11 +403,10 @@ func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	}
 }
 
-func TestRunRollsUpStatsAndPrunes(t *testing.T) {
+func TestRunPrunesEventsPastRetention(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	// Older than the retention window, so the pass must roll it up and then
-	// drop it.
+	// Older than the retention window, so the pass must drop it.
 	old := now - 200*hour
 	if _, _, err := s.InsertThreatEvents(ctx, "sys-a", []model.ThreatEvent{{
 		AttackerIP: "203.0.113.50", Scenario: "port_scan", ObservedAt: old, HitCount: 7,
@@ -420,10 +419,6 @@ func TestRunRollsUpStatsAndPrunes(t *testing.T) {
 	events, _ := s.ListThreatEvents(ctx, "", "", 0)
 	if len(events) != 0 {
 		t.Fatalf("the stale event was not pruned: %+v", events)
-	}
-	stats, _ := s.ThreatDailyStats(ctx, 0)
-	if len(stats) != 1 || stats[0].TotalHits != 7 {
-		t.Fatalf("the rollup did not run before the prune: %+v", stats)
 	}
 }
 
@@ -491,7 +486,6 @@ func (f *failingReader) DeleteBlocklistEntries(context.Context, []string) (int, 
 func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstore.BlocklistRow, error) {
 	return f.rows, nil
 }
-func (f *failingReader) RollupThreatDailyStats(context.Context) error          { return nil }
 func (f *failingReader) PruneThreatEvents(context.Context, int64) (int, error) { return 0, nil }
 func (f *failingReader) PruneAllowlistRequests(context.Context, int64) (int, error) {
 	if f.failRequestPrune {

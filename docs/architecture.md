@@ -208,8 +208,8 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings` and `analyses` against their own independent retention windows (`maint.Config`). Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
-| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, roll up, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
-| `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the rollups that outlive the raw events. |
+| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
+| `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the per-system ingest accounting. |
 | `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and `IsPlatform` (which families are ignorable when testing "solo"). Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/store/sizing` | sizingd's only store package: ingest, the cohort pass's inputs and outputs, and the rollups that outlive the daily rows. |
@@ -218,7 +218,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings, systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines. Read-only — no write routes. |
-| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, the daily rollup, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
+| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
@@ -577,18 +577,22 @@ load-bearing:
    feed on the same pass it leaves the table. `ListBlocklistIPs` is uncapped
    on purpose: capping it would leave an allowlisted row in the table until it
    drifted inside the feed's cap, and the operator UI lists the table itself.
-7. `RollupThreatDailyStats` **then** `PruneThreatEvents` — reversing these two
-   loses the dropped day's history permanently.
+7. `PruneThreatEvents(now - THREAT_EVENT_RETENTION)`. Nothing is rolled up
+   first: `/stats` counts the retained events directly, so threat history is
+   exactly the retention window. A `threat_daily_stats` rollup used to run
+   here and was removed — recomputed every pass while this prune cut mid-day,
+   it re-rolled the oldest day from whatever the prune had left, so every day
+   past retention described only its last few minutes.
 8. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
    handling a request deletes its rows, so an unreviewed one would otherwise
-   live for the life of the deployment. Order-independent — nothing rolls
-   those rows up first — and the audit trail is never pruned.
+   live for the life of the deployment. Order-independent, and the audit
+   trail is never pruned.
 9. The snapshot is regenerated from the live entries.
 
-An error in steps 1–6 or 9 aborts the pass and returns; the rollup and both
-prunes are logged and skipped instead, because housekeeping must not stop the feed
+An error in steps 1–6 or 9 aborts the pass and returns; both prunes are
+logged and skipped instead, because housekeeping must not stop the feed
 reflecting promotions already made. A malformed allowlist row is the one
 housekeeping-shaped thing that *does* abort: skipping it would fail open and
 publish an address someone had explicitly excluded.
@@ -686,8 +690,7 @@ shape, different code": there was no shape difference to preserve.
 
 Two orderings must not move. **1 before 4**, or a `pressure_version` bump
 publishes a baseline mixing two score definitions. **7 before 8**, or the day
-being dropped loses its history permanently — the same constraint, and the same
-reason, as `RollupThreatDailyStats` before `PruneThreatEvents`. Steps 2, 3 and 4
+being dropped loses its history permanently. Steps 2, 3 and 4
 all read one `SizingWindow` query, because a second query would be a second
 chance for them to disagree.
 
@@ -901,7 +904,6 @@ without a goroutine to leak.
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
-| `threat_daily_stats` | Per day and scenario rollup, written before the prune so the trend outlives the raw events. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
 | `sizing_node_daily` | One node-day of measurements plus the derived `pressure`, its four axis penalties, `pressure_reasons` and `pressure_version`. Keyed `(system_id, node_id, day)` — a `system_id` is a *cluster*, so one report writes N rows. Every measurement column is nullable and `NULL` means **not measured**, never zero. |
 | `sizing_module_daily` | One module family per node-day: `instances`, plus a display-only `facts_ok` and `versions` JSON array. Nothing derived reads either. |
@@ -917,17 +919,17 @@ without a goroutine to leak.
 is address identity — that is what lets a portable `TEXT` column stand in for
 Postgres `INET`.
 
-The two day keys differ on purpose. `threat_daily_stats` uses `day TEXT
+The two day keys differ on purpose. `threat_ingest_daily` uses `day TEXT
 'YYYY-MM-DD'`; every `sizing_*` daily table uses `day INTEGER`, a UTC day index
-(`unix_millis / 86400000`). `threat_daily_stats` is a display rollup read whole,
-while the sizing tables are range-queried constantly (a 28-day verdict window, a
+(`unix_millis / 86400000`). `threat_ingest_daily` is display accounting read
+newest first, while the sizing tables are range-queried constantly (a 28-day verdict window, a
 90-day UI, a prune below a cutoff) — an integer index does all three with the
 arithmetic this codebase already performs, and removes the bug class where a
 formatter with the wrong location writes two rows for one day. The monthly
 rollup goes back the other way (`month TEXT`) because nothing does arithmetic on
 months. The `sizing_*` tables also carry **no surrogate ULID**: the project bans
 `AUTOINCREMENT`/`SERIAL` but does not mandate a surrogate, and
-`threat_daily_stats` already uses a bare composite primary key.
+`threat_ingest_daily` already uses a bare composite primary key.
 
 Two upsert idioms coexist in the sizing tables and the difference is
 load-bearing: the measurement tables **recompute** (a day is an absolute fact,
@@ -1117,9 +1119,8 @@ Consequences worth knowing:
 - It is part of the `threat_events` unique key and of the consensus grouping,
   so two nodes reporting one address under different scenarios are still two
   distinct systems — promotion counts systems, never scenario agreement.
-- `threat_blocklist.scenarios` and the daily rollup therefore carry whatever
-  the fleet actually reported, which is more useful than four buckets and is
-  what makes the rollup a real threat-trend asset.
+- `threat_blocklist.scenarios` and the daily totals therefore carry whatever
+  the fleet actually reported, which is more useful than four buckets.
 
 ### Local origin only
 

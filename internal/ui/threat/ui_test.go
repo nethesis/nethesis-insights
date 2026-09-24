@@ -419,8 +419,8 @@ func TestThreatStatsPageRendersBothTables(t *testing.T) {
 	body := get(t, h, "/stats").Body.String()
 
 	for _, want := range []string{
-		"2026-08-27",           // the daily rollup
-		"crowdsecurity/ssh-bf", // rolled up per scenario, verbatim
+		"2026-08-27",           // the daily totals
+		"crowdsecurity/ssh-bf", // grouped per scenario, verbatim
 		"240",                  // its hit total
 		"sys-1",                // ingest accounting
 		"2026-08-27 total",     // the per-day subtotal row
@@ -498,7 +498,7 @@ func TestThreatPagesRenderEmpty(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/", "nothing promoted yet"},
 		{"/events", "no threat events"},
-		{"/stats", "no rollup yet"},
+		{"/stats", "no events retained"},
 		{"/systems", "no systems have reported yet"},
 		{"/audit", "no audit entries yet"},
 	} {

@@ -96,8 +96,12 @@ Threat Shield rules that are as load-bearing as the gate's:
   earlier, automatic promotion exclusion keyed on each reporter's observed source
   address — was removed as too complex and too easy to get wrong for what it bought;
   the allowlist is now the only promotion exclusion.)
-- **Roll up before pruning.** `RollupThreatDailyStats` must precede
-  `PruneThreatEvents`, or the dropped day loses its history permanently.
+- **No rollup table.** `/stats` counts the retained `threat_events` directly.
+  A `threat_daily_stats` rollup recomputed every pass while the prune cut
+  mid-day re-rolled the oldest day from what the prune had left, so every day
+  past retention described only its last few minutes; it was removed rather
+  than fixed. Threat history is therefore `THREAT_EVENT_RETENTION` long. Do
+  not reintroduce a rollup without a consumer that needs more history.
 - **Ingest is bounded, not serialized.** The database already has exactly one
   writer — `SetMaxOpenConns(1)` plus the store's write mutex, and
   `InsertThreatEvents` already wraps a whole report in one transaction with

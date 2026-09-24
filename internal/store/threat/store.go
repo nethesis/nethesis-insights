@@ -44,9 +44,9 @@ func (s *Store) Close() error {
 }
 
 // Init creates Threat Shield's tables if they do not already exist: the raw
-// event stream, the promoted blocklist, the hand-maintained allowlist, the
-// daily rollups that outlive the raw events, ingest accounting, and the
-// client-facing allowlist request queue with its review and audit trails.
+// event stream, the promoted blocklist, the hand-maintained allowlist,
+// ingest accounting, and the client-facing allowlist request queue with its
+// review and audit trails.
 func (s *Store) Init(ctx context.Context) error {
 	s.db.Lock()
 	defer s.db.Unlock()
@@ -86,15 +86,6 @@ func (s *Store) Init(ctx context.Context) error {
 			created_by TEXT,
 			created_at INTEGER,
 			expires_at INTEGER
-		)`,
-		// Rolled up before the raw events are pruned, so the long-term trend
-		// asset survives the retention window at a few rows per day.
-		`CREATE TABLE IF NOT EXISTS threat_daily_stats (
-			day TEXT,
-			scenario TEXT,
-			distinct_ips INTEGER,
-			total_hits INTEGER,
-			PRIMARY KEY (day, scenario)
 		)`,
 		// Ingest accounting. Without it, "this node contributes nothing and
 		// here is which rule is dropping it" is answerable only from logs.
@@ -623,77 +614,8 @@ func (s *Store) queryBlocklist(ctx context.Context, query string, args ...any) (
 	return result, rows.Err()
 }
 
-// RollupThreatDailyStats recomputes every UTC day present in threat_events.
-//
-// It recomputes rather than accumulates so that running it twice, or after a
-// missed pass, converges on the right answer instead of double counting. The
-// day bucket is integer division on the millis column with the label
-// formatted in Go: SQLite and Postgres share no date function.
-func (s *Store) RollupThreatDailyStats(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT observed_at / ?, scenario, COUNT(DISTINCT attacker_ip), SUM(hit_count)
-		FROM threat_events
-		GROUP BY observed_at / ?, scenario
-	`, dayMillis, dayMillis)
-	if err != nil {
-		return fmt.Errorf("store: rollup threat stats: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	type bucket struct {
-		day, scenario string
-		distinctIPs   int
-		totalHits     int64
-	}
-	var buckets []bucket
-	for rows.Next() {
-		var (
-			dayIdx int64
-			b      bucket
-		)
-		if err := rows.Scan(&dayIdx, &b.scenario, &b.distinctIPs, &b.totalHits); err != nil {
-			return fmt.Errorf("store: scan threat rollup: %w", err)
-		}
-		b.day = DayString(dayIdx * dayMillis)
-		buckets = append(buckets, b)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store: rollup threat stats: %w", err)
-	}
-	if len(buckets) == 0 {
-		return nil
-	}
-
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: rollup threat stats: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, b := range buckets {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO threat_daily_stats (day, scenario, distinct_ips, total_hits)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(day, scenario) DO UPDATE SET
-				distinct_ips = excluded.distinct_ips,
-				total_hits = excluded.total_hits
-		`, b.day, b.scenario, b.distinctIPs, b.totalHits)
-		if err != nil {
-			return fmt.Errorf("store: upsert threat daily stats: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit threat daily stats: %w", err)
-	}
-	return nil
-}
-
-// PruneThreatEvents drops raw events past the retention window. It must run
-// after RollupThreatDailyStats, or the day being dropped loses its history.
+// PruneThreatEvents drops raw events past the retention window. Nothing
+// outlives them: /stats reads the events that are left.
 func (s *Store) PruneThreatEvents(ctx context.Context, olderThan int64) (int, error) {
 	s.db.Lock()
 	defer s.db.Unlock()

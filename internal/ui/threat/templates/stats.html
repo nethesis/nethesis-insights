@@ -5,9 +5,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{define "content"}}
 <h1>Threat stats</h1>
 
-<h2>Daily rollup</h2>
-<p><small>Rolled up before the raw events are pruned, so the trend survives the
-retention window at a few rows per day.</small></p>
+<h2>Daily totals</h2>
+<p><small>Addresses and hits per day and scenario, counted from the raw events
+still kept (<code>THREAT_EVENT_RETENTION</code>, 7 days by default).</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
@@ -30,7 +30,7 @@ retention window at a few rows per day.</small></p>
 <td class="num"><strong>{{.TotalHits}}</strong></td>
 </tr>
 {{else}}
-<tr><td colspan="4">no rollup yet</td></tr>
+<tr><td colspan="4">no events retained</td></tr>
 {{end}}
 </tbody>
 </table>

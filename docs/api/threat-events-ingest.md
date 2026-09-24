@@ -229,7 +229,7 @@ scenario agreement, accepting an unfamiliar scenario cannot weaken the rule.
 
 The scenario is free text from the edge, so the server trims it, strips control
 characters, and caps it at 128 runes before storage. It is never rewritten
-otherwise, and it is what `threat_blocklist.scenarios` and the daily rollup are
+otherwise, and it is what `threat_blocklist.scenarios` and the daily totals are
 grouped by.
 
 ## `GET /blocklist/v1/feed`

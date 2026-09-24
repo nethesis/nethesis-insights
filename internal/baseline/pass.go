@@ -107,9 +107,7 @@ func New(r Reader, cfg Config) *Runner {
 //
 // Two of those orderings are load-bearing. **1 before 4**, or a
 // pressure_version bump publishes a baseline mixing two score definitions.
-// **7 before 8**, or the day being dropped loses its history permanently --
-// the same constraint, and the same reason, as Threat Shield's
-// RollupThreatDailyStats before PruneThreatEvents.
+// **7 before 8**, or the day being dropped loses its history permanently.
 //
 // Steps 2, 3 and 4 all read the same window rows, in one query, because a
 // second query would be a second chance for them to disagree.

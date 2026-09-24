@@ -518,8 +518,7 @@ func indexOf(calls []string, want string) int {
 }
 
 // Roll up before pruning, or the day being dropped loses its history
-// permanently -- the same constraint, and the same reason, as Threat Shield's
-// RollupThreatDailyStats before PruneThreatEvents.
+// permanently.
 func TestRollupPrecedesPrune(t *testing.T) {
 	r := &recordingReader{}
 	cfg := testConfig()

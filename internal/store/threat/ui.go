@@ -63,14 +63,22 @@ func (s *Store) ListThreatEvents(ctx context.Context, systemID, attackerIP strin
 	return result, rows.Err()
 }
 
-// ThreatDailyStats returns the day/scenario rollup, newest day first.
+// ThreatDailyStats returns distinct addresses and total hits per UTC day and
+// scenario, newest day first, computed from the raw events still retained.
+//
+// It is read live rather than from a rollup table. A rollup recomputed every
+// pass while the prune cut mid-day re-rolled the oldest day from whatever the
+// prune had left, so every day past retention ended up describing only its
+// last few minutes. The day bucket is integer division on the millis column,
+// with the label formatted in Go.
 func (s *Store) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT day, scenario, distinct_ips, total_hits
-		FROM threat_daily_stats
-		ORDER BY day DESC, scenario
+		SELECT observed_at / ?, scenario, COUNT(DISTINCT attacker_ip), SUM(hit_count)
+		FROM threat_events
+		GROUP BY observed_at / ?, scenario
+		ORDER BY observed_at / ? DESC, scenario
 		LIMIT ?
-	`, clampLimit(limit))
+	`, dayMillis, dayMillis, dayMillis, clampLimit(limit))
 	if err != nil {
 		return nil, fmt.Errorf("store: threat daily stats: %w", err)
 	}
@@ -78,10 +86,14 @@ func (s *Store) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyR
 
 	result := []ThreatDailyRow{}
 	for rows.Next() {
-		var r ThreatDailyRow
-		if err := rows.Scan(&r.Day, &r.Scenario, &r.DistinctIPs, &r.TotalHits); err != nil {
+		var (
+			dayIdx int64
+			r      ThreatDailyRow
+		)
+		if err := rows.Scan(&dayIdx, &r.Scenario, &r.DistinctIPs, &r.TotalHits); err != nil {
 			return nil, fmt.Errorf("store: scan threat daily stats: %w", err)
 		}
+		r.Day = DayString(dayIdx * dayMillis)
 		result = append(result, r)
 	}
 	return result, rows.Err()

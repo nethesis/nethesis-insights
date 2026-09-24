@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package threat serves threatd's operator dashboard: the blocklist and its
-// allowlist, per-system ingest accounting, the raw event stream, the daily
-// rollup and the client-facing allowlist review queue. It sits on chrome the
+// allowlist, per-system ingest accounting, the raw event stream, daily
+// totals and the client-facing allowlist review queue. It sits on chrome the
 // same way insightsd's internal/ui/logs does -- see that package's doc comment
 // for the shared shape (zero JavaScript, every list bounded, secrets never
 // rendered) and this file for what is specific to Threat Shield.

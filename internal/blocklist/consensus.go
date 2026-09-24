@@ -26,7 +26,6 @@ type Reader interface {
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
 	ListBlocklistIPs(ctx context.Context, now int64) ([]string, error)
 	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
-	RollupThreatDailyStats(ctx context.Context) error
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
 	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
 }
@@ -78,15 +77,13 @@ type candidate struct {
 	lastSeen  int64
 }
 
-// Run executes promote -> expire -> unlist -> roll up -> prune -> regenerate.
+// Run executes promote -> expire -> unlist -> prune -> regenerate.
 //
-// Order matters three times: the rollup must precede the prune or the dropped
-// day loses its history, the unlist must precede the ListBlocklist that feeds
+// Order matters twice: the unlist must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it
 // leaves the table, and the snapshot is regenerated last so it reflects the
-// expiries and unlistings this pass performed. The allowlist-request prune
-// has no such constraint -- nothing rolls those rows up -- so it sits with
-// the other housekeeping.
+// expiries and unlistings this pass performed. The two prunes have no such
+// constraint and sit together as housekeeping.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	rows, err := r.store.ConsensusCandidates(ctx, now-r.cfg.Window.Milliseconds())
 	if err != nil {
@@ -115,10 +112,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 
 	// Housekeeping failures are logged, not fatal: they must not stop the
 	// feed from being regenerated with the promotions this pass just made.
-	if err := r.store.RollupThreatDailyStats(ctx); err != nil {
-		slog.Error("blocklist: daily rollup failed", "error", err)
-	} else if r.cfg.Retention > 0 {
-		// Only prune when the rollup that protects the history succeeded.
+	if r.cfg.Retention > 0 {
 		if pruned, err := r.store.PruneThreatEvents(ctx, now-r.cfg.Retention.Milliseconds()); err != nil {
 			slog.Error("blocklist: prune failed", "error", err)
 		} else if pruned > 0 {
