@@ -576,7 +576,7 @@ load-bearing:
    pass's candidates** — the TTL outlives the observation window many times
    over, so by the time an operator exempts a listed address its events have
    usually aged out and the candidate set holds nothing for it. And it runs
-   **before** the `ListBlocklist` of step 9, so the address leaves the served
+   **before** the `ListBlocklist` of step 10, so the address leaves the served
    feed on the same pass it leaves the table. `ListBlocklistIPs` is uncapped
    on purpose: capping it would leave an allowlisted row in the table until it
    drifted inside the feed's cap, and the operator UI lists the table itself.
@@ -586,26 +586,35 @@ load-bearing:
    here and was removed — recomputed every pass while this prune cut mid-day,
    it re-rolled the oldest day from whatever the prune had left, so every day
    past retention described only its last few minutes.
-8. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
+8. `PruneThreatIngestDaily(now - THREAT_INGEST_RETENTION)` drops per-system
+   ingest-accounting rows past their own, much longer retention (default
+   `2160h`, 90 days, against `THREAT_EVENT_RETENTION`'s default week).
+   `ListThreatSystems` is driven by this table, not `threat_events`, so
+   without this step it grows by roughly one row per reporting system per
+   day forever and every `GET /systems` aggregates the whole thing. The two
+   retentions are independent on purpose: a system that has gone quiet
+   should still show up on `/systems` for a while after its raw sightings
+   have already aged out of `threat_events`.
+9. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent, and the audit
    trail is never pruned.
-9. The snapshot is regenerated from the live entries. `ListBlocklist` returns
-   them most recently seen first and is asked for one row past
-   `BLOCKLIST_MAX_ENTRIES`, only to learn whether the cap binds; when it does,
-   the addresses seen longest ago are cut, a warning is logged and the
-   snapshot is marked capped, which both dashboard pages that show the feed
-   report. An active attacker matters more than one the fleet last saw hours
-   ago. `limit <= 0` is uncapped: the UI listings' 200-row default used to
-   apply here and silently capped the feed.
+10. The snapshot is regenerated from the live entries. `ListBlocklist` returns
+    them most recently seen first and is asked for one row past
+    `BLOCKLIST_MAX_ENTRIES`, only to learn whether the cap binds; when it
+    does, the addresses seen longest ago are cut, a warning is logged and the
+    snapshot is marked capped, which both dashboard pages that show the feed
+    report. An active attacker matters more than one the fleet last saw hours
+    ago. `limit <= 0` is uncapped: the UI listings' 200-row default used to
+    apply here and silently capped the feed.
 
-An error in steps 1–6 or 9 aborts the pass and returns; both prunes are
-logged and skipped instead, because housekeeping must not stop the feed
-reflecting promotions already made. A malformed allowlist row is the one
-housekeeping-shaped thing that *does* abort: skipping it would fail open and
-publish an address someone had explicitly excluded.
+An error in steps 1–6 or 10 aborts the pass and returns; all three prunes
+(7, 8, 9) are logged and skipped instead, because housekeeping must not stop
+the feed reflecting promotions already made. A malformed allowlist row is the
+one housekeeping-shaped thing that *does* abort: skipping it would fail open
+and publish an address someone had explicitly excluded.
 
 ### Feed: `GET /v1/feed` (public path `/blocklist/v1/feed`)
 

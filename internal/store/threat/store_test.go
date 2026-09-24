@@ -422,6 +422,38 @@ func TestListThreatSystemsIncludesSystemsWithNoStoredEvents(t *testing.T) {
 	}
 }
 
+// threat_ingest_daily otherwise grows one row per reporting system per day
+// forever, and ListThreatSystems aggregates the whole table on every
+// GET /systems -- this is what bounds it.
+func TestPruneThreatIngestDailyDropsOnlyStaleDays(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.RecordIngestCounters(ctx, "2026-05-01", "sys-a", model.ThreatCounters{Accepted: 1}, 0); err != nil {
+		t.Fatalf("seed old day: %v", err)
+	}
+	if err := s.RecordIngestCounters(ctx, "2026-08-28", "sys-a", model.ThreatCounters{Accepted: 1}, 0); err != nil {
+		t.Fatalf("seed recent day: %v", err)
+	}
+
+	cutoff := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	n, err := s.PruneThreatIngestDaily(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PruneThreatIngestDaily: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned rows: got %d, want 1", n)
+	}
+
+	rows, err := s.ThreatIngestStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ThreatIngestStats: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Day != "2026-08-28" {
+		t.Fatalf("after prune: got %+v, want only 2026-08-28", rows)
+	}
+}
+
 // Daily stats are read from the retained raw events themselves: there is no
 // rollup table, so nothing has to run first and nothing can go stale -- a
 // pruned day simply leaves the page.

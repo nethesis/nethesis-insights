@@ -31,6 +31,7 @@ func validConsensus() blocklist.Config {
 		TTL:                       24 * time.Hour,
 		MaxEntries:                50000,
 		Retention:                 168 * time.Hour,
+		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
 	}
 }
@@ -91,6 +92,9 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		// Events pruned before the window closes are never counted.
 		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},
 		{name: "zero request retention", mutateCfg: func(c *blocklist.Config) { c.AllowlistRequestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_ALLOWLIST_REQUEST_RETENTION"},
+		// threat_ingest_daily grows one row per reporting system per
+		// day forever without a floor on its own retention.
+		{name: "zero ingest retention", mutateCfg: func(c *blocklist.Config) { c.IngestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_INGEST_RETENTION"},
 		// An unbounded queue timeout, size or workers count, or an
 		// unbounded per-request cap, each silently loses data one way or
 		// another -- see the doc comment on ingestLimits.
@@ -135,6 +139,7 @@ func setValidThreatdEnv(t *testing.T) {
 		"BLOCKLIST_TTL":                            "24h",
 		"BLOCKLIST_MAX_ENTRIES":                    "50000",
 		"THREAT_EVENT_RETENTION":                   "168h",
+		"THREAT_INGEST_RETENTION":                  "2160h",
 		"THREAT_MAX_DECISIONS_PER_REQUEST":         "500",
 		"THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM": "25",
 		"THREAT_ALLOWLIST_REQUEST_RETENTION":       "2160h",
@@ -153,7 +158,7 @@ func TestLoadStartupConfigAcceptsAFullyValidEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStartupConfig: %v", err)
 	}
-	if interval != 5*time.Minute || cfg.Window != time.Hour || limits.QueueSize != 256 {
+	if interval != 5*time.Minute || cfg.Window != time.Hour || cfg.IngestRetention != 2160*time.Hour || limits.QueueSize != 256 {
 		t.Fatalf("loadStartupConfig did not parse the environment: interval=%v cfg=%+v limits=%+v",
 			interval, cfg, limits)
 	}

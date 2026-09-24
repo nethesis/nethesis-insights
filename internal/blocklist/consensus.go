@@ -27,6 +27,7 @@ type Reader interface {
 	ListBlocklistIPs(ctx context.Context, now int64) ([]string, error)
 	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
+	PruneThreatIngestDaily(ctx context.Context, olderThan int64) (int, error)
 	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
 }
 
@@ -43,6 +44,13 @@ type Config struct {
 	TTL        time.Duration // how long an entry survives its last sighting
 	MaxEntries int           // hard cap on the served feed
 	Retention  time.Duration // how long raw events are kept
+
+	// IngestRetention is how long per-system ingest-accounting rows
+	// (threat_ingest_daily) are kept. It is deliberately independent of
+	// Retention: a system that has gone quiet should still show up on
+	// /systems for a while after its raw events have already aged out of
+	// threat_events, which is why threatd defaults it far longer.
+	IngestRetention time.Duration
 
 	// AllowlistRequestRetention is how long an unreviewed client allowlist
 	// request is kept. It rides along in this pass because this pass is the
@@ -117,6 +125,18 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 			slog.Error("blocklist: prune failed", "error", err)
 		} else if pruned > 0 {
 			slog.Debug("blocklist: pruned expired threat events", "rows", pruned)
+		}
+	}
+
+	// Same convention: logged and skipped, never fatal. Without this,
+	// threat_ingest_daily grows one row per reporting system per day
+	// forever, and ListThreatSystems aggregates the whole table on every
+	// GET /systems.
+	if r.cfg.IngestRetention > 0 {
+		if pruned, err := r.store.PruneThreatIngestDaily(ctx, now-r.cfg.IngestRetention.Milliseconds()); err != nil {
+			slog.Error("blocklist: ingest-daily prune failed", "error", err)
+		} else if pruned > 0 {
+			slog.Debug("blocklist: pruned stale ingest-accounting rows", "rows", pruned)
 		}
 	}
 

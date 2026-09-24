@@ -110,6 +110,9 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 	if cfg.AllowlistRequestRetention <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_ALLOWLIST_REQUEST_RETENTION must be positive, got %s", cfg.AllowlistRequestRetention))
 	}
+	if cfg.IngestRetention <= 0 {
+		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be positive, got %s", cfg.IngestRetention))
+	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
 	}
@@ -172,6 +175,11 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	add(err)
 	allowlistRequestRetention, err := svc.GetenvDurationStrict("THREAT_ALLOWLIST_REQUEST_RETENTION", 2160*time.Hour)
 	add(err)
+	// 90 days, long enough that a node that has gone quiet still shows up on
+	// /systems for a quarter, well past THREAT_EVENT_RETENTION's default
+	// week -- ListThreatSystems is driven by this table, not threat_events.
+	threatIngestRetention, err := svc.GetenvDurationStrict("THREAT_INGEST_RETENTION", 2160*time.Hour)
+	add(err)
 
 	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
 	// plus the store's write mutex already do that -- it bounds how many
@@ -192,6 +200,7 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
 
+		IngestRetention:           threatIngestRetention,
 		AllowlistRequestRetention: allowlistRequestRetention,
 	}
 	limits := ingestLimits{
@@ -312,6 +321,7 @@ func main() {
 		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
+		{Name: "THREAT_INGEST_RETENTION", Value: consensusCfg.IngestRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},
 		{Name: "THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", Value: strconv.Itoa(limits.MaxAllowlistPerSystem)},
 		{Name: "THREAT_ALLOWLIST_REQUEST_RETENTION", Value: consensusCfg.AllowlistRequestRetention.String()},

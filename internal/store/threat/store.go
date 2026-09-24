@@ -643,3 +643,29 @@ func (s *Store) PruneThreatEvents(ctx context.Context, olderThan int64) (int, er
 	}
 	return int(n), nil
 }
+
+// PruneThreatIngestDaily drops per-system ingest-accounting rows for days
+// older than olderThan and returns how many went.
+//
+// Without this, threat_ingest_daily grows by roughly one row per reporting
+// system per day forever, and ListThreatSystems aggregates the whole table
+// on every GET /systems. day is stored as the TEXT 'YYYY-MM-DD' key
+// DayString formats, so the cutoff is compared as that same string --
+// lexical order matches calendar order for a fixed-width date. This window
+// is deliberately longer than PruneThreatEvents's: a system that has gone
+// quiet should still show up on /systems for a while after its raw events
+// have already aged out of threat_events.
+func (s *Store) PruneThreatIngestDaily(ctx context.Context, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_ingest_daily WHERE day < ?`, DayString(olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("store: prune threat ingest daily: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune threat ingest daily rows: %w", err)
+	}
+	return int(n), nil
+}

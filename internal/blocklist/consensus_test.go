@@ -472,6 +472,56 @@ func TestRunPrunesEventsPastRetention(t *testing.T) {
 	}
 }
 
+// threat_ingest_daily has no relation to the candidate window: it is pruned
+// on its own IngestRetention, independent of Retention, because a system
+// that has gone quiet should still show up on /systems for a while after its
+// raw events have already aged out of threat_events.
+func TestRunPrunesStaleIngestDailyRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	old := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	if err := s.RecordIngestCounters(ctx, old, "sys-a", model.ThreatCounters{Accepted: 1}, 0); err != nil {
+		t.Fatalf("seed old day: %v", err)
+	}
+	recent := time.UnixMilli(now).UTC().Format("2006-01-02")
+	if err := s.RecordIngestCounters(ctx, recent, "sys-a", model.ThreatCounters{Accepted: 1}, 0); err != nil {
+		t.Fatalf("seed recent day: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.IngestRetention = 2160 * time.Hour
+	runPass(t, s, cfg)
+
+	rows, err := s.ThreatIngestStats(ctx, 0)
+	if err != nil {
+		t.Fatalf("ThreatIngestStats: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Day != recent {
+		t.Fatalf("after the pass: got %+v, want only %s", rows, recent)
+	}
+}
+
+// Housekeeping is logged and skipped, never fatal: it must not stop the feed
+// being regenerated with the promotions this pass just made.
+func TestIngestDailyPruneFailureDoesNotAbortThePass(t *testing.T) {
+	fake := &failingReader{
+		rows:                 []threatstore.BlocklistRow{{AttackerIP: "203.0.113.7", ExpiresAt: now + hour}},
+		failIngestDailyPrune: true,
+	}
+	snap := NewSnapshot()
+	cfg := testConfig()
+	cfg.IngestRetention = 168 * time.Hour
+	r := New(fake, snap, cfg)
+
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("Run: got %v, want the pass to survive a failed ingest-daily prune", err)
+	}
+	if !strings.Contains(string(snap.Body()), "203.0.113.7") {
+		t.Fatalf("the snapshot was not regenerated: %q", snap.Body())
+	}
+}
+
 // A store failure must leave the last good snapshot in place. Subscribers get
 // a stale list, never a blank one.
 func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
@@ -505,9 +555,10 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 
 // failingReader serves one fixed blocklist row and can be switched to fail.
 type failingReader struct {
-	rows             []threatstore.BlocklistRow
-	fail             bool
-	failRequestPrune bool
+	rows                 []threatstore.BlocklistRow
+	fail                 bool
+	failRequestPrune     bool
+	failIngestDailyPrune bool
 }
 
 var errBoom = errors.New("store unavailable")
@@ -537,6 +588,12 @@ func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstor
 	return f.rows, nil
 }
 func (f *failingReader) PruneThreatEvents(context.Context, int64) (int, error) { return 0, nil }
+func (f *failingReader) PruneThreatIngestDaily(context.Context, int64) (int, error) {
+	if f.failIngestDailyPrune {
+		return 0, errBoom
+	}
+	return 0, nil
+}
 func (f *failingReader) PruneAllowlistRequests(context.Context, int64) (int, error) {
 	if f.failRequestPrune {
 		return 0, errBoom
