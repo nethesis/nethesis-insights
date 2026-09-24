@@ -16,6 +16,7 @@ import (
 
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 
+	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/threat"
@@ -177,7 +178,11 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.snap == nil || !s.snap.Ready() {
+	var view blocklist.View
+	if s.snap != nil {
+		view = s.snap.View()
+	}
+	if !view.Ready {
 		// No successful consensus pass yet. An empty body would mean "no
 		// threats" to every client that imports it, which silently disables
 		// protection -- so refuse instead.
@@ -185,7 +190,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	etag := s.snap.ETag()
+	etag := view.ETag
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "max-age="+strconv.Itoa(blocklistCacheSeconds))
 	w.Header().Set("Vary", "Accept-Encoding")
@@ -198,10 +203,10 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	body := s.snap.Body()
+	body := view.Body
 	if acceptsGzip(r) {
 		w.Header().Set("Content-Encoding", "gzip")
-		body = s.snap.Gzip()
+		body = view.Gzip
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {

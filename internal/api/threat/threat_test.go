@@ -652,6 +652,55 @@ func getBlocklist(t *testing.T, h http.Handler, withAuth bool, headers map[strin
 	return rec
 }
 
+// A regeneration landing mid-request must never pair one generation's ETag
+// with another's body: a client caching that pair is pinned to the wrong
+// list by 304s whenever the entry set returns to the first one.
+func TestBlocklistNeverPairsAnETagWithAnotherGenerationsBody(t *testing.T) {
+	rule := blocklist.Rule{MinSystems: 3, Window: time.Hour, TTL: 24 * time.Hour}
+	sets := [][]threatstore.BlocklistRow{
+		{{AttackerIP: "203.0.113.7", DistinctSystems: 3}},
+		{{AttackerIP: "198.51.100.9", DistinctSystems: 3}},
+	}
+	// Learn each set's tag, and the address that proves which body it is.
+	tagOf := map[string]string{}
+	for _, rows := range sets {
+		snap := blocklist.NewSnapshot()
+		if err := snap.Generate(rows, rule, false, threatNow); err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		tagOf[snap.ETag()] = rows[0].AttackerIP
+	}
+
+	snap := blocklist.NewSnapshot()
+	if err := snap.Generate(sets[0], rule, false, threatNow); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	h := threatServer(&fakeThreatStore{}, nil, snap)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = snap.Generate(sets[i%2], rule, false, threatNow)
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	for i := 0; i < 2000; i++ {
+		rec := getBlocklist(t, h, true, nil)
+		ip := tagOf[rec.Header().Get("ETag")]
+		if ip == "" || !strings.Contains(rec.Body.String(), ip+"\n") {
+			t.Fatalf("request %d: ETag %s served with body:\n%s", i, rec.Header().Get("ETag"), rec.Body.String())
+		}
+	}
+}
+
 func TestBlocklistServesThePlainTextFeed(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
 	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, snap), true, nil)

@@ -133,6 +133,24 @@ func (s *Snapshot) Ready() bool {
 	return s.ready
 }
 
+// View is one generation's servable state, read together.
+type View struct {
+	Ready      bool
+	ETag       string
+	Body, Gzip []byte
+}
+
+// View returns the ETag and both bodies under a single read lock. The feed
+// handler must use it rather than ETag() and Body() separately: a Generate
+// landing between two reads pairs one generation's tag with another's body,
+// and a client caching that pair is then pinned to the wrong list by 304s.
+// The slices are never mutated after Generate, so sharing them is safe.
+func (s *Snapshot) View() View {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return View{Ready: s.ready, ETag: s.etag, Body: s.body, Gzip: s.gz}
+}
+
 func (s *Snapshot) Body() []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

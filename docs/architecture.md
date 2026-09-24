@@ -607,10 +607,17 @@ publish an address someone had explicitly excluded.
 ### Feed: `GET /v1/feed` (public path `/blocklist/v1/feed`)
 
 `blocklist.Snapshot` holds the body, its gzip encoding and its `ETag`
-(`sha256` of the body) behind an `RWMutex`. Serving never touches the database,
-so the cost of the feed is flat regardless of subscriber count, and only a
-successful generation replaces what is held — a failed pass keeps serving the
-previous list with its original `generated:` timestamp.
+(`sha256` of the entry set and the rule, not of the body, whose `generated:`
+line changes every pass) behind an `RWMutex`. Serving never touches the
+database, so the cost of the feed is flat regardless of subscriber count, and
+only a successful generation replaces what is held — a failed pass keeps
+serving the previous list with its original `generated:` timestamp.
+
+The handler reads all three through one `Snapshot.View()`, under a single read
+lock. Read separately, a generation landing between the `ETag` and the body
+paired one generation's tag with another's body, and a client caching that
+pair was then held on the wrong list by `304`s whenever the entry set came back
+to the first one.
 
 Before the first successful pass the snapshot is not ready and the handler
 answers `503`. That distinction matters: to a client importing the list, an
