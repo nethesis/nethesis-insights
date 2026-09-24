@@ -112,7 +112,10 @@ type server struct {
 type Config struct {
 	MaxDecisions               int
 	MaxAllowlistRequestsPerSys int
-	Now                        func() int64
+	// MaxEventAge is THREAT_EVENT_RETENTION: a decision older than it is
+	// dropped at ingest -- see threat.Options.MaxAge.
+	MaxEventAge time.Duration
+	Now         func() int64
 }
 
 func defaultNow() int64 { return time.Now().UnixMilli() }

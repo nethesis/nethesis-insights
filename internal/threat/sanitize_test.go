@@ -380,6 +380,42 @@ func TestSanitizeClampsFarFutureTimestamps(t *testing.T) {
 	}
 }
 
+// A decision older than the retention window is dropped: the next prune would
+// delete it anyway, so storing it only let a replayed backlog -- or a 1970
+// timestamp -- reach days the store had finished with. One just inside the
+// window is a late delivery and is kept.
+func TestSanitizeDropsDecisionsOlderThanMaxAge(t *testing.T) {
+	const maxAge = 168 * time.Hour
+	nowT := time.UnixMilli(testNow).UTC()
+	for _, tc := range []struct {
+		name    string
+		created time.Time
+		keep    bool
+	}{
+		{"just inside", nowT.Add(-maxAge + time.Minute), true},
+		{"just outside", nowT.Add(-maxAge - time.Minute), false},
+		{"a year old", nowT.AddDate(-1, 0, 0), false},
+		{"epoch", time.Unix(0, 0).UTC(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := goodDecision()
+			d.CreatedAt = tc.created.Format(time.RFC3339)
+
+			res := Sanitize(report(d), Options{MaxAge: maxAge}, testNow)
+
+			if tc.keep {
+				if len(res.Events) != 1 || res.Counters.DroppedTime != 0 {
+					t.Fatalf("events=%d dropped_time=%d, want it kept", len(res.Events), res.Counters.DroppedTime)
+				}
+				return
+			}
+			if len(res.Events) != 0 || res.Counters.DroppedTime != 1 {
+				t.Fatalf("events=%d dropped_time=%d, want it dropped as dropped_time", len(res.Events), res.Counters.DroppedTime)
+			}
+		})
+	}
+}
+
 // A small skew is normal and must survive untouched.
 func TestSanitizeKeepsSmallClockSkew(t *testing.T) {
 	skewed := time.UnixMilli(testNow).UTC().Add(time.Hour)

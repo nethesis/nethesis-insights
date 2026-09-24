@@ -160,7 +160,7 @@ malformed decision is dropped and counted; the rest of the batch is stored. A
 reporter under active attack must not lose its whole batch to one bad row.
 
 **Advance the watermark only on `2xx`.** A server outage should produce delayed
-events, not lost ones. Redelivery is safe: `(system_id, attacker_ip, scenario,
+events, not lost ones — up to the retention limit in rule 6. Redelivery is safe: `(system_id, attacker_ip, scenario,
 observed_at)` is unique, so a repeated batch cannot inflate anything.
 
 That uniqueness is about *duplicate* delivery, not about recovering a batch
@@ -208,7 +208,11 @@ Applied in this order; each drop increments exactly one counter.
    proxy is always the proxy's own. The documentation ranges are *not*
    rejected.
 6. **`created_at`** must parse as RFC3339 (`dropped_time`). A value more than
-   24 h in the future is clamped to the server clock rather than dropped.
+   24 h in the future is clamped to the server clock rather than dropped. A
+   value older than the server's event retention (`THREAT_EVENT_RETENTION`,
+   7 days by default) is dropped (`dropped_time`): the server would delete it
+   on its next prune anyway, so a backlog replayed after a longer outage loses
+   only what could no longer have counted.
 
 Beyond the scenario name and `duration_seconds`, nothing is retained. No
 usernames, no URIs, no user agents, no request paths, no geo or ASN data — do

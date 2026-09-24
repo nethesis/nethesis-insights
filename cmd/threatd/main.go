@@ -252,6 +252,7 @@ func main() {
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
 		MaxDecisions:               threatMaxDecisions,
 		MaxAllowlistRequestsPerSys: allowlistMaxPerSystem,
+		MaxEventAge:                threatRetention,
 		Now:                        func() int64 { return time.Now().UnixMilli() },
 	}, metrics.Handler(reg), httpMetrics)
 

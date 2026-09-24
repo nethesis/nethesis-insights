@@ -113,6 +113,7 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	res := threat.Sanitize(report, threat.Options{
 		SourceIP:     sourceIP,
 		MaxDecisions: s.cfg.MaxDecisions,
+		MaxAge:       s.cfg.MaxEventAge,
 	}, now)
 
 	// An empty report (no decisions at all) has nothing to write and nothing

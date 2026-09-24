@@ -123,6 +123,11 @@ type Options struct {
 	SourceIP netip.Addr
 	// MaxDecisions caps the batch; <= 0 means DefaultMaxDecisions.
 	MaxDecisions int
+	// MaxAge drops a decision older than now-MaxAge. threatd passes
+	// THREAT_EVENT_RETENTION: the next prune would delete such an event
+	// anyway, so it is dropped as evidence nobody will count. <= 0 means no
+	// lower bound.
+	MaxAge time.Duration
 }
 
 // Result is one sanitized batch.
@@ -192,7 +197,7 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 			continue
 		}
 
-		observedAt, ok := observedAt(d.CreatedAt, now)
+		observedAt, ok := observedAt(d.CreatedAt, now, opts.MaxAge)
 		if !ok {
 			res.Counters.DroppedTime++
 			continue
@@ -299,8 +304,10 @@ func publicUnicast(a netip.Addr) bool {
 // observedAt parses a CrowdSec RFC3339 timestamp into unix millis, clamping a
 // clock-skewed future value to now. An unparseable or empty value is dropped
 // rather than defaulted to now: a decision with no credible time cannot be
-// placed in a consensus window.
-func observedAt(raw string, now int64) (int64, bool) {
+// placed in a consensus window. So is one older than maxAge (when positive),
+// and it is dropped rather than clamped -- clamping would turn a stale
+// sighting into a fresh one inside the window.
+func observedAt(raw string, now int64, maxAge time.Duration) (int64, bool) {
 	t, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
 	if err != nil {
 		return 0, false
@@ -308,6 +315,9 @@ func observedAt(raw string, now int64) (int64, bool) {
 	ms := t.UnixMilli()
 	if ms > now+maxClockSkew.Milliseconds() {
 		return now, true
+	}
+	if maxAge > 0 && ms < now-maxAge.Milliseconds() {
+		return 0, false
 	}
 	return ms, true
 }

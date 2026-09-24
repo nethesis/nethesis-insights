@@ -394,6 +394,34 @@ func TestThreatIngestKeepsTheBatchWhenOneDecisionIsMalformed(t *testing.T) {
 	}
 }
 
+// MaxEventAge reaches the sanitizer: a decision older than retention is
+// dropped and counted as dropped_time, its fresh sibling is kept.
+func TestThreatIngestDropsDecisionsOlderThanMaxEventAge(t *testing.T) {
+	q := &fakeQueue{}
+	stale := decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec")
+	stale.CreatedAt = "2026-08-20T09:59:00Z" // eight days before threatNow
+	body := reportBody(t, testSystemID, stale, decision("203.0.113.9", "crowdsecurity/ssh-bf", "crowdsec"))
+
+	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{
+		MaxDecisions: 500,
+		MaxEventAge:  168 * time.Hour,
+		Now:          func() int64 { return threatNow },
+	}, nil, nil)
+	rec := postThreat(t, h, body, true)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", rec.Code)
+	}
+	if len(q.published) != 1 || len(q.published[0].Events) != 1 || q.published[0].Events[0].AttackerIP != "203.0.113.9" {
+		t.Fatalf("published: %+v, want only 203.0.113.9", q.published)
+	}
+	var got threatIngestResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Dropped.DroppedTime != 1 {
+		t.Fatalf("dropped counters: %+v, want dropped_time 1", got.Dropped)
+	}
+}
+
 // A scenario the server has never seen is stored, not dropped: there is no
 // allowlist, so a third-party or hand-written collection still contributes.
 func TestThreatIngestAcceptsAnUnfamiliarScenario(t *testing.T) {
