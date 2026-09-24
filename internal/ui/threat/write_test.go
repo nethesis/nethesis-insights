@@ -104,6 +104,22 @@ func TestWriteRoutesAreNotReachableWithoutAnAdminKey(t *testing.T) {
 	}
 }
 
+// Without ADMIN_API_KEY the pages that would hold a form say the dashboard is
+// read-only. They must not send the operator to an admin API: there has not
+// been one since the write routes moved into this UI.
+func TestPagesWithoutAnAdminKeySayReadOnly(t *testing.T) {
+	h := newTestServerWithFeed(t, threatReader(), nil)
+	for _, p := range []string{"/", "/allowlist-requests"} {
+		body := get(t, h, p).Body.String()
+		if !strings.Contains(body, "read-only on this deployment") {
+			t.Fatalf("%s: no read-only notice", p)
+		}
+		if strings.Contains(body, "admin API") {
+			t.Fatalf("%s: still points to an admin API", p)
+		}
+	}
+}
+
 func TestWriteRoutesRequireTheAdminKey(t *testing.T) {
 	w := &fakeWriter{}
 	h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
@@ -348,7 +364,7 @@ func TestGetOnAWriteOnlyPathIsNotFound(t *testing.T) {
 	}
 }
 
-// The prefix guardrail has to hold at the UI too, not only in the admin API:
+// The prefix guardrail has to hold at the UI too, not only at request time:
 // 0.0.0.0/0 on the allowlist silently disables the entire feed.
 func TestWriteEnforcesThePrefixGuardrail(t *testing.T) {
 	w := &fakeWriter{}
