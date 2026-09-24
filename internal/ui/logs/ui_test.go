@@ -5,6 +5,7 @@ package logs
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -607,26 +608,71 @@ func TestEmptyStoreRendersEveryPage(t *testing.T) {
 	}
 }
 
-// The operator's actual question -- "which machine?" -- has to be answerable
-// from the findings page without expanding anything, and the full name has to
-// be there once expanded.
-func TestFindingsPageShowsNodeAttribution(t *testing.T) {
-	r := seededReader()
-	r.findings = []model.Finding{{
+// findingsTable returns the findings table's header labels and the inner
+// markup of each top-level cell of its first body row. A cell's own markup
+// (the expanded <details>) holds no <td>, so splitting on "<td" is exact.
+func findingsTable(t *testing.T, body string) (header, cells []string) {
+	t.Helper()
+	hs, he := strings.Index(body, "<thead>"), strings.Index(body, "</thead>")
+	if hs < 0 || he < hs {
+		t.Fatal("findings page has no table header")
+	}
+	for _, m := range regexp.MustCompile(`<th[^>]*>([^<]*)</th>`).FindAllStringSubmatch(body[hs:he], -1) {
+		header = append(header, m[1])
+	}
+	tbody := body[strings.Index(body, "<tbody>"):]
+	rs, re := strings.Index(tbody, "<tr>"), strings.Index(tbody, "</tr>")
+	if rs < 0 || re < rs {
+		t.Fatal("findings table has no body row")
+	}
+	for _, c := range strings.Split(tbody[rs:re], "<td")[1:] {
+		cells = append(cells, c[strings.Index(c, ">")+1:])
+	}
+	return header, cells
+}
+
+// column returns the index of the header labelled name.
+func column(t *testing.T, header []string, name string) int {
+	t.Helper()
+	for i, h := range header {
+		if h == name {
+			return i
+		}
+	}
+	t.Fatalf("findings table has no %q column: %q", name, header)
+	return -1
+}
+
+func nodeFinding(nodes ...int) model.Finding {
+	return model.Finding{
 		ID: "01FINDINGID0000000000000000", SystemID: "sys-1", Fingerprint: "abcd1234",
-		Severity: "high", Title: "t", Summary: "s", Status: "open",
-		OccurrenceCount: 1, FirstSeen: 1700000000000, LastSeen: 1700000100000,
-		Nodes: []int{2},
-	}}
-	r.roster = map[string]map[int]string{"sys-1": {2: "node2.example.org"}}
+		Severity: "high", Title: "the finding title", Summary: "s", Status: "open",
+		OccurrenceCount: 42, FirstSeen: 1700000000000, LastSeen: 1700000100000,
+		Nodes: nodes,
+	}
+}
+
+// The operator's actual question -- "which machine?" -- has to be answerable
+// from the findings row without expanding anything: the node id together with
+// the full FQDN, in the row and again in the expanded detail.
+func TestFindingsPageShowsNodeIDAndFQDN(t *testing.T) {
+	r := seededReader()
+	r.findings = []model.Finding{nodeFinding(1, 2)}
+	r.roster = map[string]map[int]string{"sys-1": {1: "rl1.example.org", 2: "node2.example.org"}}
 
 	body := get(t, newTestServer(t, r, nil), "/").Body.String()
-
-	if !strings.Contains(body, "node2") {
-		t.Error("findings page does not show the node's name")
+	header, cells := findingsTable(t, body)
+	nodes := column(t, header, "Nodes")
+	if nodes >= len(cells) {
+		t.Fatalf("row has %d cells, no Nodes cell", len(cells))
 	}
-	if !strings.Contains(body, "node2.example.org") {
-		t.Error("findings page does not carry the full FQDN")
+	for _, want := range []string{"1 · rl1.example.org", "2 · node2.example.org"} {
+		if !strings.Contains(cells[nodes], want) {
+			t.Errorf("Nodes cell = %q, want it to contain %q", cells[nodes], want)
+		}
+		if n := strings.Count(body, want); n < 2 {
+			t.Errorf("%q appears %d time(s), want it in the row and in the expanded detail", want, n)
+		}
 	}
 }
 
@@ -634,16 +680,21 @@ func TestFindingsPageShowsNodeAttribution(t *testing.T) {
 // attribution, the name is a convenience on top of it.
 func TestFindingsPageShowsABareNodeIDWhenUnnamed(t *testing.T) {
 	r := seededReader()
-	r.findings = []model.Finding{{
-		ID: "01FINDINGID0000000000000000", SystemID: "sys-1", Fingerprint: "abcd1234",
-		Severity: "high", Title: "t", Summary: "s", Status: "open",
-		OccurrenceCount: 1, FirstSeen: 1700000000000, LastSeen: 1700000100000,
-		Nodes: []int{7},
-	}}
+	r.findings = []model.Finding{nodeFinding(7)}
 	r.roster = nil
 
 	body := get(t, newTestServer(t, r, nil), "/").Body.String()
-
+	header, cells := findingsTable(t, body)
+	nodes := column(t, header, "Nodes")
+	if nodes >= len(cells) {
+		t.Fatalf("row has %d cells, no Nodes cell", len(cells))
+	}
+	if !strings.Contains(cells[nodes], ">7</div>") {
+		t.Errorf("Nodes cell = %q, want the bare id 7", cells[nodes])
+	}
+	if strings.Contains(body, "7 ·") {
+		t.Error("an unnamed node must render its bare id, with no separator")
+	}
 	if !strings.Contains(body, "no name reported") {
 		t.Error("expected an unnamed node to be marked as such")
 	}
@@ -658,5 +709,36 @@ func TestGateSummarySeparatesSuppressedWindows(t *testing.T) {
 	})
 	if g.Windows != 16 || g.GatedOut != 10 || g.Called != 2 || g.Suppressed != 4 {
 		t.Fatalf("unexpected summary: %+v", g)
+	}
+}
+
+// Every body cell must sit under its own header. A row one cell short shifts
+// every later value one column left -- Occurrences shows the nodes, Nodes the
+// title, Title the last-seen time -- so assert both the cell count and that
+// each column holds the value its header names.
+func TestFindingsRowCellsLineUpWithHeader(t *testing.T) {
+	r := seededReader()
+	r.findings = []model.Finding{nodeFinding(1)}
+	r.roster = map[string]map[int]string{"sys-1": {1: "rl1.example.org"}}
+
+	body := get(t, newTestServer(t, r, nil), "/").Body.String()
+	header, cells := findingsTable(t, body)
+	if len(cells) != len(header) {
+		t.Fatalf("row has %d cells, header has %d (%q)", len(cells), len(header), header)
+	}
+	for name, want := range map[string]string{
+		"Occurrences": "42</td>",
+		"Nodes":       "rl1.example.org",
+		"Title":       "the finding title",
+		"Last seen":   " ago",
+	} {
+		if c := cells[column(t, header, name)]; !strings.Contains(c, want) {
+			t.Errorf("column %q cell = %q, want it to contain %q", name, c, want)
+		}
+	}
+
+	empty := get(t, newTestServer(t, &fakeReader{}, nil), "/").Body.String()
+	if want := fmt.Sprintf(`colspan="%d"`, len(header)); !strings.Contains(empty, want) {
+		t.Errorf("empty-state row should span all %d columns (%s)", len(header), want)
 	}
 }

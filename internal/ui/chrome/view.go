@@ -26,7 +26,6 @@ var funcMap = template.FuncMap{
 	"join":          strings.Join,
 	"reasonsOrNone": ReasonsOrNone,
 	"moduleLabel":   ModuleLabel,
-	"shortHost":     ShortHost,
 
 	// Fleet sizing.
 	"fmtDay":        FmtDay,
@@ -134,18 +133,6 @@ func Short(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
-}
-
-// ShortHost renders an FQDN as its first label, for a table cell where the
-// full name would dominate the row. The full name stays in the cell's title
-// attribute and in the expanded detail, so nothing is actually hidden -- two
-// machines whose names differ only past the first label are still told apart
-// by the node id printed beside it.
-func ShortHost(fqdn string) string {
-	if i := strings.IndexByte(fqdn, '.'); i > 0 {
-		return fqdn[:i]
-	}
-	return fqdn
 }
 
 // ReasonsOrNone renders a gate-reason set for the /gate rollup. nil means
