@@ -350,9 +350,12 @@ depth. It never logs a credential: the model API key appears only as
 
 ### `threatd`
 
-`threatd` checks the consensus settings below at startup. A value outside
-the stated limits stops it with an error naming the variable, visible in
-`systemctl status threatd`.
+`threatd` checks the settings below at startup. A value that is out of the
+stated range, or one that is set but does not parse at all (an integer or
+duration variable's value must actually be one — `THREAT_EVENT_RETENTION=30d`
+is rejected rather than silently becoming the default, since Go's duration
+syntax has no `d` unit), stops it with an error naming the variable, visible
+in `systemctl status threatd`.
 
 | Variable | Purpose |
 |---|---|

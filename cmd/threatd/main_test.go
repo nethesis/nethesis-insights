@@ -121,3 +121,62 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		})
 	}
 }
+
+// setValidThreatdEnv sets every environment variable loadStartupConfig reads
+// to a value it accepts, so a test can override just the one or two it cares
+// about without a stray unset variable also happening to be invalid and
+// masking the assertion.
+func setValidThreatdEnv(t *testing.T) {
+	t.Helper()
+	for k, v := range map[string]string{
+		"BLOCKLIST_CONSENSUS_INTERVAL":             "5m",
+		"BLOCKLIST_WINDOW":                         "1h",
+		"BLOCKLIST_MIN_SYSTEMS":                    "3",
+		"BLOCKLIST_TTL":                            "24h",
+		"BLOCKLIST_MAX_ENTRIES":                    "50000",
+		"THREAT_EVENT_RETENTION":                   "168h",
+		"THREAT_MAX_DECISIONS_PER_REQUEST":         "500",
+		"THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM": "25",
+		"THREAT_ALLOWLIST_REQUEST_RETENTION":       "2160h",
+		"THREAT_QUEUE_SIZE":                        "256",
+		"THREAT_QUEUE_WORKERS":                     "2",
+		"THREAT_QUEUE_TIMEOUT":                     "30s",
+	} {
+		t.Setenv(k, v)
+	}
+}
+
+func TestLoadStartupConfigAcceptsAFullyValidEnvironment(t *testing.T) {
+	setValidThreatdEnv(t)
+
+	cfg, interval, limits, err := loadStartupConfig()
+	if err != nil {
+		t.Fatalf("loadStartupConfig: %v", err)
+	}
+	if interval != 5*time.Minute || cfg.Window != time.Hour || limits.QueueSize != 256 {
+		t.Fatalf("loadStartupConfig did not parse the environment: interval=%v cfg=%+v limits=%+v",
+			interval, cfg, limits)
+	}
+}
+
+// A set-but-unparseable value (a plain GetenvDuration/GetenvInt would fall
+// back to the default and start anyway) and an out-of-range one must
+// both be named in the one error loadStartupConfig returns -- not just the
+// first problem it happens to find.
+func TestLoadStartupConfigReportsParseAndRangeErrorsTogether(t *testing.T) {
+	setValidThreatdEnv(t)
+	// Go's ParseDuration has no "d" unit: the documented failure mode for
+	// THREAT_EVENT_RETENTION=30d silently becoming the 168h default.
+	t.Setenv("THREAT_EVENT_RETENTION", "30d")
+	t.Setenv("BLOCKLIST_MAX_ENTRIES", "0")
+
+	_, _, _, err := loadStartupConfig()
+	if err == nil {
+		t.Fatal("loadStartupConfig: got nil error, want one naming both problems")
+	}
+	for _, want := range []string{"THREAT_EVENT_RETENTION", "BLOCKLIST_MAX_ENTRIES"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %s", err, want)
+		}
+	}
+}

@@ -133,6 +133,78 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 	return errors.Join(errs...)
 }
 
+// loadStartupConfig reads every one of threatd's numeric and duration
+// settings with the strict svc.Getenv* variants and then range-checks the
+// result with validateConfig. A set-but-unparseable value -- e.g.
+// THREAT_EVENT_RETENTION=30d, which time.ParseDuration rejects -- is
+// collected as an error exactly like an in-range check that fails, so a
+// startup with several problems reports all of them in one error instead of
+// only the first one found or, worse, silently running on whichever
+// defaults the bad values happened to fall back to.
+func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) {
+	var errs []error
+	add := func(err error) { errs = append(errs, err) }
+
+	// Threat Shield. Every one has a default, so an existing deployment
+	// picks the pipeline up without being reconfigured.
+	consensusInterval, err := svc.GetenvDurationStrict("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
+	add(err)
+	blocklistWindow, err := svc.GetenvDurationStrict("BLOCKLIST_WINDOW", time.Hour)
+	add(err)
+	blocklistMinSystems, err := svc.GetenvIntStrict("BLOCKLIST_MIN_SYSTEMS", 3)
+	add(err)
+	blocklistTTL, err := svc.GetenvDurationStrict("BLOCKLIST_TTL", 24*time.Hour)
+	add(err)
+	blocklistMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_MAX_ENTRIES", 50000)
+	add(err)
+	threatRetention, err := svc.GetenvDurationStrict("THREAT_EVENT_RETENTION", 168*time.Hour)
+	add(err)
+	threatMaxDecisions, err := svc.GetenvIntStrict("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
+	add(err)
+	// The review queue's two bounds. A client allowlist request is a
+	// permanent row that only a human decision ever deletes, so without
+	// these the table grows for the life of the deployment and the review
+	// queue reads it. 25 distinct pending CIDRs is far more than a customer
+	// with a real exemption to ask for ever needs; 90 days is long enough
+	// that a queue nobody has looked at in a quarter is the actual problem,
+	// and a pruned ask can simply be made again.
+	allowlistMaxPerSystem, err := svc.GetenvIntStrict("THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", 25)
+	add(err)
+	allowlistRequestRetention, err := svc.GetenvDurationStrict("THREAT_ALLOWLIST_REQUEST_RETENTION", 2160*time.Hour)
+	add(err)
+
+	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
+	// plus the store's write mutex already do that -- it bounds how many
+	// decoded, sanitized reports can be waiting on that single writer at once,
+	// so a burst of reporters sheds load at the edge with a 503 instead of
+	// growing the process until it dies.
+	threatQueueSize, err := svc.GetenvIntStrict("THREAT_QUEUE_SIZE", 256)
+	add(err)
+	threatQueueWorkers, err := svc.GetenvIntStrict("THREAT_QUEUE_WORKERS", 2)
+	add(err)
+	threatQueueTimeout, err := svc.GetenvDurationStrict("THREAT_QUEUE_TIMEOUT", 30*time.Second)
+	add(err)
+
+	cfg := blocklist.Config{
+		Window:     blocklistWindow,
+		MinSystems: blocklistMinSystems,
+		TTL:        blocklistTTL,
+		MaxEntries: blocklistMaxEntries,
+		Retention:  threatRetention,
+
+		AllowlistRequestRetention: allowlistRequestRetention,
+	}
+	limits := ingestLimits{
+		QueueSize:             threatQueueSize,
+		QueueWorkers:          threatQueueWorkers,
+		QueueTimeout:          threatQueueTimeout,
+		MaxDecisions:          threatMaxDecisions,
+		MaxAllowlistPerSystem: allowlistMaxPerSystem,
+	}
+	add(validateConfig(cfg, consensusInterval, limits))
+	return cfg, consensusInterval, limits, errors.Join(errs...)
+}
+
 func main() {
 	startedAt := time.Now().UnixMilli()
 
@@ -151,51 +223,8 @@ func main() {
 	// turns it on explicitly.
 	adminAPIKey := svc.Getenv("ADMIN_API_KEY", "")
 
-	// Threat Shield. Every one has a default, so an existing deployment
-	// picks the pipeline up without being reconfigured.
-	consensusInterval := svc.GetenvDuration("BLOCKLIST_CONSENSUS_INTERVAL", 5*time.Minute)
-	blocklistWindow := svc.GetenvDuration("BLOCKLIST_WINDOW", time.Hour)
-	blocklistMinSystems := svc.GetenvInt("BLOCKLIST_MIN_SYSTEMS", 3)
-	blocklistTTL := svc.GetenvDuration("BLOCKLIST_TTL", 24*time.Hour)
-	blocklistMaxEntries := svc.GetenvInt("BLOCKLIST_MAX_ENTRIES", 50000)
-	threatRetention := svc.GetenvDuration("THREAT_EVENT_RETENTION", 168*time.Hour)
-	threatMaxDecisions := svc.GetenvInt("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
-	// The review queue's two bounds. A client allowlist request is a
-	// permanent row that only a human decision ever deletes, so without
-	// these the table grows for the life of the deployment and the review
-	// queue reads it. 25 distinct pending CIDRs is far more than a customer
-	// with a real exemption to ask for ever needs; 90 days is long enough
-	// that a queue nobody has looked at in a quarter is the actual problem,
-	// and a pruned ask can simply be made again.
-	allowlistMaxPerSystem := svc.GetenvInt("THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", 25)
-	allowlistRequestRetention := svc.GetenvDuration("THREAT_ALLOWLIST_REQUEST_RETENTION", 2160*time.Hour)
-
-	// The ingest queue. It does not make the writes serial -- SetMaxOpenConns(1)
-	// plus the store's write mutex already do that -- it bounds how many
-	// decoded, sanitized reports can be waiting on that single writer at once,
-	// so a burst of reporters sheds load at the edge with a 503 instead of
-	// growing the process until it dies.
-	threatQueueSize := svc.GetenvInt("THREAT_QUEUE_SIZE", 256)
-	threatQueueWorkers := svc.GetenvInt("THREAT_QUEUE_WORKERS", 2)
-	threatQueueTimeout := svc.GetenvDuration("THREAT_QUEUE_TIMEOUT", 30*time.Second)
-
-	consensusCfg := blocklist.Config{
-		Window:     blocklistWindow,
-		MinSystems: blocklistMinSystems,
-		TTL:        blocklistTTL,
-		MaxEntries: blocklistMaxEntries,
-		Retention:  threatRetention,
-
-		AllowlistRequestRetention: allowlistRequestRetention,
-	}
-	limits := ingestLimits{
-		QueueSize:             threatQueueSize,
-		QueueWorkers:          threatQueueWorkers,
-		QueueTimeout:          threatQueueTimeout,
-		MaxDecisions:          threatMaxDecisions,
-		MaxAllowlistPerSystem: allowlistMaxPerSystem,
-	}
-	if err := validateConfig(consensusCfg, consensusInterval, limits); err != nil {
+	consensusCfg, consensusInterval, limits, err := loadStartupConfig()
+	if err != nil {
 		slog.Error("invalid Threat Shield configuration", "error", err)
 		os.Exit(1)
 	}
@@ -247,15 +276,15 @@ func main() {
 	// or the API server exists: the queue's handler must be fixed at
 	// construction, and NewServer takes the already-built queue as a
 	// parameter, so this is the one order that works.
-	ingestQueue := ingestq.New(threatQueueSize, threatQueueTimeout, threatapi.NewConsumer(s))
+	ingestQueue := ingestq.New(limits.QueueSize, limits.QueueTimeout, threatapi.NewConsumer(s))
 	ingestQueue.Metrics = &ingestq.Metrics{Full: ingestFullMetrics.Counter("threat_events")}
-	ingestQueue.Start(threatQueueWorkers)
+	ingestQueue.Start(limits.QueueWorkers)
 	metrics.RegisterQueueGauges(reg, "threat_events", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
-		MaxDecisions:               threatMaxDecisions,
-		MaxAllowlistRequestsPerSys: allowlistMaxPerSystem,
-		MaxEventAge:                threatRetention,
+		MaxDecisions:               limits.MaxDecisions,
+		MaxAllowlistRequestsPerSys: limits.MaxAllowlistPerSystem,
+		MaxEventAge:                consensusCfg.Retention,
 		Now:                        func() int64 { return time.Now().UnixMilli() },
 	}, metrics.Handler(reg), httpMetrics)
 
@@ -278,17 +307,17 @@ func main() {
 		{Name: "TRUSTED_PROXY_CIDRS", Value: trustedProxyCIDRs},
 		{Name: "ADMIN_API_KEY", Value: svc.SecretState(adminAPIKey != "")},
 		{Name: "BLOCKLIST_CONSENSUS_INTERVAL", Value: consensusInterval.String()},
-		{Name: "BLOCKLIST_WINDOW", Value: blocklistWindow.String()},
-		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(blocklistMinSystems)},
-		{Name: "BLOCKLIST_TTL", Value: blocklistTTL.String()},
-		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(blocklistMaxEntries)},
-		{Name: "THREAT_EVENT_RETENTION", Value: threatRetention.String()},
-		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(threatMaxDecisions)},
-		{Name: "THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", Value: strconv.Itoa(allowlistMaxPerSystem)},
-		{Name: "THREAT_ALLOWLIST_REQUEST_RETENTION", Value: allowlistRequestRetention.String()},
-		{Name: "THREAT_QUEUE_SIZE", Value: strconv.Itoa(threatQueueSize)},
-		{Name: "THREAT_QUEUE_WORKERS", Value: strconv.Itoa(threatQueueWorkers)},
-		{Name: "THREAT_QUEUE_TIMEOUT", Value: threatQueueTimeout.String()},
+		{Name: "BLOCKLIST_WINDOW", Value: consensusCfg.Window.String()},
+		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(consensusCfg.MinSystems)},
+		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
+		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
+		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
+		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},
+		{Name: "THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM", Value: strconv.Itoa(limits.MaxAllowlistPerSystem)},
+		{Name: "THREAT_ALLOWLIST_REQUEST_RETENTION", Value: consensusCfg.AllowlistRequestRetention.String()},
+		{Name: "THREAT_QUEUE_SIZE", Value: strconv.Itoa(limits.QueueSize)},
+		{Name: "THREAT_QUEUE_WORKERS", Value: strconv.Itoa(limits.QueueWorkers)},
+		{Name: "THREAT_QUEUE_TIMEOUT", Value: limits.QueueTimeout.String()},
 	}
 
 	// s satisfies both threatui.Reader and threatui.Writer; the write routes
@@ -306,7 +335,7 @@ func main() {
 	// NEVER log the API key or any credential.
 	slog.Info("starting threatd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,
 		"db_path", dbPath, "log_level", logLevel, "trusted_proxy_cidrs", trustedProxyCIDRs,
-		"queue_size", threatQueueSize, "queue_workers", threatQueueWorkers)
+		"queue_size", limits.QueueSize, "queue_workers", limits.QueueWorkers)
 
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
