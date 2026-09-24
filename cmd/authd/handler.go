@@ -118,8 +118,13 @@ func validate(w http.ResponseWriter, r *http.Request, v validator, service strin
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, auth.ErrUnavailable):
 		// Fail closed, but distinctly: the edge retries a 503 and gives
-		// up on a 401.
-		slog.Warn("authd: validator unavailable", "remote_addr", r.RemoteAddr)
+		// up on a 401. err names the upstream status when there was one (or
+		// says there was none, for a transport error) and, for a redirect,
+		// its target -- never a query string or the Authorization header --
+		// so AUTH_VALIDATE_URL configured with the wrong scheme, or a
+		// trailing-slash mismatch, does not read exactly like a genuine
+		// outage. See internal/platform/auth's unavailableErr.
+		slog.Warn("authd: validator unavailable", "err", err, "remote_addr", r.RemoteAddr)
 		http.Error(w, "validator unavailable", http.StatusServiceUnavailable)
 	default:
 		slog.Error("authd: unexpected validate error", "err", err)

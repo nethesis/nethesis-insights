@@ -162,7 +162,8 @@ func (a *ForwardAuth) Validate(ctx context.Context, authHeader, service string) 
 	}
 	a.Metrics.cacheMiss()
 
-	switch a.fwd.check(ctx, a.validateURL(service), authHeader) {
+	result := a.fwd.check(ctx, a.validateURL(service), authHeader)
+	switch result.outcome {
 	case outcomeValid:
 		a.Metrics.upstream(UpstreamValid)
 		a.cache.set(key, entry{ok: true, systemID: systemID, expiresAt: a.now().Add(a.PositiveTTL)})
@@ -187,7 +188,24 @@ func (a *ForwardAuth) Validate(ctx context.Context, authHeader, service string) 
 			// Stale beats unavailable: see the cache's doc comment.
 			return outcomeFromEntry(e, systemID, service)
 		}
-		return "", fmt.Errorf("%w: system_id %q", ErrUnavailable, systemID)
+		return "", unavailableErr(systemID, result)
+	}
+}
+
+// unavailableErr names why outcomeUnavailable was scored: the upstream
+// status when there was a response, that there was none for a transport
+// error, and a 3xx's target. Without this, a validator misconfigured with
+// the wrong scheme or a trailing-slash mismatch logs identically to a
+// genuine outage, and cmd/authd's "validator unavailable" warning is the
+// only place this ever surfaces.
+func unavailableErr(systemID string, r checkResult) error {
+	switch {
+	case r.status == 0:
+		return fmt.Errorf("%w: system_id %q, no response from validator", ErrUnavailable, systemID)
+	case r.location != "":
+		return fmt.Errorf("%w: system_id %q, validator answered %d, redirected to %s", ErrUnavailable, systemID, r.status, r.location)
+	default:
+		return fmt.Errorf("%w: system_id %q, validator answered %d", ErrUnavailable, systemID, r.status)
 	}
 }
 

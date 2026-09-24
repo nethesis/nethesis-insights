@@ -1740,8 +1740,14 @@ gap, but a false `401` is a customer-visible outage), while
 verdicts; any other status is `ErrUnavailable`, and that includes a `3xx`,
 which the validator client never follows. Followed, a redirect is scored by
 whatever its target answers, and a login or maintenance page's `200` would
-validate every credential and cache it. A stale cache entry is preferred over
-`ErrUnavailable` when the validator is down and something was cached before.
+validate every credential and cache it. So `AUTH_VALIDATE_URL` configured as
+`http://` where upstream redirects to `https://`, or with a trailing-slash
+mismatch, is also a `503` — and the `authd: validator unavailable` log line
+names the upstream status (or that there was none, for a transport error)
+and, for a `3xx`, the `Location` target's scheme/host/path, so that
+misconfiguration does not read exactly like a genuine outage. A stale cache
+entry is preferred over `ErrUnavailable` when the validator is down and
+something was cached before.
 Traefik's `forwardAuth` middleware calls `GET /auth` on `authd` and passes its
 status straight back to the client on anything but `2xx`, which is what keeps
 this `401`/`403`/`503` distinction visible at the edge instead of being

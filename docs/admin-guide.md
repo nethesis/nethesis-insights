@@ -401,6 +401,13 @@ outcome. A `2xx` lets the request through unchanged, a `401` rejects it, and a
 treated as a rejected credential. That distinction matters: a node retries a
 gap, but a false `401` is a customer-visible outage.
 
+A redirect from the validator (`AUTH_VALIDATE_URL` configured as `http://`
+where upstream wants `https://`, or a trailing-slash mismatch) is also a `503`,
+never followed. If every node starts getting `503` right after a
+configuration change, read `authd`'s `validator unavailable` log line: it
+names the upstream HTTP status, or says there was no response at all, and for
+a redirect where it pointed.
+
 **Two Threat Shield routes need more than a subscription.** Every machine with
 a subscription sends data to the server; only a machine with the Threat Shield
 entitlement can download the list. So `GET /blocklist/v1/feed` and

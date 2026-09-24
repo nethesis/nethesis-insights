@@ -4,12 +4,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
@@ -87,6 +90,79 @@ func TestAuthEndpointStatuses(t *testing.T) {
 				t.Errorf("validator calls = %d, want 1", tc.v.calls)
 			}
 		})
+	}
+}
+
+// A validator that redirects (AUTH_VALIDATE_URL configured as http:// where
+// upstream wants https://, or a trailing-slash mismatch) is scored
+// outcomeUnavailable the same as a genuine network outage -- see
+// forwarder.check -- so without the upstream status in the log line the two
+// are indistinguishable. This drives the real auth.ForwardAuth (not
+// fakeValidator) against an httptest server that redirects, so the status
+// and Location actually flow end to end into the "validator unavailable"
+// warning. The query string must not appear: it routinely carries a session
+// token or similar, and CLAUDE.md's rule that a credential is never logged
+// extends to whatever the validator's response carries too.
+func TestValidatorUnavailableLogsTheUpstreamStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://user:hunter2@my.nethesis.it/auth?token=must-not-leak", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	a := auth.New(srv.URL, "test-pepper", time.Second, time.Now)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	h := newHandler(a, nil, nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
+	r.SetBasicAuth("sys-1", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "302") {
+		t.Errorf("log output = %q, want the upstream status 302", out)
+	}
+	if !strings.Contains(out, "my.nethesis.it") {
+		t.Errorf("log output = %q, want the redirect target's host", out)
+	}
+	if strings.Contains(out, "must-not-leak") || strings.Contains(out, "token=") {
+		t.Errorf("log output = %q, leaked the redirect target's query string", out)
+	}
+	if strings.Contains(out, "hunter2") || strings.Contains(out, "user:") {
+		t.Errorf("log output = %q, leaked the redirect target's userinfo", out)
+	}
+}
+
+// A transport-level failure (nothing listening) never reached the validator
+// at all, so the log line must say so distinctly rather than naming a status
+// code that was never received.
+func TestValidatorUnavailableLogsNoResponseOnATransportError(t *testing.T) {
+	a := auth.New("http://127.0.0.1:0", "test-pepper", time.Second, time.Now)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	h := newHandler(a, nil, nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
+	r.SetBasicAuth("sys-1", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if out := buf.String(); !strings.Contains(out, "no response") {
+		t.Errorf("log output = %q, want it to say no response was received", out)
 	}
 }
 
