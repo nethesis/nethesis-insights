@@ -990,7 +990,7 @@ being precise about, since the name invites confusion:
 
 - **`EWMA_ALPHA` itself must be in `(0, 1]`** — it is a blend weight, not the
   baseline. The code does not clamp or validate it (`cmd/insightsd`'s
-  `getenvFloat` accepts any parseable float), so an operator-supplied value
+  `svc.GetenvFloat` accepts any parseable float), so an operator-supplied value
   outside that range would silently produce a nonsensical baseline (e.g. a
   negative or diverging `ewma_rate`). Keep it in `(0, 1]` when configuring.
 - **`ewma_rate` (the baseline itself) is not bounded to `[0, 1]`.** It is in

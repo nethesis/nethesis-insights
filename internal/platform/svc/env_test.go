@@ -48,3 +48,18 @@ func TestGetenvDuration(t *testing.T) {
 		t.Errorf("GetenvDuration on an unparseable value = %v, want the fallback 5m", got)
 	}
 }
+
+func TestGetenvFloat(t *testing.T) {
+	t.Setenv("SVC_TEST_FLOAT", "")
+	if got := GetenvFloat("SVC_TEST_FLOAT", 1.5); got != 1.5 {
+		t.Errorf("GetenvFloat on an unset var = %v, want the fallback 1.5", got)
+	}
+	t.Setenv("SVC_TEST_FLOAT", "0.25")
+	if got := GetenvFloat("SVC_TEST_FLOAT", 1.5); got != 0.25 {
+		t.Errorf("GetenvFloat = %v, want 0.25", got)
+	}
+	t.Setenv("SVC_TEST_FLOAT", "not-a-number")
+	if got := GetenvFloat("SVC_TEST_FLOAT", 1.5); got != 1.5 {
+		t.Errorf("GetenvFloat on an unparseable value = %v, want the fallback 1.5", got)
+	}
+}

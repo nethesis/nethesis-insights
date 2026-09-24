@@ -16,7 +16,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,42 +34,6 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 	sizingui "github.com/nethesis/nethesis-insights/internal/ui/sizing"
 )
-
-// setupLogger honours LOG_LEVEL=debug|info|warn|error.
-func setupLogger(level string) {
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(level)); err != nil {
-		l = slog.LevelInfo
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
-}
-
-// isLoopbackBind reports whether addr binds a loopback address only. It is
-// deliberately strict: anything that is not a literal loopback IP -- an empty
-// host, a name, an unparseable value -- is treated as a wider bind, because
-// the failure mode of a false "yes" is a silently exposed fleet-wide page.
-func isLoopbackBind(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-// warnIfNotLoopback warns when the operator UI is bound anywhere other than a
-// loopback address. GET is unauthenticated and fleet-wide -- every cluster's
-// node pressure and published cohorts -- so a wider bind must never happen
-// silently. sizingd does not refuse it: the operator asked for the choice to
-// be theirs.
-func warnIfNotLoopback(addr string) {
-	if isLoopbackBind(addr) {
-		return
-	}
-	slog.Warn("the operator UI is unauthenticated and fleet-wide but is not bound to a loopback address; "+
-		"bind it to 127.0.0.1 or a trusted management network",
-		"ui_listen_addr", addr)
-}
 
 // newUIServer builds sizingd's operator UI listener, or nil when
 // UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly
@@ -98,7 +61,7 @@ func main() {
 	startedAt := time.Now().UnixMilli()
 
 	logLevel := svc.Getenv("LOG_LEVEL", "info")
-	setupLogger(logLevel)
+	svc.SetupLogger(logLevel)
 
 	listenAddr := svc.Getenv("LISTEN_ADDR", ":9595")
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
@@ -215,7 +178,7 @@ func main() {
 	}()
 
 	if uiServer != nil {
-		warnIfNotLoopback(uiListenAddr)
+		svc.WarnIfNotLoopback(uiListenAddr)
 		slog.Info("operator UI enabled", "ui_listen_addr", uiListenAddr)
 		go func() {
 			if err := uiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

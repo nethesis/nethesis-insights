@@ -12,7 +12,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,43 +30,19 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/maint"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
+	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 	"github.com/nethesis/nethesis-insights/internal/queue"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 	logsui "github.com/nethesis/nethesis-insights/internal/ui/logs"
 )
 
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvFloat(key string, def float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return def
-}
-
-func getenvDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
 // getenvModuleSet parses a comma-separated module list into a set. Blank
 // entries are dropped, so "crowdsec1,," is the same as "crowdsec1" and an empty
 // value disables the exclusion entirely rather than excluding the host bucket,
 // whose module id is the empty string.
 func getenvModuleSet(key, def string) map[string]bool {
-	raw := getenv(key, def)
+	raw := svc.Getenv(key, def)
 	set := map[string]bool{}
 	for _, part := range strings.Split(raw, ",") {
 		if m := strings.TrimSpace(part); m != "" {
@@ -86,62 +61,6 @@ func sortedKeys(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func getenvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-// setupLogger honours LOG_LEVEL=debug|info|warn|error. Debug adds the request,
-// gate, prompt and provider detail needed to explain a rejected or slow
-// bundle; it never adds credentials.
-func setupLogger(level string) {
-	var l slog.Level
-	if err := l.UnmarshalText([]byte(level)); err != nil {
-		l = slog.LevelInfo
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
-}
-
-// secretState reduces a secret to its mere presence. The status page and the
-// logs get this, never the value.
-func secretState(set bool) string {
-	if set {
-		return "set"
-	}
-	return "unset"
-}
-
-// isLoopbackBind reports whether addr binds a loopback address only. It is
-// deliberately strict: anything that is not a literal loopback IP -- an empty
-// host (":9596", which binds every interface), a name, an unparseable value --
-// is treated as a wider bind, because the failure mode of a false "yes" is a
-// silently exposed fleet-wide page.
-func isLoopbackBind(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-// warnIfNotLoopback warns when the operator UI is bound anywhere other than a
-// loopback address. The UI is unauthenticated and fleet-wide -- every tenant's
-// findings, templates and spend -- so a wider bind must never happen silently.
-// insightsd does not refuse it: the operator asked for the choice to be theirs.
-func warnIfNotLoopback(addr string) {
-	if isLoopbackBind(addr) {
-		return
-	}
-	slog.Warn("the operator UI is unauthenticated and fleet-wide but is not bound to a loopback address; "+
-		"bind it to 127.0.0.1 or a trusted management network",
-		"ui_listen_addr", addr)
 }
 
 // newUIServer builds the operator UI's own listener, or nil when
@@ -174,37 +93,37 @@ func newUIServer(addr, basePath string, r logsui.Reader, rt logsui.Runtime, info
 func main() {
 	startedAt := time.Now().UnixMilli()
 
-	logLevel := getenv("LOG_LEVEL", "info")
-	setupLogger(logLevel)
+	logLevel := svc.Getenv("LOG_LEVEL", "info")
+	svc.SetupLogger(logLevel)
 
-	listenAddr := getenv("LISTEN_ADDR", ":9595")
+	listenAddr := svc.Getenv("LISTEN_ADDR", ":9595")
 	// Empty by default: the operator UI is unauthenticated and fleet-wide, so
 	// enabling it is one explicit operator act, never a default.
-	uiListenAddr := getenv("UI_LISTEN_ADDR", "")
-	uiBasePath := getenv("UI_BASE_PATH", "")
-	dbPath := getenv("DB_PATH", "/var/lib/insights/insights.db")
-	trustedProxyCIDRs := getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
-	llmBaseURL := getenv("LLM_BASE_URL", "")
-	llmModel := getenv("LLM_MODEL", "")
-	llmAPIKey := getenv("LLM_API_KEY", "")
-	gateTolerance := getenvFloat("GATE_TOLERANCE", 3.0)
+	uiListenAddr := svc.Getenv("UI_LISTEN_ADDR", "")
+	uiBasePath := svc.Getenv("UI_BASE_PATH", "")
+	dbPath := svc.Getenv("DB_PATH", "/var/lib/insights/insights.db")
+	trustedProxyCIDRs := svc.Getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
+	llmBaseURL := svc.Getenv("LLM_BASE_URL", "")
+	llmModel := svc.Getenv("LLM_MODEL", "")
+	llmAPIKey := svc.Getenv("LLM_API_KEY", "")
+	gateTolerance := svc.GetenvFloat("GATE_TOLERANCE", 3.0)
 	// Absolute floors under the deviation condition. A ratio is not evidence
 	// when the denominator is 2: the dev fleet's median bucket baseline was
 	// 3.1 lines per window, and the buckets that fired most often were the
 	// smallest ones in it.
-	gateMinExpected := getenvFloat("GATE_MIN_EXPECTED", 10)
-	gateMinObserved := getenvFloat("GATE_MIN_OBSERVED", 20)
+	gateMinExpected := svc.GetenvFloat("GATE_MIN_EXPECTED", 10)
+	gateMinObserved := svc.GetenvFloat("GATE_MIN_OBSERVED", 20)
 	// How many novel templates a window needs before novelty alone pays for a
 	// call. A new security template still fires on its own.
-	gateMinNewTemplates := getenvInt("GATE_MIN_NEW_TEMPLATES", 3)
+	gateMinNewTemplates := svc.GetenvInt("GATE_MIN_NEW_TEMPLATES", 3)
 	// How many templates that are neither novel, security-classified nor in a
 	// deviating module the prompt carries as context.
-	promptMaxAmbient := getenvInt("PROMPT_MAX_AMBIENT", 60)
+	promptMaxAmbient := svc.GetenvInt("PROMPT_MAX_AMBIENT", 60)
 	// The ceiling under LLM spend (internal/budget). The per-system cap is
 	// what makes the fleet's worst case arithmetic rather than emergent.
-	llmMaxConcurrency := getenvInt("LLM_MAX_CONCURRENCY", 4)
-	llmMaxCallsPerSystemPerDay := getenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 100)
-	llmDailySpendCapUSD := getenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
+	llmMaxConcurrency := svc.GetenvInt("LLM_MAX_CONCURRENCY", 4)
+	llmMaxCallsPerSystemPerDay := svc.GetenvInt("LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", 100)
+	llmDailySpendCapUSD := svc.GetenvFloat("LLM_DAILY_SPEND_CAP_USD", 0)
 	// CrowdSec has its own pipeline (threatd's /v1/events -> blocklist), so its
 	// log lines must not also be sent to the LLM.
 	excludeModules := getenvModuleSet("PIPELINE_EXCLUDE_MODULES", "crowdsec")
@@ -225,14 +144,14 @@ func main() {
 	// Prometheus and node-exporter. The service axis is not host-only -- the
 	// tag is read off any masked record, whatever its module.
 	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights,alert-proxy")
-	staleAfter := getenvDuration("STALE_AFTER", 24*time.Hour)
-	ewmaAlpha := getenvFloat("EWMA_ALPHA", 0.3)
-	priceInput := getenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
-	priceOutput := getenvFloat("LLM_PRICE_OUTPUT_PER_MTOK", 0)
-	llmTimeout := getenvDuration("LLM_TIMEOUT", 120*time.Second)
-	queueSize := getenvInt("QUEUE_SIZE", 256)
-	queueWorkers := getenvInt("QUEUE_WORKERS", 2)
-	analysisTimeout := getenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
+	staleAfter := svc.GetenvDuration("STALE_AFTER", 24*time.Hour)
+	ewmaAlpha := svc.GetenvFloat("EWMA_ALPHA", 0.3)
+	priceInput := svc.GetenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
+	priceOutput := svc.GetenvFloat("LLM_PRICE_OUTPUT_PER_MTOK", 0)
+	llmTimeout := svc.GetenvDuration("LLM_TIMEOUT", 120*time.Second)
+	queueSize := svc.GetenvInt("QUEUE_SIZE", 256)
+	queueWorkers := svc.GetenvInt("QUEUE_WORKERS", 2)
+	analysisTimeout := svc.GetenvDuration("ANALYSIS_TIMEOUT", 5*time.Minute)
 
 	// Housekeeping (internal/maint). insightsd has never pruned anything
 	// before this, so these three retention windows are each a deliberate
@@ -246,12 +165,12 @@ func main() {
 	// occurrences of a real recurring line -- a monthly cron, a quarterly
 	// certificate renewal, even a yearly one. 400 days clears a full year
 	// with margin.
-	templateRetention := getenvDuration("TEMPLATE_RETENTION", 400*24*time.Hour)
+	templateRetention := svc.GetenvDuration("TEMPLATE_RETENTION", 400*24*time.Hour)
 	// FINDING_RETENTION only costs continuity -- a recurrence past this
 	// window reads as a brand-new finding (OutcomeInserted) rather than a
 	// reopen, resetting occurrence_count and first_seen -- never an extra
 	// LLM call, so it can be shorter than TEMPLATE_RETENTION. 180 days.
-	findingRetention := getenvDuration("FINDING_RETENTION", 180*24*time.Hour)
+	findingRetention := svc.GetenvDuration("FINDING_RETENTION", 180*24*time.Hour)
 	// ANALYSIS_RETENTION prunes the cost/gate-reason ledger. There is no
 	// rollup table for this pipeline (unlike sizingd's
 	// sizing_node_monthly), so every row pruned here is gone for
@@ -260,7 +179,7 @@ func main() {
 	// both silently lose history older than this. 90 days keeps a quarter
 	// of spend trend, which is this table's biggest and fastest-growing --
 	// one row per system per 15-minute window, gated or not.
-	analysisRetention := getenvDuration("ANALYSIS_RETENTION", 90*24*time.Hour)
+	analysisRetention := svc.GetenvDuration("ANALYSIS_RETENTION", 90*24*time.Hour)
 	// MAINT_INTERVAL is how often the prune pass runs. Each prune call is
 	// itself internally batched (logsstore.pruneBatchSize) and releases the
 	// write lock between batches, so running this often is cheap; a short
@@ -268,7 +187,7 @@ func main() {
 	// (see logsstore.pruneBatchSize's doc) without waiting a full day
 	// between passes, unlike sizingd's hourly cohort pass whose inputs are
 	// whole days and cannot answer differently more often.
-	maintInterval := getenvDuration("MAINT_INTERVAL", 10*time.Minute)
+	maintInterval := svc.GetenvDuration("MAINT_INTERVAL", 10*time.Minute)
 
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
@@ -384,7 +303,7 @@ func main() {
 		{Name: "TRUSTED_PROXY_CIDRS", Value: trustedProxyCIDRs},
 		{Name: "LLM_BASE_URL", Value: llmBaseURL},
 		{Name: "LLM_MODEL", Value: llmModel},
-		{Name: "LLM_API_KEY", Value: secretState(llmAPIKey != "")},
+		{Name: "LLM_API_KEY", Value: svc.SecretState(llmAPIKey != "")},
 		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
 		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
 		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
@@ -450,7 +369,7 @@ func main() {
 	}()
 
 	if uiServer != nil {
-		warnIfNotLoopback(uiListenAddr)
+		svc.WarnIfNotLoopback(uiListenAddr)
 		slog.Info("operator UI enabled", "ui_listen_addr", uiListenAddr)
 		go func() {
 			if err := uiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

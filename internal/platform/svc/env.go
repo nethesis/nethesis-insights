@@ -45,3 +45,14 @@ func GetenvInt(key string, def int) int {
 	}
 	return def
 }
+
+// GetenvFloat reads key as a float64, falling back to def when the variable
+// is unset or fails to parse.
+func GetenvFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}

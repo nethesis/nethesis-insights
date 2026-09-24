@@ -5,58 +5,8 @@ package main
 
 import (
 	"encoding/hex"
-	"os"
 	"testing"
-	"time"
 )
-
-func TestGetenvFallsBackToDefaultWhenUnset(t *testing.T) {
-	_ = os.Unsetenv("AUTHD_TEST_GETENV_UNSET")
-	if got := getenv("AUTHD_TEST_GETENV_UNSET", "fallback"); got != "fallback" {
-		t.Errorf("getenv = %q, want %q", got, "fallback")
-	}
-}
-
-func TestGetenvPrefersTheEnvironment(t *testing.T) {
-	t.Setenv("AUTHD_TEST_GETENV_SET", "configured")
-	if got := getenv("AUTHD_TEST_GETENV_SET", "fallback"); got != "configured" {
-		t.Errorf("getenv = %q, want %q", got, "configured")
-	}
-}
-
-func TestGetenvIntFallsBackOnUnsetOrUnparseable(t *testing.T) {
-	_ = os.Unsetenv("AUTHD_TEST_GETENVINT")
-	if got := getenvInt("AUTHD_TEST_GETENVINT", 7); got != 7 {
-		t.Errorf("getenvInt(unset) = %d, want fallback 7", got)
-	}
-
-	t.Setenv("AUTHD_TEST_GETENVINT", "not-a-number")
-	if got := getenvInt("AUTHD_TEST_GETENVINT", 7); got != 7 {
-		t.Errorf("getenvInt(garbage) = %d, want fallback 7", got)
-	}
-
-	t.Setenv("AUTHD_TEST_GETENVINT", "42")
-	if got := getenvInt("AUTHD_TEST_GETENVINT", 7); got != 42 {
-		t.Errorf("getenvInt = %d, want 42", got)
-	}
-}
-
-func TestGetenvDurationFallsBackOnUnsetOrUnparseable(t *testing.T) {
-	_ = os.Unsetenv("AUTHD_TEST_GETENVDUR")
-	if got := getenvDuration("AUTHD_TEST_GETENVDUR", 3*time.Second); got != 3*time.Second {
-		t.Errorf("getenvDuration(unset) = %v, want fallback 3s", got)
-	}
-
-	t.Setenv("AUTHD_TEST_GETENVDUR", "not-a-duration")
-	if got := getenvDuration("AUTHD_TEST_GETENVDUR", 3*time.Second); got != 3*time.Second {
-		t.Errorf("getenvDuration(garbage) = %v, want fallback 3s", got)
-	}
-
-	t.Setenv("AUTHD_TEST_GETENVDUR", "9s")
-	if got := getenvDuration("AUTHD_TEST_GETENVDUR", 3*time.Second); got != 9*time.Second {
-		t.Errorf("getenvDuration = %v, want 9s", got)
-	}
-}
 
 // randomPepper is what resolvePepper falls back to when AUTH_PEPPER is
 // unset, instead of defaulting to an empty (and therefore offline-computable)
