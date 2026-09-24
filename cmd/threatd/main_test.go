@@ -35,42 +35,70 @@ func validConsensus() blocklist.Config {
 	}
 }
 
+// validLimits mirrors validConsensus: the defaults every ingestLimits field
+// must start from so a case below breaks exactly the one rule it names.
+func validLimits() ingestLimits {
+	return ingestLimits{
+		QueueSize:             256,
+		QueueWorkers:          2,
+		QueueTimeout:          30 * time.Second,
+		MaxDecisions:          500,
+		MaxAllowlistPerSystem: 25,
+	}
+}
+
 // The defaults must start. Every case below breaks exactly one rule on top
 // of them, so a failure names the rule that broke rather than any other.
-func TestValidateConsensusAcceptsTheDefaults(t *testing.T) {
-	if err := validateConsensus(validConsensus(), 5*time.Minute); err != nil {
+func TestValidateConfigAcceptsTheDefaults(t *testing.T) {
+	if err := validateConfig(validConsensus(), 5*time.Minute, validLimits()); err != nil {
 		t.Fatalf("defaults refused: %v", err)
 	}
 }
 
-func TestValidateConsensusRefusesEachBadValue(t *testing.T) {
+func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 	cases := []struct {
-		name     string
-		mutate   func(*blocklist.Config)
-		interval time.Duration
-		wantVar  string
+		name      string
+		mutateCfg func(*blocklist.Config)
+		mutateLim func(*ingestLimits)
+		interval  time.Duration
+		wantVar   string
 	}{
 		// BLOCKLIST_MIN_SYSTEMS=1 lets any single subscriber publish any
 		// address fleet-wide; 2 is still below the documented rule.
-		{"one system", func(c *blocklist.Config) { c.MinSystems = 1 }, time.Minute, "BLOCKLIST_MIN_SYSTEMS"},
-		{"two systems", func(c *blocklist.Config) { c.MinSystems = 2 }, time.Minute, "BLOCKLIST_MIN_SYSTEMS"},
+		{name: "one system", mutateCfg: func(c *blocklist.Config) { c.MinSystems = 1 }, interval: time.Minute, wantVar: "BLOCKLIST_MIN_SYSTEMS"},
+		{name: "two systems", mutateCfg: func(c *blocklist.Config) { c.MinSystems = 2 }, interval: time.Minute, wantVar: "BLOCKLIST_MIN_SYSTEMS"},
 		// time.NewTicker panics on a non-positive interval.
-		{"zero interval", func(*blocklist.Config) {}, 0, "BLOCKLIST_CONSENSUS_INTERVAL"},
-		{"negative interval", func(*blocklist.Config) {}, -time.Minute, "BLOCKLIST_CONSENSUS_INTERVAL"},
-		{"zero window", func(c *blocklist.Config) { c.Window = 0 }, time.Minute, "BLOCKLIST_WINDOW"},
+		{name: "zero interval", interval: 0, wantVar: "BLOCKLIST_CONSENSUS_INTERVAL"},
+		{name: "negative interval", interval: -time.Minute, wantVar: "BLOCKLIST_CONSENSUS_INTERVAL"},
+		{name: "zero window", mutateCfg: func(c *blocklist.Config) { c.Window = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_WINDOW"},
 		// promote would write an expires_at already in the past, and the
 		// same pass's ExpireBlocklist would delete it.
-		{"ttl below window", func(c *blocklist.Config) { c.TTL = 30 * time.Minute }, time.Minute, "BLOCKLIST_TTL"},
-		{"zero max entries", func(c *blocklist.Config) { c.MaxEntries = 0 }, time.Minute, "BLOCKLIST_MAX_ENTRIES"},
+		{name: "ttl below window", mutateCfg: func(c *blocklist.Config) { c.TTL = 30 * time.Minute }, interval: time.Minute, wantVar: "BLOCKLIST_TTL"},
+		{name: "zero max entries", mutateCfg: func(c *blocklist.Config) { c.MaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_MAX_ENTRIES"},
 		// Events pruned before the window closes are never counted.
-		{"retention below window", func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, time.Minute, "THREAT_EVENT_RETENTION"},
-		{"zero request retention", func(c *blocklist.Config) { c.AllowlistRequestRetention = 0 }, time.Minute, "THREAT_ALLOWLIST_REQUEST_RETENTION"},
+		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},
+		{name: "zero request retention", mutateCfg: func(c *blocklist.Config) { c.AllowlistRequestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_ALLOWLIST_REQUEST_RETENTION"},
+		// An unbounded queue timeout, size or workers count, or an
+		// unbounded per-request cap, each silently loses data one way or
+		// another -- see the doc comment on ingestLimits.
+		{name: "zero queue size", mutateLim: func(l *ingestLimits) { l.QueueSize = 0 }, interval: time.Minute, wantVar: "THREAT_QUEUE_SIZE"},
+		{name: "zero queue workers", mutateLim: func(l *ingestLimits) { l.QueueWorkers = 0 }, interval: time.Minute, wantVar: "THREAT_QUEUE_WORKERS"},
+		{name: "zero queue timeout", mutateLim: func(l *ingestLimits) { l.QueueTimeout = 0 }, interval: time.Minute, wantVar: "THREAT_QUEUE_TIMEOUT"},
+		{name: "negative queue timeout", mutateLim: func(l *ingestLimits) { l.QueueTimeout = -time.Second }, interval: time.Minute, wantVar: "THREAT_QUEUE_TIMEOUT"},
+		{name: "zero max decisions", mutateLim: func(l *ingestLimits) { l.MaxDecisions = 0 }, interval: time.Minute, wantVar: "THREAT_MAX_DECISIONS_PER_REQUEST"},
+		{name: "zero max allowlist requests per system", mutateLim: func(l *ingestLimits) { l.MaxAllowlistPerSystem = 0 }, interval: time.Minute, wantVar: "THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validConsensus()
-			tc.mutate(&cfg)
-			err := validateConsensus(cfg, tc.interval)
+			if tc.mutateCfg != nil {
+				tc.mutateCfg(&cfg)
+			}
+			lim := validLimits()
+			if tc.mutateLim != nil {
+				tc.mutateLim(&lim)
+			}
+			err := validateConfig(cfg, tc.interval, lim)
 			if err == nil {
 				t.Fatalf("accepted; want an error naming %s", tc.wantVar)
 			}

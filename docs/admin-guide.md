@@ -363,12 +363,12 @@ the stated limits stops it with an error naming the variable, visible in
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
-| `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`) |
-| `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` | distinct pending CIDRs one system may hold in the allowlist review queue (default `25`). Over-cap asks are **refused** with `429`, not truncated — a request is a permanent row only a human decision deletes. Re-asking about a CIDR the system already raised is always accepted, since it adds no row |
+| `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
+| `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` | distinct pending CIDRs one system may hold in the allowlist review queue (default `25`). Over-cap asks are **refused** with `429`, not truncated — a request is a permanent row only a human decision deletes. Re-asking about a CIDR the system already raised is always accepted, since it adds no row. Must be positive, or the cap is silently off |
 | `THREAT_ALLOWLIST_REQUEST_RETENTION` | how long an unreviewed client allowlist request is kept (default `2160h`, 90 days). Pruned as a step in the consensus pass; a dropped ask can simply be made again, which also re-ranks it as current evidence. The audit trail is never pruned. Must be positive |
-| `THREAT_QUEUE_SIZE` | sanitized reports buffered before ingest answers 503 (default `256`) |
-| `THREAT_QUEUE_WORKERS` | concurrent store writes (default `2`) |
-| `THREAT_QUEUE_TIMEOUT` | ceiling for one report's write (default `30s`) |
+| `THREAT_QUEUE_SIZE` | sanitized reports buffered before ingest answers 503 (default `256`). Must be positive |
+| `THREAT_QUEUE_WORKERS` | concurrent store writes (default `2`). Must be positive |
+| `THREAT_QUEUE_TIMEOUT` | ceiling for one report's write (default `30s`). Must be positive, or every queued write fails immediately after the reporter has already been told `202` |
 
 ### `sizingd`
 

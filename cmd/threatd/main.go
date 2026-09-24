@@ -58,10 +58,25 @@ func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w
 	}
 }
 
-// validateConsensus refuses a consensus configuration threatd must not run
+// ingestLimits is every threatd setting outside blocklist.Config that must
+// also be positive to start safely: the ingest queue's bounds and the two
+// per-request caps. Grouped only so validateConfig takes one extra parameter
+// instead of five.
+type ingestLimits struct {
+	QueueSize             int
+	QueueWorkers          int
+	QueueTimeout          time.Duration
+	MaxDecisions          int
+	MaxAllowlistPerSystem int
+}
+
+// validateConfig refuses a Threat Shield configuration threatd must not run
 // with. Every problem is reported at once, each naming its variable, so the
-// line in systemctl status says what to fix.
-func validateConsensus(cfg blocklist.Config, interval time.Duration) error {
+// line in systemctl status says what to fix. It no longer covers only the
+// consensus pass: the ingest queue and the two per-request caps have no
+// floor of their own, and a zero or negative value there loses data as
+// silently as a bad consensus setting does.
+func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestLimits) error {
 	var errs []error
 	if interval <= 0 {
 		// time.NewTicker panics on it: a crash loop under Restart=always.
@@ -87,6 +102,26 @@ func validateConsensus(cfg blocklist.Config, interval time.Duration) error {
 	}
 	if cfg.AllowlistRequestRetention <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_ALLOWLIST_REQUEST_RETENTION must be positive, got %s", cfg.AllowlistRequestRetention))
+	}
+	if limits.QueueSize <= 0 {
+		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
+	}
+	if limits.QueueWorkers <= 0 {
+		errs = append(errs, fmt.Errorf("THREAT_QUEUE_WORKERS must be positive, got %d", limits.QueueWorkers))
+	}
+	if limits.QueueTimeout <= 0 {
+		// ingestq.process calls context.WithTimeout(bg, limits.QueueTimeout):
+		// zero or negative makes every queued write fail immediately, after
+		// the reporter has already been told 202.
+		errs = append(errs, fmt.Errorf("THREAT_QUEUE_TIMEOUT must be positive, got %s", limits.QueueTimeout))
+	}
+	if limits.MaxDecisions <= 0 {
+		errs = append(errs, fmt.Errorf("THREAT_MAX_DECISIONS_PER_REQUEST must be positive, got %d", limits.MaxDecisions))
+	}
+	if limits.MaxAllowlistPerSystem <= 0 {
+		// Silently disables the per-system review-queue cap rather than
+		// refusing requests past it.
+		errs = append(errs, fmt.Errorf("THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM must be positive, got %d", limits.MaxAllowlistPerSystem))
 	}
 	return errors.Join(errs...)
 }
@@ -146,7 +181,14 @@ func main() {
 
 		AllowlistRequestRetention: allowlistRequestRetention,
 	}
-	if err := validateConsensus(consensusCfg, consensusInterval); err != nil {
+	limits := ingestLimits{
+		QueueSize:             threatQueueSize,
+		QueueWorkers:          threatQueueWorkers,
+		QueueTimeout:          threatQueueTimeout,
+		MaxDecisions:          threatMaxDecisions,
+		MaxAllowlistPerSystem: allowlistMaxPerSystem,
+	}
+	if err := validateConfig(consensusCfg, consensusInterval, limits); err != nil {
 		slog.Error("invalid Threat Shield configuration", "error", err)
 		os.Exit(1)
 	}
