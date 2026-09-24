@@ -335,19 +335,25 @@ func cleanScenario(s string) string {
 	return CleanText(s, MaxScenarioLen)
 }
 
-// CleanText strips control characters and truncates by rune to at most max
-// runes. It is the one sanitizer for every piece of free text that reaches
-// this server from outside and ends up in a rendered page, a log line or a
-// database column: CrowdSec scenarios, allowlist request/entry reasons,
+// CleanText strips control and format characters and truncates by rune to at
+// most max runes. It is the one sanitizer for every piece of free text that
+// reaches this server from outside and ends up in a rendered page, a log line
+// or a database column: CrowdSec scenarios, allowlist request/entry reasons,
 // admin actors. Truncating by rune rather than by byte is what keeps a
 // multi-byte name from being cut in half.
+//
+// Format characters (Unicode category Cf) go too: they render as nothing or
+// reorder what follows, so a bidi override makes a reason display reversed to
+// the admin deciding on it and a zero-width space makes two identical-looking
+// scenarios distinct. These fields are machine names and short notes, where
+// such characters have no legitimate use.
 //
 // This never rejects -- fail-open on content is the rule for text fields
 // throughout this pipeline (see Sanitize's doc comment) -- so a caller that
 // needs to reject unprintable input must check before calling this.
 func CleanText(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
-		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

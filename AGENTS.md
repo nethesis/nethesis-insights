@@ -75,7 +75,7 @@ Threat Shield rules that are as load-bearing as the gate's:
   category map and no known-scenario list; the design's D3 category set was removed
   during implementation. The hub grows continuously and nodes run third-party and local
   collections, so a fixed set silently discards real evidence until someone notices.
-  The scenario is trimmed, stripped of control characters and capped at
+  The scenario is trimmed, stripped of control and format characters and capped at
   `threat.MaxScenarioLen`, then stored verbatim and used as the grouping key.
 - **Distinct systems, not row count.** Promotion counts `COUNT(DISTINCT system_id)`;
   candidates are therefore grouped down to `system_id` in SQL and folded in Go, because

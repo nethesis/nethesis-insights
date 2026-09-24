@@ -1128,7 +1128,8 @@ and "silently discards evidence" is the failure this pipeline exists to avoid.
 Consequences worth knowing:
 
 - The scenario is free text from the edge. It is trimmed, stripped of control
-  characters and capped at `threat.MaxScenarioLen` before storage, because it
+  and format (Unicode `Cf`) characters and capped at `threat.MaxScenarioLen`
+  before storage, because it
   reaches an HTML page and a log line. It is never judged on content.
 - It is part of the `threat_events` unique key and of the consensus grouping,
   so two nodes reporting one address under different scenarios are still two
@@ -1412,8 +1413,10 @@ Three rules do the work:
   never vocabulary, and truncate rather than reject.
 
 Free text that does survive — the scenario name, an allowlist reason —
-goes through `threat.CleanText`, which strips control characters and caps the
-length, because it reaches an HTML page and a log line.
+goes through `threat.CleanText`, which strips control and format (`Cf`)
+characters and caps the length, because it reaches an HTML page and a log line
+— a bidi override would otherwise display a reason reversed to the admin
+deciding on it.
 
 **Secrets live in the environment and nowhere else.** `LLM_API_KEY`,
 `AUTH_PEPPER` and `ADMIN_API_KEY` are never written to a database and never

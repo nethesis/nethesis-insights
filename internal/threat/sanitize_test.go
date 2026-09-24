@@ -357,6 +357,26 @@ func TestSanitizeBoundsAndDefangsTheScenario(t *testing.T) {
 	})
 }
 
+// Format characters render as nothing or reorder what follows: a reason
+// carrying U+202E displays reversed to the admin deciding the request, and a
+// zero-width space makes two identical-looking scenarios distinct. CleanText
+// strips every one of them, not only the controls. Printable non-ASCII text
+// is kept.
+func TestCleanTextStripsFormatCharacters(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"partner\u202e rennacs", "partner rennacs"},                       // right-to-left override
+		{"\u2066isolated\u2069 text", "isolated text"},                     // bidi isolates
+		{"ssh\u200b-bf", "ssh-bf"},                                         // zero-width space
+		{"\ufeffcrowdsecurity/http-probing", "crowdsecurity/http-probing"}, // BOM
+		{"soft\u00adhyphen", "softhyphen"},
+		{"Müller's scanner — ok", "Müller's scanner — ok"},
+	} {
+		if got := CleanText(tc.in, 128); got != tc.want {
+			t.Fatalf("CleanText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSanitizeDropsUnparseableTimestamps(t *testing.T) {
 	for _, ts := range []string{"", "yesterday", "2026-08-28 09:59:00"} {
 		d := goodDecision()

@@ -247,7 +247,7 @@ exactly the same rules as `workload`. The server sums them across domains
 
 The only free-text fields in the entire payload are `cpu_model`, `os_id`,
 `os_version`, `kernel_release`, `virtualization` and `versions[]`. Each is
-trimmed, stripped of control characters and length-capped on arrival.
+trimmed, stripped of control and invisible formatting characters and length-capped on arrival.
 
 **Never send** `node_uname_info{nodename}`, `ns8_node_info{fqdn}`,
 `ns8_node_main_ip_address{address}`, a DMI `serial` or a `board_asset_tag`. They
