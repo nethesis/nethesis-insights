@@ -91,14 +91,44 @@ Threat Shield, with a fast consensus pass:
     UI_LISTEN_ADDR=127.0.0.1:9606 DB_PATH=/tmp/threat.db go run ./cmd/threatd
 
 The promotion rule cannot be relaxed: `threatd` refuses to start with
-`BLOCKLIST_MIN_SYSTEMS` below 3. To see an address promoted, post the same
-report ([format](docs/api/threat-events-ingest.md)) as three systems —
-standalone, the Basic username is the system:
+`BLOCKLIST_MIN_SYSTEMS` below 3. To see an address promoted, post a report
+([format](docs/api/threat-events-ingest.md)) as three systems — standalone,
+the Basic username is the system. Leave `system_id` out of the body (the
+credential already identifies the reporter) and set `created_at` to now:
+`BLOCKLIST_WINDOW` is only 1h, so the ingest doc's own fixed example date is
+too old and would be dropped as `dropped_time`.
+
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    payload=$(cat <<EOF
+    {
+      "schema_version": 1,
+      "decisions": [
+        {
+          "value": "203.0.113.7",
+          "scope": "Ip",
+          "type": "ban",
+          "scenario": "crowdsecurity/ssh-bf",
+          "origin": "crowdsec",
+          "duration": "3h59m59s",
+          "created_at": "$now"
+        }
+      ]
+    }
+    EOF
+    )
 
     for s in sys-a sys-b sys-c; do
       curl -u $s:x -X POST -H 'Content-Type: application/json' \
-        --data @events.json localhost:9595/v1/events
+        --data "$payload" 127.0.0.1:9595/v1/events
     done
+
+After the next consensus pass (10s here), the address is on the feed:
+
+    curl -u sys-a:x 127.0.0.1:9595/v1/feed
+
+`127.0.0.1`, not `localhost`: where `localhost` resolves to `::1` first, the
+request arrives from outside the default `TRUSTED_PROXY_CIDRS` and is
+refused.
 
 ### The edge collector, without installing the module
 
