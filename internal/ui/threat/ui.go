@@ -83,6 +83,7 @@ type Feed interface {
 	Entries() int
 	GeneratedAt() int64
 	ETag() string
+	Capped() bool
 }
 
 // Runtime reports the live state of threatd's ingest queue.
@@ -291,6 +292,7 @@ type feedState struct {
 	Entries     int
 	GeneratedAt int64
 	ETag        string
+	Capped      bool
 }
 
 func (s *server) feedState() feedState {
@@ -303,6 +305,7 @@ func (s *server) feedState() feedState {
 		Entries:     s.feed.Entries(),
 		GeneratedAt: s.feed.GeneratedAt(),
 		ETag:        s.feed.ETag(),
+		Capped:      s.feed.Capped(),
 	}
 }
 

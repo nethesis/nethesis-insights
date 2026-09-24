@@ -48,15 +48,16 @@ type Snapshot struct {
 	etag        string
 	generatedAt int64
 	entries     int
+	capped      bool
 	ready       bool
 }
 
 func NewSnapshot() *Snapshot { return &Snapshot{} }
 
-// Generate renders rows into a new snapshot and swaps it in. rows beyond
-// maxEntries are dropped: a feed that outgrows its consumers' memory is worse
-// than a truncated one, and the cap is deterministic because the order is.
-func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, maxEntries int, now int64) error {
+// Generate renders rows into a new snapshot and swaps it in. Every row is
+// published: BLOCKLIST_MAX_ENTRIES is applied when the rows are chosen (see
+// Runner.Run), and capped records whether that choice left any out.
+func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, capped bool, now int64) error {
 	addrs := make([]netip.Addr, 0, len(rows))
 	for _, r := range rows {
 		a, err := netip.ParseAddr(r.AttackerIP)
@@ -70,9 +71,6 @@ func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, maxEntri
 	}
 	// Deterministic, and sane to read: v4 before v6, numeric within a family.
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
-	if maxEntries > 0 && len(addrs) > maxEntries {
-		addrs = addrs[:maxEntries]
-	}
 
 	var buf bytes.Buffer
 	buf.WriteString("# nethesis threat shield v1\n")
@@ -120,6 +118,7 @@ func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, maxEntri
 	s.etag = etag
 	s.generatedAt = now
 	s.entries = len(addrs)
+	s.capped = capped
 	s.ready = true
 	return nil
 }
@@ -162,4 +161,12 @@ func (s *Snapshot) Entries() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.entries
+}
+
+// Capped reports whether the last generation left live entries out because
+// of BLOCKLIST_MAX_ENTRIES.
+func (s *Snapshot) Capped() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.capped
 }

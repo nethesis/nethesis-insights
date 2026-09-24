@@ -132,11 +132,25 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		}
 	}
 
-	live, err := r.store.ListBlocklist(ctx, now, r.cfg.MaxEntries)
+	// One row past the cap is asked for only to learn whether the cap binds.
+	// The store orders most recently seen first, so what is cut is what the
+	// fleet saw longest ago: a feed that outgrows its consumers' memory is
+	// worse than a truncated one, but the truncation must be visible.
+	limit := 0
+	if r.cfg.MaxEntries > 0 {
+		limit = r.cfg.MaxEntries + 1
+	}
+	live, err := r.store.ListBlocklist(ctx, now, limit)
 	if err != nil {
 		return fmt.Errorf("blocklist: list: %w", err)
 	}
-	if err := r.snap.Generate(live, r.cfg.rule(), r.cfg.MaxEntries, now); err != nil {
+	capped := r.cfg.MaxEntries > 0 && len(live) > r.cfg.MaxEntries
+	if capped {
+		live = live[:r.cfg.MaxEntries]
+		slog.Warn("blocklist: feed capped at BLOCKLIST_MAX_ENTRIES; the least recently seen addresses are left out",
+			"max_entries", r.cfg.MaxEntries)
+	}
+	if err := r.snap.Generate(live, r.cfg.rule(), capped, now); err != nil {
 		return err
 	}
 

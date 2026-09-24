@@ -257,7 +257,8 @@ Vary: Accept-Encoding
   regeneration cadence this is the normal answer to most polls.
 - `Accept-Encoding: gzip` returns a gzip body with `Content-Encoding: gzip`.
 - Order is deterministic: IPv4 before IPv6, numeric within each family.
-- The list is capped at `BLOCKLIST_MAX_ENTRIES` (50 000 by default).
+- The list is capped at `BLOCKLIST_MAX_ENTRIES` (50 000 by default). When the
+  cap binds, the addresses the fleet saw least recently are the ones left out.
 - `503` means no consensus pass has succeeded yet. It never means "empty".
 - `403` means this system is a subscriber without the Threat Shield
   entitlement. Unlike `503` it will not clear on its own.

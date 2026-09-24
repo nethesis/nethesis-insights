@@ -589,7 +589,14 @@ load-bearing:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent, and the audit
    trail is never pruned.
-9. The snapshot is regenerated from the live entries.
+9. The snapshot is regenerated from the live entries. `ListBlocklist` returns
+   them most recently seen first and is asked for one row past
+   `BLOCKLIST_MAX_ENTRIES`, only to learn whether the cap binds; when it does,
+   the addresses seen longest ago are cut, a warning is logged and the
+   snapshot is marked capped, which both dashboard pages that show the feed
+   report. An active attacker matters more than one the fleet last saw hours
+   ago. `limit <= 0` is uncapped: the UI listings' 200-row default used to
+   apply here and silently capped the feed.
 
 An error in steps 1–6 or 9 aborts the pass and returns; both prunes are
 logged and skipped instead, because housekeeping must not stop the feed

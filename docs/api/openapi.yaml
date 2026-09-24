@@ -424,7 +424,8 @@ paths:
 
         Order is deterministic: IPv4 before IPv6, numeric within each
         family. The list is capped at `BLOCKLIST_MAX_ENTRIES` (default
-        50000).
+        50000); when the cap binds, the addresses seen least recently are
+        the ones left out.
 
         **Requires the Threat Shield entitlement**, not merely a
         subscription: every subscriber reports ban decisions through

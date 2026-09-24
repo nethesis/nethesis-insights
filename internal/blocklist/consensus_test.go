@@ -403,6 +403,56 @@ func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	}
 }
 
+// When more addresses are live than BLOCKLIST_MAX_ENTRIES, the feed keeps
+// the most recently seen: an attacker still active matters more than one the
+// fleet last saw hours ago. The snapshot says it was capped.
+func TestTheFeedCapKeepsTheMostRecentlySeen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertBlocklistEntries(ctx, []threatstore.BlocklistRow{
+		{AttackerIP: "203.0.113.1", FirstListedAt: now - 20*hour, LastSeenAt: now - 10*hour, ExpiresAt: now + hour, DistinctSystems: 9},
+		{AttackerIP: "203.0.113.2", FirstListedAt: now - 20*hour, LastSeenAt: now - 2*hour, ExpiresAt: now + hour, DistinctSystems: 3},
+		{AttackerIP: "203.0.113.3", FirstListedAt: now - hour, LastSeenAt: now - minute, ExpiresAt: now + hour, DistinctSystems: 3},
+	}); err != nil {
+		t.Fatalf("UpsertBlocklistEntries: %v", err)
+	}
+	cfg := testConfig()
+	cfg.MaxEntries = 2
+
+	_, snap := runPass(t, s, cfg)
+
+	body := string(snap.Body())
+	for _, ip := range []string{"203.0.113.2", "203.0.113.3"} {
+		if !strings.Contains(body, ip+"\n") {
+			t.Fatalf("feed is missing recently seen %s:\n%s", ip, body)
+		}
+	}
+	if strings.Contains(body, "203.0.113.1\n") {
+		t.Fatalf("feed kept the least recently seen address over a fresher one:\n%s", body)
+	}
+	if snap.Entries() != 2 || !snap.Capped() {
+		t.Fatalf("entries=%d capped=%v, want 2 and capped", snap.Entries(), snap.Capped())
+	}
+}
+
+func TestTheFeedIsNotCappedAtExactlyMaxEntries(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpsertBlocklistEntries(context.Background(), []threatstore.BlocklistRow{
+		{AttackerIP: "203.0.113.1", FirstListedAt: now, LastSeenAt: now, ExpiresAt: now + hour, DistinctSystems: 3},
+		{AttackerIP: "203.0.113.2", FirstListedAt: now, LastSeenAt: now, ExpiresAt: now + hour, DistinctSystems: 3},
+	}); err != nil {
+		t.Fatalf("UpsertBlocklistEntries: %v", err)
+	}
+	cfg := testConfig()
+	cfg.MaxEntries = 2
+
+	_, snap := runPass(t, s, cfg)
+
+	if snap.Entries() != 2 || snap.Capped() {
+		t.Fatalf("entries=%d capped=%v, want 2 and not capped", snap.Entries(), snap.Capped())
+	}
+}
+
 func TestRunPrunesEventsPastRetention(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

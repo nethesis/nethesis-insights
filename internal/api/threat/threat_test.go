@@ -631,7 +631,7 @@ func generatedSnapshot(t *testing.T, ip string, at int64) *blocklist.Snapshot {
 	snap := blocklist.NewSnapshot()
 	rule := blocklist.Rule{MinSystems: 3, Window: time.Hour, TTL: 24 * time.Hour}
 	rows := []threatstore.BlocklistRow{{AttackerIP: ip, DistinctSystems: 3}}
-	if err := snap.Generate(rows, rule, 0, at); err != nil {
+	if err := snap.Generate(rows, rule, false, at); err != nil {
 		t.Fatalf("generate snapshot: %v", err)
 	}
 	return snap

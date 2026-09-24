@@ -5,6 +5,7 @@ package threat
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -274,6 +275,39 @@ func TestListBlocklistExcludesExpiredAndExpireDeletes(t *testing.T) {
 	remaining, _ := s.ListBlocklistEntries(ctx, 0)
 	if len(remaining) != 1 {
 		t.Fatalf("after expiry: got %d, want 1", len(remaining))
+	}
+}
+
+// The feed's list comes back most recently seen first, so a cap keeps the
+// attackers still active. No limit means every live entry: the UI listing's
+// 200-row default must never become a silent cap on the published feed.
+func TestListBlocklistIsMostRecentlySeenFirstAndUncappedByDefault(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	var rows []BlocklistRow
+	for i := 0; i < 250; i++ {
+		rows = append(rows, BlocklistRow{
+			AttackerIP: fmt.Sprintf("203.0.%d.%d", 100+i/200, i%200+1), FirstListedAt: 1,
+			LastSeenAt: int64(1000 + i), ExpiresAt: 1 << 40, DistinctSystems: 3,
+		})
+	}
+	if err := s.UpsertBlocklistEntries(ctx, rows); err != nil {
+		t.Fatalf("UpsertBlocklistEntries: %v", err)
+	}
+
+	all, err := s.ListBlocklist(ctx, 2000, 0)
+	if err != nil {
+		t.Fatalf("ListBlocklist: %v", err)
+	}
+	if len(all) != 250 {
+		t.Fatalf("uncapped: got %d rows, want 250", len(all))
+	}
+	capped, err := s.ListBlocklist(ctx, 2000, 2)
+	if err != nil {
+		t.Fatalf("ListBlocklist capped: %v", err)
+	}
+	if len(capped) != 2 || capped[0].LastSeenAt != 1249 || capped[1].LastSeenAt != 1248 {
+		t.Fatalf("capped: got %+v, want the two most recently seen", capped)
 	}
 }
 

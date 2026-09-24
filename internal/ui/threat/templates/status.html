@@ -60,6 +60,10 @@ successful consensus pass, because an empty body would read as
 </tbody>
 </table>
 </figure>
+{{if .Feed.Capped}}
+<p><mark>Capped at <code>BLOCKLIST_MAX_ENTRIES</code>: the addresses seen least
+recently are left out of the feed.</mark></p>
+{{end}}
 {{end}}
 </article>
 

@@ -570,17 +570,23 @@ func (s *Store) DeleteBlocklistEntries(ctx context.Context, ips []string) (int, 
 	return deleted, nil
 }
 
-// ListBlocklist returns the live entries that make up the feed, oldest
-// listing first so the served order is stable across regenerations.
+// ListBlocklist returns the live entries that make up the feed, most
+// recently seen first, so a cap keeps the attackers the fleet is still
+// seeing. limit <= 0 means every live entry: this is the feed, and the UI
+// listings' default page size must never become a silent cap on it. The
+// served order is the snapshot's own (by address), not this one.
 func (s *Store) ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite: no limit
+	}
 	return s.queryBlocklist(ctx, `
 		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
 		       distinct_systems, scenarios, listing_reason
 		FROM threat_blocklist
 		WHERE expires_at > ?
-		ORDER BY first_listed_at, attacker_ip
+		ORDER BY last_seen_at DESC, attacker_ip
 		LIMIT ?
-	`, now, clampLimit(limit))
+	`, now, limit)
 }
 
 func (s *Store) queryBlocklist(ctx context.Context, query string, args ...any) ([]BlocklistRow, error) {

@@ -43,7 +43,7 @@ func TestGenerateRendersHeaderAndEntries(t *testing.T) {
 	s := NewSnapshot()
 	now := time.Date(2026, 8, 28, 10, 5, 0, 0, time.UTC).UnixMilli()
 
-	if err := s.Generate(rows("203.0.113.12", "198.51.100.44"), testRule(), 100, now); err != nil {
+	if err := s.Generate(rows("203.0.113.12", "198.51.100.44"), testRule(), false, now); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -71,10 +71,10 @@ func TestGenerateIsDeterministic(t *testing.T) {
 	now := time.Now().UnixMilli()
 	a, b := NewSnapshot(), NewSnapshot()
 
-	if err := a.Generate(rows("203.0.113.9", "198.51.100.1", "2001:db8::5"), testRule(), 100, now); err != nil {
+	if err := a.Generate(rows("203.0.113.9", "198.51.100.1", "2001:db8::5"), testRule(), false, now); err != nil {
 		t.Fatalf("Generate a: %v", err)
 	}
-	if err := b.Generate(rows("2001:db8::5", "203.0.113.9", "198.51.100.1"), testRule(), 100, now); err != nil {
+	if err := b.Generate(rows("2001:db8::5", "203.0.113.9", "198.51.100.1"), testRule(), false, now); err != nil {
 		t.Fatalf("Generate b: %v", err)
 	}
 
@@ -102,12 +102,12 @@ func TestETagIsStableAcrossRegenerationsOfTheSameEntries(t *testing.T) {
 	s := NewSnapshot()
 	entries := rows("203.0.113.1", "203.0.113.2")
 
-	if err := s.Generate(entries, testRule(), 100, 1000); err != nil {
+	if err := s.Generate(entries, testRule(), false, 1000); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	first, firstBody := s.ETag(), string(s.Body())
 
-	if err := s.Generate(entries, testRule(), 100, 1000+5*60*1000); err != nil {
+	if err := s.Generate(entries, testRule(), false, 1000+5*60*1000); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 
@@ -124,12 +124,12 @@ func TestETagIsStableAcrossRegenerationsOfTheSameEntries(t *testing.T) {
 // different promotion rule are a different list.
 func TestETagChangesWithTheRule(t *testing.T) {
 	s := NewSnapshot()
-	_ = s.Generate(rows("203.0.113.1"), testRule(), 100, 1000)
+	_ = s.Generate(rows("203.0.113.1"), testRule(), false, 1000)
 	first := s.ETag()
 
 	stricter := testRule()
 	stricter.MinSystems = 5
-	_ = s.Generate(rows("203.0.113.1"), stricter, 100, 1000)
+	_ = s.Generate(rows("203.0.113.1"), stricter, false, 1000)
 
 	if s.ETag() == first {
 		t.Fatal("etag did not change when the promotion rule did")
@@ -140,13 +140,13 @@ func TestETagChangesWithContent(t *testing.T) {
 	now := time.Now().UnixMilli()
 	s := NewSnapshot()
 
-	_ = s.Generate(rows("203.0.113.1"), testRule(), 100, now)
+	_ = s.Generate(rows("203.0.113.1"), testRule(), false, now)
 	first := s.ETag()
 	if !strings.HasPrefix(first, `"sha256-`) {
 		t.Fatalf("etag format: %q", first)
 	}
 
-	_ = s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), 100, now)
+	_ = s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), false, now)
 	if s.ETag() == first {
 		t.Fatal("etag did not change when the body did")
 	}
@@ -154,7 +154,7 @@ func TestETagChangesWithContent(t *testing.T) {
 
 func TestGzipRoundTripsToTheBody(t *testing.T) {
 	s := NewSnapshot()
-	if err := s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), 100, time.Now().UnixMilli()); err != nil {
+	if err := s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -172,20 +172,21 @@ func TestGzipRoundTripsToTheBody(t *testing.T) {
 	}
 }
 
-func TestGenerateCapsEntries(t *testing.T) {
-	var ips []string
-	for i := 1; i <= 20; i++ {
-		ips = append(ips, "203.0.113."+string(rune('0'+i/10))+string(rune('0'+i%10)))
-	}
+// Generate publishes every row it is given -- the cap is applied when the
+// rows are chosen -- and records whether the pass capped them, for /status.
+func TestGenerateRecordsWhetherTheFeedWasCapped(t *testing.T) {
 	s := NewSnapshot()
-	if err := s.Generate(rows(ips...), testRule(), 5, time.Now().UnixMilli()); err != nil {
+	if err := s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), true, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if s.Entries() != 5 {
-		t.Fatalf("entries: got %d, want 5", s.Entries())
+	if s.Entries() != 2 || !s.Capped() {
+		t.Fatalf("entries=%d capped=%v, want 2 and capped", s.Entries(), s.Capped())
 	}
-	if n := strings.Count(string(s.Body()), "\n"); n != 7 { // 2 header lines + 5
-		t.Fatalf("body lines: got %d, want 7", n)
+	if err := s.Generate(rows("203.0.113.1"), testRule(), false, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if s.Capped() {
+		t.Fatal("a later uncapped generation still reports capped")
 	}
 }
 
@@ -193,7 +194,7 @@ func TestGenerateCapsEntries(t *testing.T) {
 // published.
 func TestGenerateSkipsUnparseableRows(t *testing.T) {
 	s := NewSnapshot()
-	if err := s.Generate(rows("203.0.113.1", "garbage", ""), testRule(), 100, time.Now().UnixMilli()); err != nil {
+	if err := s.Generate(rows("203.0.113.1", "garbage", ""), testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	if s.Entries() != 1 {
@@ -205,7 +206,7 @@ func TestGenerateSkipsUnparseableRows(t *testing.T) {
 // header alone tells a client the feed is live and currently lists nothing.
 func TestGenerateWithNoEntriesIsStillReady(t *testing.T) {
 	s := NewSnapshot()
-	if err := s.Generate(nil, testRule(), 100, time.Now().UnixMilli()); err != nil {
+	if err := s.Generate(nil, testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	if !s.Ready() {

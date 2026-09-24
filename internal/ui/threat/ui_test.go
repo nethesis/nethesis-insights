@@ -113,12 +113,14 @@ type fakeFeed struct {
 	entries     int
 	generatedAt int64
 	etag        string
+	capped      bool
 }
 
 func (f fakeFeed) Ready() bool        { return f.ready }
 func (f fakeFeed) Entries() int       { return f.entries }
 func (f fakeFeed) GeneratedAt() int64 { return f.generatedAt }
 func (f fakeFeed) ETag() string       { return f.etag }
+func (f fakeFeed) Capped() bool       { return f.capped }
 
 // fakeRuntime is a fixed ingest-queue state, mirroring logsui's fakeRuntime.
 type fakeRuntime struct {
@@ -366,6 +368,22 @@ func TestBlocklistPageHandlesEveryFeedState(t *testing.T) {
 				t.Fatalf("/status %s: missing %q", tc.name, tc.wantOnHome)
 			}
 		})
+	}
+}
+
+// A capped feed is published with addresses left out, and both pages that
+// show the feed must say so -- otherwise the cap is visible only in a log line.
+func TestACappedFeedIsFlaggedOnBothPages(t *testing.T) {
+	const warning = "BLOCKLIST_MAX_ENTRIES"
+	for _, capped := range []bool{true, false} {
+		h := newTestServerWithFeed(t, threatReader(),
+			fakeFeed{ready: true, entries: 2, generatedAt: 1700000100000, etag: `"e"`, capped: capped})
+		for _, path := range []string{"/", "/status"} {
+			body := get(t, h, path).Body.String()
+			if got := strings.Contains(body, warning); got != capped {
+				t.Fatalf("%s with capped=%v: warning shown=%v", path, capped, got)
+			}
+		}
 	}
 }
 
