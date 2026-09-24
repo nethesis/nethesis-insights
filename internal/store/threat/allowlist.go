@@ -10,14 +10,15 @@ import (
 	"strings"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/uptrace/bun"
 )
 
-// Allowlist management: the client-facing request queue and its audit
-// trail, layered on top of the threat_allowlist table declared in store.go.
-// There is deliberately no method here that turns a request into a
-// threat_allowlist row by itself -- UpsertThreatAllowlistEntry (store.go)
-// is the only writer of that table, and every caller of it in this codebase
-// is a human decision (an admin API call or an operator UI form submit).
+// Allowlist management: the client-facing request queue, the four operator
+// actions and their audit trail, layered on top of the threat_allowlist
+// table declared in store.go. No method here turns a request into a
+// threat_allowlist row by itself: AddAllowlistEntry and
+// ApproveAllowlistRequest are the only writers of that table, and every
+// caller of either is a human decision (an operator UI form submit).
 
 // ErrTooManyAllowlistRequests is returned when a system already has
 // MaxPerSystem distinct pending CIDRs and asks about one more. It is a
@@ -123,7 +124,7 @@ func (s *Store) UpsertAllowlistRequest(ctx context.Context, cidr, systemID, reas
 // the review queue's priority order.
 //
 // "Pending" means exactly "a threat_allowlist_requests row exists": handling
-// a request deletes its rows (DeleteAllowlistRequests), so the queue holds
+// a request deletes its rows (decideAllowlistRequest), so the queue holds
 // only what still needs a decision. It deliberately does not consult
 // threat_allowlist_reviews -- a past decision must not gag a later ask, or a
 // CIDR rejected once on thin evidence could never be raised again however
@@ -234,18 +235,123 @@ func containsString(ss []string, s string) bool {
 	return false
 }
 
-// UpsertAllowlistReview records an approve/reject decision for a CIDR. It is
-// the latest-decision record only: it does not retire anything from the
-// review queue, which is emptied by DeleteAllowlistRequests instead.
-//
-// ON CONFLICT DO UPDATE rather than erroring on a repeat: an admin may
-// reject a request and later reconsider, and the review row always
-// reflects the latest decision.
-func (s *Store) UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error {
+// The four operator actions below -- add, remove, approve, reject -- are the
+// only writers of threat_allowlist, threat_allowlist_reviews and the audit
+// trail, and each is one transaction: the change and the audit row that
+// records it commit together or not at all. As separate calls, an audit
+// insert that failed after the change had committed left an exemption added
+// or removed with no record of who did it, which is the one question the
+// trail exists to answer.
+
+// AddAllowlistEntry adds or updates one entry, audited as allowlist.upsert by
+// e.CreatedBy at e.CreatedAt with e.Reason as the detail.
+func (s *Store) AddAllowlistEntry(ctx context.Context, e AllowlistRow) error {
+	return s.allowlistTx(ctx, "add allowlist entry", func(tx bun.Tx) error {
+		if err := upsertAllowlistEntry(ctx, tx, e); err != nil {
+			return err
+		}
+		return appendAllowlistAudit(ctx, tx, e.CIDR, "allowlist.upsert", e.CreatedBy, e.Reason, e.CreatedAt)
+	})
+}
+
+// RemoveAllowlistEntry deletes one entry, audited as allowlist.delete, and
+// reports whether it existed. Removing an absent entry writes nothing.
+func (s *Store) RemoveAllowlistEntry(ctx context.Context, cidr, actor string, now int64) (bool, error) {
+	var existed bool
+	err := s.allowlistTx(ctx, "remove allowlist entry", func(tx bun.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM threat_allowlist WHERE cidr = ?`, cidr)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if existed = n > 0; !existed {
+			return nil
+		}
+		return appendAllowlistAudit(ctx, tx, cidr, "allowlist.delete", actor, "", now)
+	})
+	if err != nil {
+		return false, err
+	}
+	return existed, nil
+}
+
+// ApproveAllowlistRequest creates the entry e and records the decision:
+// approved by e.CreatedBy at e.CreatedAt, audited as request.approve with
+// note as the detail, and every ask for e.CIDR retired from the queue.
+func (s *Store) ApproveAllowlistRequest(ctx context.Context, e AllowlistRow, note string) error {
+	return s.allowlistTx(ctx, "approve allowlist request", func(tx bun.Tx) error {
+		if err := upsertAllowlistEntry(ctx, tx, e); err != nil {
+			return err
+		}
+		return decideAllowlistRequest(ctx, tx, e.CIDR, AllowlistReviewApproved, "request.approve", e.CreatedBy, note, e.CreatedAt)
+	})
+}
+
+// RejectAllowlistRequest records a rejection, audited as request.reject, and
+// retires every ask for cidr. It creates no allowlist entry.
+func (s *Store) RejectAllowlistRequest(ctx context.Context, cidr, actor, note string, now int64) error {
+	return s.allowlistTx(ctx, "reject allowlist request", func(tx bun.Tx) error {
+		return decideAllowlistRequest(ctx, tx, cidr, AllowlistReviewRejected, "request.reject", actor, note, now)
+	})
+}
+
+// allowlistTx runs fn as one write transaction under the store's write mutex.
+func (s *Store) allowlistTx(ctx context.Context, what string, fn func(bun.Tx) error) error {
 	s.db.Lock()
 	defer s.db.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: %s: %w", what, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return fmt.Errorf("store: %s: %w", what, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit %s: %w", what, err)
+	}
+	return nil
+}
+
+func upsertAllowlistEntry(ctx context.Context, tx bun.Tx, e AllowlistRow) error {
+	var expires any
+	if e.ExpiresAt != nil {
+		expires = *e.ExpiresAt
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO threat_allowlist (cidr, reason, created_by, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(cidr) DO UPDATE SET
+			reason = excluded.reason,
+			created_by = excluded.created_by,
+			expires_at = excluded.expires_at
+	`, e.CIDR, e.Reason, e.CreatedBy, e.CreatedAt, expires)
+	return err
+}
+
+// decideAllowlistRequest records the latest decision for cidr, audits it, and
+// retires every client ask for it -- which is how a handled request leaves
+// the review queue.
+//
+// The review row is the latest decision only: ON CONFLICT DO UPDATE, because
+// an admin may reject a request and later reconsider.
+//
+// Deleting the asks is safe precisely because nothing is lost by it: the
+// decision is in threat_allowlist_reviews and the audit trail holds who
+// decided what, with the note. Keeping the rows instead would let the table
+// grow without bound and, worse, would need a permanent per-CIDR mask over
+// the queue to hide them -- which is what silently swallowed a later,
+// better-evidenced ask for the same address.
+//
+// A CIDR with no requests is fine: an admin may legitimately approve or
+// reject an address nobody asked about.
+func decideAllowlistRequest(ctx context.Context, tx bun.Tx, cidr, state, action, actor, note string, now int64) error {
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_reviews (cidr, state, decided_by, decided_at, note)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(cidr) DO UPDATE SET
@@ -253,41 +359,14 @@ func (s *Store) UpsertAllowlistReview(ctx context.Context, cidr, state, decidedB
 			decided_by = excluded.decided_by,
 			decided_at = excluded.decided_at,
 			note = excluded.note
-	`, cidr, state, decidedBy, now, note)
-	if err != nil {
-		return fmt.Errorf("store: upsert allowlist review: %w", err)
+	`, cidr, state, actor, now, note); err != nil {
+		return err
 	}
-	return nil
-}
-
-// DeleteAllowlistRequests removes every client request for a CIDR and
-// returns how many rows went, which is how a handled request leaves the
-// review queue. It is called after the decision has been recorded, so a
-// failure between the two leaves the request pending -- to be decided again
-// -- rather than deleted with nothing to show for it.
-//
-// Deleting the asks is safe precisely because nothing is lost by it: the
-// decision is in threat_allowlist_reviews and the append-only audit trail
-// holds who decided what, with the note. Keeping the rows instead would let
-// the table grow without bound and, worse, would need a permanent per-CIDR
-// mask over the queue to hide them -- which is what silently swallowed a
-// later, better-evidenced ask for the same address.
-//
-// A CIDR with no requests is a successful no-op returning 0: an admin may
-// legitimately approve or reject an address nobody asked about.
-func (s *Store) DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error) {
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_allowlist_requests WHERE cidr = ?`, cidr)
-	if err != nil {
-		return 0, fmt.Errorf("store: delete allowlist requests: %w", err)
+	if err := appendAllowlistAudit(ctx, tx, cidr, action, actor, note, now); err != nil {
+		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("store: delete allowlist requests rows: %w", err)
-	}
-	return int(n), nil
+	_, err := tx.ExecContext(ctx, `DELETE FROM threat_allowlist_requests WHERE cidr = ?`, cidr)
+	return err
 }
 
 // PruneAllowlistRequests drops client requests last touched before
@@ -318,22 +397,16 @@ func (s *Store) PruneAllowlistRequests(ctx context.Context, olderThan int64) (in
 	return int(n), nil
 }
 
-// AppendAllowlistAudit appends one row to the append-only audit trail. It is
-// an INSERT only -- there is no update or delete method for this table by
-// design, because the whole point of the table is to survive the DELETE
-// that removes the threat_allowlist row it is describing.
-func (s *Store) AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error {
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
+// appendAllowlistAudit appends one row to the append-only audit trail. It is
+// an INSERT only -- there is no update or delete for this table by design,
+// because the whole point of the table is to survive the DELETE that removes
+// the threat_allowlist row it is describing.
+func appendAllowlistAudit(ctx context.Context, tx bun.Tx, cidr, action, actor, detail string, now int64) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO threat_allowlist_audit (id, cidr, action, actor, at, detail)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, ulid.Make().String(), cidr, action, actor, now, detail)
-	if err != nil {
-		return fmt.Errorf("store: append allowlist audit: %w", err)
-	}
-	return nil
+	return err
 }
 
 // ListAllowlistAudit returns the audit trail, newest first.

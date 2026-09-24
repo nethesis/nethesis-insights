@@ -5,6 +5,7 @@ package threat
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,22 +15,20 @@ import (
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 )
 
-// fakeWriter records the writes the UI asked for, so each test can assert on
-// the actor that was attributed as well as on the effect.
+// fakeWriter records the actions the UI asked for, so each test can assert
+// on the actor that was attributed as well as on the effect. Each action is
+// one store call; the store writes its audit row in the same transaction,
+// which internal/store/threat's tests cover.
 type fakeWriter struct {
-	upserted []threatstore.AllowlistRow
+	upserted []threatstore.AllowlistRow // added or approved entries
 	deleted  []string
 	reviews  []review
-	reqDels  []string // CIDRs passed to DeleteAllowlistRequests, in order
-	audit    []auditCall
 	err      error
 }
 
 type review struct{ cidr, state, decidedBy, note string }
 
-type auditCall struct{ cidr, action, actor, detail string }
-
-func (f *fakeWriter) UpsertThreatAllowlistEntry(_ context.Context, e threatstore.AllowlistRow) error {
+func (f *fakeWriter) AddAllowlistEntry(_ context.Context, e threatstore.AllowlistRow) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -37,7 +36,7 @@ func (f *fakeWriter) UpsertThreatAllowlistEntry(_ context.Context, e threatstore
 	return nil
 }
 
-func (f *fakeWriter) DeleteThreatAllowlistEntry(_ context.Context, cidr string) (bool, error) {
+func (f *fakeWriter) RemoveAllowlistEntry(_ context.Context, cidr, _ string, _ int64) (bool, error) {
 	if f.err != nil {
 		return false, f.err
 	}
@@ -45,27 +44,20 @@ func (f *fakeWriter) DeleteThreatAllowlistEntry(_ context.Context, cidr string) 
 	return true, nil
 }
 
-func (f *fakeWriter) UpsertAllowlistReview(_ context.Context, cidr, state, decidedBy, note string, _ int64) error {
+func (f *fakeWriter) ApproveAllowlistRequest(_ context.Context, e threatstore.AllowlistRow, note string) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.reviews = append(f.reviews, review{cidr, state, decidedBy, note})
+	f.upserted = append(f.upserted, e)
+	f.reviews = append(f.reviews, review{e.CIDR, threatstore.AllowlistReviewApproved, e.CreatedBy, note})
 	return nil
 }
 
-func (f *fakeWriter) DeleteAllowlistRequests(_ context.Context, cidr string) (int, error) {
-	if f.err != nil {
-		return 0, f.err
-	}
-	f.reqDels = append(f.reqDels, cidr)
-	return 1, nil
-}
-
-func (f *fakeWriter) AppendAllowlistAudit(_ context.Context, cidr, action, actor, detail string, _ int64) error {
+func (f *fakeWriter) RejectAllowlistRequest(_ context.Context, cidr, actor, note string, _ int64) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.audit = append(f.audit, auditCall{cidr, action, actor, detail})
+	f.reviews = append(f.reviews, review{cidr, threatstore.AllowlistReviewRejected, actor, note})
 	return nil
 }
 
@@ -161,9 +153,6 @@ func TestWriteRecordsTheBasicUsernameAsTheActor(t *testing.T) {
 	}
 	if got := w.upserted[0]; got.CIDR != "203.0.113.0/24" || got.CreatedBy != "alice" || got.Reason != "partner scanner" {
 		t.Fatalf("upserted row: %+v", got)
-	}
-	if len(w.audit) != 1 || w.audit[0].actor != "alice" {
-		t.Fatalf("audit: %+v, want exactly one row attributed to alice", w.audit)
 	}
 }
 
@@ -270,12 +259,12 @@ func TestCrossSiteWriteIsRefusedBeforeTheCredentialIsChecked(t *testing.T) {
 	}
 }
 
-func TestApproveAndRejectRecordTheReviewAndAudit(t *testing.T) {
+func TestApproveAndRejectRecordTheDecision(t *testing.T) {
 	for _, tc := range []struct {
-		path, wantState, wantAction string
+		path, wantState string
 	}{
-		{"/allowlist-requests/approve", "approved", "request.approve"},
-		{"/allowlist-requests/reject", "rejected", "request.reject"},
+		{"/allowlist-requests/approve", "approved"},
+		{"/allowlist-requests/reject", "rejected"},
 	} {
 		t.Run(tc.wantState, func(t *testing.T) {
 			w := &fakeWriter{}
@@ -293,17 +282,27 @@ func TestApproveAndRejectRecordTheReviewAndAudit(t *testing.T) {
 				t.Fatalf("reviews: %+v", w.reviews)
 			}
 			got := w.reviews[0]
-			if got.state != tc.wantState || got.decidedBy != "bob" || got.cidr != "203.0.113.0/24" {
+			if got.state != tc.wantState || got.decidedBy != "bob" || got.cidr != "203.0.113.0/24" || got.note != "looks fine" {
 				t.Fatalf("review: %+v", got)
 			}
-			if len(w.audit) == 0 || w.audit[len(w.audit)-1].actor != "bob" {
-				t.Fatalf("audit: %+v", w.audit)
-			}
-			// Handling the request retires it from the queue, so the page the
-			// operator is redirected back to no longer offers the decision
-			// they just made.
-			if len(w.reqDels) != 1 || w.reqDels[0] != "203.0.113.0/24" {
-				t.Fatalf("handled request not deleted: %+v", w.reqDels)
+		})
+	}
+}
+
+// A failed action is an error page, never the redirect that tells the
+// operator it worked. The store rolled the whole action back, audit row
+// included, so there is nothing half-done to report either.
+func TestAFailedActionIsAnErrorNotARedirect(t *testing.T) {
+	for _, p := range writePaths {
+		t.Run(p, func(t *testing.T) {
+			w := &fakeWriter{err: errors.New("database is locked")}
+			h := newWriteTestServer(t, threatReader(), nil, w, testAdminKey)
+
+			req := writeReq(p, url.Values{"cidr": {"203.0.113.0/24"}})
+			req.SetBasicAuth("alice", testAdminKey)
+
+			if rec := do(h, req); rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status: got %d, want 503", rec.Code)
 			}
 		})
 	}

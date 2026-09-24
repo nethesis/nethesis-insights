@@ -415,50 +415,6 @@ func (s *Store) ThreatAllowlist(ctx context.Context, now int64) ([]AllowlistRow,
 	`, now)
 }
 
-// UpsertThreatAllowlistEntry adds or updates one allowlist entry.
-//
-// There is deliberately no HTTP surface for this: the design gives this
-// server no admin auth plane, so entries are added out of band. The method
-// exists so that "out of band" means a small supported call rather than
-// hand-written SQL against a live database.
-func (s *Store) UpsertThreatAllowlistEntry(ctx context.Context, e AllowlistRow) error {
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	var expires any
-	if e.ExpiresAt != nil {
-		expires = *e.ExpiresAt
-	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO threat_allowlist (cidr, reason, created_by, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(cidr) DO UPDATE SET
-			reason = excluded.reason,
-			created_by = excluded.created_by,
-			expires_at = excluded.expires_at
-	`, e.CIDR, e.Reason, e.CreatedBy, e.CreatedAt, expires)
-	if err != nil {
-		return fmt.Errorf("store: upsert allowlist entry: %w", err)
-	}
-	return nil
-}
-
-// DeleteThreatAllowlistEntry removes one entry, reporting whether it existed.
-func (s *Store) DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error) {
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_allowlist WHERE cidr = ?`, cidr)
-	if err != nil {
-		return false, fmt.Errorf("store: delete allowlist entry: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("store: delete allowlist entry rows: %w", err)
-	}
-	return n > 0, nil
-}
-
 func (s *Store) queryAllowlist(ctx context.Context, query string, args ...any) ([]AllowlistRow, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

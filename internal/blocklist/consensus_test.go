@@ -268,7 +268,7 @@ func TestExpiryRemovesTheEntry(t *testing.T) {
 func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+	if err := s.AddAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -297,7 +297,7 @@ func TestAllowlistedAddressNeverPromotes(t *testing.T) {
 func TestAllowlistCoversZonedAddresses(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+	if err := s.AddAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "2001:db8::/48", Reason: "customer range", CreatedBy: "ops", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -332,7 +332,7 @@ func TestAddingAnAllowlistEntryUnlistsAPromotedAddress(t *testing.T) {
 		t.Fatalf("first pass listed %v, want both addresses", got)
 	}
 
-	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+	if err := s.AddAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "203.0.113.0/24", Reason: "partner scanner", CreatedBy: "ops", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -361,7 +361,7 @@ func TestUnlistingSurvivesTheEventsAgingOutOfTheWindow(t *testing.T) {
 	}
 	runPass(t, s, testConfig())
 
-	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+	if err := s.AddAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "203.0.113.7/32", Reason: "customer WAN", CreatedBy: "ops", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)
@@ -381,7 +381,7 @@ func TestUnlistingSurvivesTheEventsAgingOutOfTheWindow(t *testing.T) {
 func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertThreatAllowlistEntry(ctx, threatstore.AllowlistRow{
+	if err := s.AddAllowlistEntry(ctx, threatstore.AllowlistRow{
 		CIDR: "not-a-cidr", Reason: "typo", CreatedBy: "ops", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seed allowlist: %v", err)

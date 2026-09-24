@@ -451,8 +451,8 @@ func TestCountsIncludeThreatTables(t *testing.T) {
 	_ = s.UpsertBlocklistEntries(ctx, []BlocklistRow{
 		{AttackerIP: "203.0.113.7", FirstListedAt: 1, LastSeenAt: 1, ExpiresAt: 5000, DistinctSystems: 3},
 	})
-	if err := s.UpsertThreatAllowlistEntry(ctx, AllowlistRow{CIDR: "198.51.100.0/24", CreatedBy: "ops", CreatedAt: 1}); err != nil {
-		t.Fatalf("UpsertThreatAllowlistEntry: %v", err)
+	if err := s.AddAllowlistEntry(ctx, AllowlistRow{CIDR: "198.51.100.0/24", CreatedBy: "ops", CreatedAt: 1}); err != nil {
+		t.Fatalf("AddAllowlistEntry: %v", err)
 	}
 	if _, err := s.UpsertAllowlistRequest(ctx, "203.0.113.0/24", "sys-a", "please", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)

@@ -1230,12 +1230,22 @@ distinct-system rule; `threat_allowlist_reviews` records the latest human
 verdict; `threat_allowlist_audit` is append-only and exists because `DELETE`
 destroys the row that would otherwise hold the trail.
 
+**An action and its audit row are one transaction.** The store exposes one
+method per operator action — `AddAllowlistEntry`, `RemoveAllowlistEntry`,
+`ApproveAllowlistRequest`, `RejectAllowlistRequest` — never one per table,
+and each writes its change, its review row where there is one, its audit row
+and the retirement of the asks together or not at all. When these were
+separate calls the UI logged a failed audit insert and carried on, so an
+exemption could be added or removed with no record of who did it — the one
+question the table exists to answer. A failed action is now an error page and
+leaves every table as it was.
+`TestAnAllowlistActionWhoseAuditFailsChangesNothing` forces the audit insert
+to fail and asserts exactly that.
+
 **A handled request is deleted, not masked.** Approving or rejecting records
-the verdict, appends the audit row, and then calls `DeleteAllowlistRequests`
-to drop every ask for that CIDR — in that order, so a failed delete leaves the
-request pending to be decided again rather than losing the ask with nothing
-recorded. `PendingAllowlistRequests` therefore means exactly "a request row
-exists" and does not consult `threat_allowlist_reviews` at all.
+the verdict, appends the audit row and drops every ask for that CIDR, in the
+same transaction. `PendingAllowlistRequests` therefore means exactly "a
+request row exists" and does not consult `threat_allowlist_reviews` at all.
 
 The reason is not tidiness. Masking the queue on a per-CIDR review row — the
 earlier design — made a decision permanent in the wrong direction: an address

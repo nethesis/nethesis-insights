@@ -13,7 +13,6 @@ import (
 	"context"
 	"embed"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -62,13 +61,16 @@ type Reader interface {
 // approval or a rejection. It is wired in, and its routes are registered,
 // only when ADMIN_API_KEY is set -- see NewServer and writableRoutes.
 //
+// One method per action, not one per table: each is a single transaction
+// that also writes the action's audit row, so an exemption can never change
+// without the record of who changed it.
+//
 // *threatstore.Store satisfies it, exactly like Reader.
 type Writer interface {
-	UpsertThreatAllowlistEntry(ctx context.Context, e threatstore.AllowlistRow) error
-	DeleteThreatAllowlistEntry(ctx context.Context, cidr string) (bool, error)
-	UpsertAllowlistReview(ctx context.Context, cidr, state, decidedBy, note string, now int64) error
-	DeleteAllowlistRequests(ctx context.Context, cidr string) (int, error)
-	AppendAllowlistAudit(ctx context.Context, cidr, action, actor, detail string, now int64) error
+	AddAllowlistEntry(ctx context.Context, e threatstore.AllowlistRow) error
+	RemoveAllowlistEntry(ctx context.Context, cidr, actor string, now int64) (bool, error)
+	ApproveAllowlistRequest(ctx context.Context, e threatstore.AllowlistRow, note string) error
+	RejectAllowlistRequest(ctx context.Context, cidr, actor, note string, now int64) error
 }
 
 // Feed reports the state of the rendered blocklist snapshot.
@@ -535,14 +537,11 @@ func (s *server) handleAddAllowlist(w http.ResponseWriter, r *http.Request, acto
 	reason := threat.CleanText(r.PostFormValue("reason"), model.MaxAllowlistReasonLen)
 	now := time.Now().UnixMilli()
 
-	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), threatstore.AllowlistRow{
+	if err := s.writer.AddAllowlistEntry(r.Context(), threatstore.AllowlistRow{
 		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
 	}); err != nil {
 		s.chrome.StoreError(w, "index", err)
 		return
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.upsert", actor, reason, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
 	}
 	http.Redirect(w, r, s.chrome.Link("/"), http.StatusSeeOther)
 }
@@ -562,7 +561,7 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	existed, err := s.writer.DeleteThreatAllowlistEntry(r.Context(), cidr)
+	existed, err := s.writer.RemoveAllowlistEntry(r.Context(), cidr, actor, time.Now().UnixMilli())
 	if err != nil {
 		s.chrome.StoreError(w, "index", err)
 		return
@@ -570,10 +569,6 @@ func (s *server) handleDeleteAllowlist(w http.ResponseWriter, r *http.Request, a
 	if !existed {
 		http.Error(w, "no such allowlist entry", http.StatusNotFound)
 		return
-	}
-	now := time.Now().UnixMilli()
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "allowlist.delete", actor, "", now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
 	}
 	http.Redirect(w, r, s.chrome.Link("/"), http.StatusSeeOther)
 }
@@ -600,22 +595,11 @@ func (s *server) handleApproveRequest(w http.ResponseWriter, r *http.Request, ac
 	}
 	now := time.Now().UnixMilli()
 
-	if err := s.writer.UpsertThreatAllowlistEntry(r.Context(), threatstore.AllowlistRow{
+	if err := s.writer.ApproveAllowlistRequest(r.Context(), threatstore.AllowlistRow{
 		CIDR: cidr, Reason: reason, CreatedBy: actor, CreatedAt: now,
-	}); err != nil {
+	}, note); err != nil {
 		s.chrome.StoreError(w, "allowlist-requests", err)
 		return
-	}
-	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, threatstore.AllowlistReviewApproved, actor, note, now); err != nil {
-		slog.Error("ui: record allowlist review failed", "cidr", cidr, "error", err)
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.approve", actor, note, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	// Retire the handled request, last: see threatstore.DeleteAllowlistRequests
-	// for why the queue is emptied only after the decision is durable.
-	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
-		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
 	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
 }
@@ -641,17 +625,10 @@ func (s *server) handleRejectRequest(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	note := threat.CleanText(r.PostFormValue("note"), model.MaxAllowlistReasonLen)
-	now := time.Now().UnixMilli()
 
-	if err := s.writer.UpsertAllowlistReview(r.Context(), cidr, threatstore.AllowlistReviewRejected, actor, note, now); err != nil {
+	if err := s.writer.RejectAllowlistRequest(r.Context(), cidr, actor, note, time.Now().UnixMilli()); err != nil {
 		s.chrome.StoreError(w, "allowlist-requests", err)
 		return
-	}
-	if err := s.writer.AppendAllowlistAudit(r.Context(), cidr, "request.reject", actor, note, now); err != nil {
-		slog.Error("ui: append allowlist audit failed", "cidr", cidr, "error", err)
-	}
-	if _, err := s.writer.DeleteAllowlistRequests(r.Context(), cidr); err != nil {
-		slog.Error("ui: delete handled allowlist requests failed", "cidr", cidr, "error", err)
 	}
 	http.Redirect(w, r, s.chrome.Link("/allowlist-requests"), http.StatusSeeOther)
 }

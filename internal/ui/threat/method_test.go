@@ -15,8 +15,7 @@ import (
 // only the status code -- a 405 with a write already committed would be the
 // same bug wearing a different answer.
 func (f *fakeWriter) wroteAnything() bool {
-	return len(f.upserted) > 0 || len(f.deleted) > 0 || len(f.reviews) > 0 ||
-		len(f.reqDels) > 0 || len(f.audit) > 0
+	return len(f.upserted) > 0 || len(f.deleted) > 0 || len(f.reviews) > 0
 }
 
 // A write route must answer POST and nothing else, and HEAD is the method

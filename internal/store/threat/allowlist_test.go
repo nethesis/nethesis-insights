@@ -59,8 +59,9 @@ func TestUpsertAllowlistRequestCountsDistinctSystems(t *testing.T) {
 
 // This is the executable form of the plan's decision 1: there is no path
 // from any number of client requests, from any number of distinct systems,
-// to a live threat_allowlist entry. Only an explicit UpsertThreatAllowlistEntry
-// call -- which only an admin decision ever makes -- creates one.
+// to a live threat_allowlist entry. Only AddAllowlistEntry or
+// ApproveAllowlistRequest -- which only an admin decision ever calls --
+// creates one.
 func TestClientRequestsNeverAutoPromoteToTheAllowlist(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -136,12 +137,46 @@ func TestPendingAllowlistRequestsAreRankedByDistinctSystemsThenRecency(t *testin
 	}
 }
 
-// Handling a request removes it: recording the decision is not what empties
-// the queue, deleting the asks is. A review row on its own must leave the
-// request exactly where it was, or the two halves of "handled" could drift
-// apart and an operator would see a queue that disagrees with the audit
-// trail.
-func TestHandledRequestsLeaveTheQueueOnlyWhenDeleted(t *testing.T) {
+// Approving a request creates the entry, records the decision and retires
+// every ask, and the audit row says who did it and why.
+func TestApprovingARequestCreatesTheEntryAndRetiresTheAsk(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const cidr = "203.0.113.0/24"
+
+	for _, sys := range []string{"sys-1", "sys-2"} {
+		if _, err := s.UpsertAllowlistRequest(ctx, cidr, sys, "please", 1000, 0); err != nil {
+			t.Fatalf("UpsertAllowlistRequest(%s): %v", sys, err)
+		}
+	}
+	entry := AllowlistRow{CIDR: cidr, Reason: "partner scanner", CreatedBy: "alice", CreatedAt: 2000}
+	if err := s.ApproveAllowlistRequest(ctx, entry, "partner scanner"); err != nil {
+		t.Fatalf("ApproveAllowlistRequest: %v", err)
+	}
+
+	live, err := s.ListThreatAllowlist(ctx)
+	if err != nil {
+		t.Fatalf("ListThreatAllowlist: %v", err)
+	}
+	if len(live) != 1 || live[0].CIDR != cidr || live[0].CreatedBy != "alice" {
+		t.Fatalf("allowlist: got %+v, want the approved entry by alice", live)
+	}
+	if pending, err := s.PendingAllowlistRequests(ctx, 0); err != nil || len(pending) != 0 {
+		t.Fatalf("pending: got %+v, %v, want the handled CIDR gone", pending, err)
+	}
+	assertReview(t, s, cidr, AllowlistReviewApproved, "alice")
+	audit, err := s.ListAllowlistAudit(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListAllowlistAudit: %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "request.approve" || audit[0].Actor != "alice" || audit[0].Detail != "partner scanner" {
+		t.Fatalf("audit: got %+v, want one request.approve by alice", audit)
+	}
+}
+
+// Rejecting retires the ask and records the decision, and creates nothing on
+// the allowlist.
+func TestRejectingARequestRetiresTheAskAndCreatesNoEntry(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
@@ -149,32 +184,36 @@ func TestHandledRequestsLeaveTheQueueOnlyWhenDeleted(t *testing.T) {
 	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
-	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "not enough evidence", 2000); err != nil {
-		t.Fatalf("UpsertAllowlistReview: %v", err)
+	if err := s.RejectAllowlistRequest(ctx, cidr, "alice", "not enough evidence", 2000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
 
-	// The decision alone does not retire anything.
-	pending, err := s.PendingAllowlistRequests(ctx, 0)
+	if n := countRows(t, s, "threat_allowlist"); n != 0 {
+		t.Fatalf("allowlist rows: got %d, want 0", n)
+	}
+	if pending, err := s.PendingAllowlistRequests(ctx, 0); err != nil || len(pending) != 0 {
+		t.Fatalf("pending: got %+v, %v, want the handled CIDR gone", pending, err)
+	}
+	assertReview(t, s, cidr, AllowlistReviewRejected, "alice")
+	audit, err := s.ListAllowlistAudit(ctx, 0)
 	if err != nil {
-		t.Fatalf("PendingAllowlistRequests: %v", err)
+		t.Fatalf("ListAllowlistAudit: %v", err)
 	}
-	if len(pending) != 1 || pending[0].CIDR != cidr {
-		t.Fatalf("pending after the review row alone: got %+v, want the request still queued", pending)
+	if len(audit) != 1 || audit[0].Action != "request.reject" || audit[0].Detail != "not enough evidence" {
+		t.Fatalf("audit: got %+v, want one request.reject", audit)
 	}
+}
 
-	removed, err := s.DeleteAllowlistRequests(ctx, cidr)
-	if err != nil {
-		t.Fatalf("DeleteAllowlistRequests: %v", err)
+// assertReview reads the review row directly: there is no getter for one.
+func assertReview(t *testing.T, s *Store, cidr, wantState, wantBy string) {
+	t.Helper()
+	var state, by string
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT state, decided_by FROM threat_allowlist_reviews WHERE cidr = ?`, cidr).Scan(&state, &by); err != nil {
+		t.Fatalf("review row for %s: %v", cidr, err)
 	}
-	if removed != 1 {
-		t.Fatalf("removed: got %d, want 1", removed)
-	}
-	pending, err = s.PendingAllowlistRequests(ctx, 0)
-	if err != nil {
-		t.Fatalf("PendingAllowlistRequests: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending after the delete: got %+v, want the handled CIDR gone", pending)
+	if state != wantState || by != wantBy {
+		t.Fatalf("review: got %s by %s, want %s by %s", state, by, wantState, wantBy)
 	}
 }
 
@@ -190,11 +229,8 @@ func TestAFreshAskAfterADecisionReturnsToTheQueue(t *testing.T) {
 	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 1000, 0); err != nil {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
-	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "not enough evidence", 2000); err != nil {
-		t.Fatalf("UpsertAllowlistReview: %v", err)
-	}
-	if _, err := s.DeleteAllowlistRequests(ctx, cidr); err != nil {
-		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	if err := s.RejectAllowlistRequest(ctx, cidr, "alice", "not enough evidence", 2000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
 
 	if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-2", "still want it", 3000, 0); err != nil {
@@ -217,23 +253,24 @@ func TestAFreshAskAfterADecisionReturnsToTheQueue(t *testing.T) {
 	}
 }
 
-// Deleting requests for a CIDR nobody asked about is a successful no-op: an
-// admin may approve or reject an address out of band.
-func TestDeleteAllowlistRequestsWithNothingQueued(t *testing.T) {
+// Deciding a CIDR nobody asked about succeeds: an admin may approve or
+// reject an address out of band.
+func TestDecidingACIDRNobodyAskedAboutSucceeds(t *testing.T) {
 	s := newTestStore(t)
+	ctx := context.Background()
 
-	removed, err := s.DeleteAllowlistRequests(context.Background(), "203.0.113.0/24")
-	if err != nil {
-		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	if err := s.RejectAllowlistRequest(ctx, "203.0.113.0/24", "alice", "", 1000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
-	if removed != 0 {
-		t.Fatalf("removed: got %d, want 0", removed)
+	entry := AllowlistRow{CIDR: "198.51.100.0/24", Reason: "scanner", CreatedBy: "alice", CreatedAt: 1000}
+	if err := s.ApproveAllowlistRequest(ctx, entry, ""); err != nil {
+		t.Fatalf("ApproveAllowlistRequest: %v", err)
 	}
 }
 
-// The delete is scoped to its CIDR: handling one request must not clear the
+// A decision is scoped to its CIDR: handling one request must not clear the
 // rest of the queue.
-func TestDeleteAllowlistRequestsTouchesOnlyItsCIDR(t *testing.T) {
+func TestADecisionRetiresOnlyItsCIDR(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
@@ -247,8 +284,8 @@ func TestDeleteAllowlistRequestsTouchesOnlyItsCIDR(t *testing.T) {
 		t.Fatalf("UpsertAllowlistRequest: %v", err)
 	}
 
-	if _, err := s.DeleteAllowlistRequests(ctx, "203.0.113.0/24"); err != nil {
-		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	if err := s.RejectAllowlistRequest(ctx, "203.0.113.0/24", "alice", "", 2000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
 
 	pending, err := s.PendingAllowlistRequests(ctx, 0)
@@ -264,7 +301,7 @@ func TestDeleteAllowlistRequestsTouchesOnlyItsCIDR(t *testing.T) {
 // newest: the queue counts distinct systems, so leaving any behind would
 // leave the CIDR queued at a lower count -- which reads as a fresh, weaker
 // request that nobody made.
-func TestDeleteAllowlistRequestsRemovesEverySystemsAsk(t *testing.T) {
+func TestADecisionRetiresEverySystemsAsk(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
@@ -275,51 +312,45 @@ func TestDeleteAllowlistRequestsRemovesEverySystemsAsk(t *testing.T) {
 		}
 	}
 
-	removed, err := s.DeleteAllowlistRequests(ctx, cidr)
-	if err != nil {
-		t.Fatalf("DeleteAllowlistRequests: %v", err)
+	if err := s.RejectAllowlistRequest(ctx, cidr, "alice", "", 2000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
-	if removed != 3 {
-		t.Fatalf("removed: got %d, want 3", removed)
-	}
-	pending, err := s.PendingAllowlistRequests(ctx, 0)
-	if err != nil {
-		t.Fatalf("PendingAllowlistRequests: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending: got %+v, want empty", pending)
+	if n := countRows(t, s, "threat_allowlist_requests"); n != 0 {
+		t.Fatalf("request rows: got %d, want 0", n)
 	}
 }
 
-// A repeat review (reject, then reconsider and approve) must overwrite the
-// decision rather than error: ON CONFLICT DO UPDATE, not DO NOTHING.
-func TestUpsertAllowlistReviewOverwritesAPriorDecision(t *testing.T) {
+// A repeat review (reject, then reconsider and approve) overwrites the
+// decision rather than erroring: ON CONFLICT DO UPDATE, not DO NOTHING.
+func TestALaterDecisionOverwritesAPriorOne(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	const cidr = "203.0.113.0/24"
 
-	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewRejected, "alice", "no", 1000); err != nil {
-		t.Fatalf("UpsertAllowlistReview (reject): %v", err)
+	if err := s.RejectAllowlistRequest(ctx, cidr, "alice", "no", 1000); err != nil {
+		t.Fatalf("RejectAllowlistRequest: %v", err)
 	}
-	if err := s.UpsertAllowlistReview(ctx, cidr, AllowlistReviewApproved, "bob", "reconsidered", 2000); err != nil {
-		t.Fatalf("UpsertAllowlistReview (approve): %v", err)
+	entry := AllowlistRow{CIDR: cidr, Reason: "reconsidered", CreatedBy: "bob", CreatedAt: 2000}
+	if err := s.ApproveAllowlistRequest(ctx, entry, "reconsidered"); err != nil {
+		t.Fatalf("ApproveAllowlistRequest: %v", err)
 	}
-	// There is no getter for a single review row, so the lack of an error
-	// above is the observable proof: the cidr is the primary key, and a
-	// second insert that was not an upsert would fail on it.
+	assertReview(t, s, cidr, AllowlistReviewApproved, "bob")
 }
 
-// The audit trail is append-only: every write appends exactly one row, and
-// nothing here ever updates or deletes one.
-func TestAppendAllowlistAuditAppendsOneRowPerCall(t *testing.T) {
+// The audit trail is append-only: every action appends exactly one row, and
+// nothing ever updates or deletes one -- not even the delete of the entry it
+// describes.
+func TestEachAllowlistActionAppendsOneAuditRow(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+	const cidr = "203.0.113.0/24"
 
-	if err := s.AppendAllowlistAudit(ctx, "203.0.113.0/24", "allowlist.upsert", "alice", "partner scanner", 1000); err != nil {
-		t.Fatalf("AppendAllowlistAudit: %v", err)
+	if err := s.AddAllowlistEntry(ctx, AllowlistRow{CIDR: cidr, Reason: "partner scanner", CreatedBy: "alice", CreatedAt: 1000}); err != nil {
+		t.Fatalf("AddAllowlistEntry: %v", err)
 	}
-	if err := s.AppendAllowlistAudit(ctx, "203.0.113.0/24", "allowlist.delete", "bob", "", 2000); err != nil {
-		t.Fatalf("AppendAllowlistAudit: %v", err)
+	existed, err := s.RemoveAllowlistEntry(ctx, cidr, "bob", 2000)
+	if err != nil || !existed {
+		t.Fatalf("RemoveAllowlistEntry: existed=%v err=%v", existed, err)
 	}
 
 	rows, err := s.ListAllowlistAudit(ctx, 0)
@@ -338,6 +369,20 @@ func TestAppendAllowlistAuditAppendsOneRowPerCall(t *testing.T) {
 	}
 	if rows[0].ID == "" || rows[0].ID == rows[1].ID {
 		t.Fatalf("audit rows must each get a distinct ULID id: got %+v", rows)
+	}
+}
+
+// Removing an entry that is not there reports it and records nothing: there
+// was no change for the trail to describe.
+func TestRemovingAnAbsentEntryWritesNothing(t *testing.T) {
+	s := newTestStore(t)
+
+	existed, err := s.RemoveAllowlistEntry(context.Background(), "203.0.113.0/24", "bob", 1000)
+	if err != nil || existed {
+		t.Fatalf("RemoveAllowlistEntry: existed=%v err=%v, want false, nil", existed, err)
+	}
+	if n := countRows(t, s, "threat_allowlist_audit"); n != 0 {
+		t.Fatalf("audit rows: got %d, want 0", n)
 	}
 }
 
@@ -386,7 +431,7 @@ func TestUpsertAllowlistRequestCapsDistinctCIDRsPerSystem(t *testing.T) {
 
 // The retention prune is what bounds the table when nobody ever reviews the
 // queue. It drops by age, not by state: a request an admin handled is
-// already gone (DeleteAllowlistRequests), so what is left here is only ever
+// already gone (Approve/RejectAllowlistRequest), so what is left here is only ever
 // unreviewed.
 func TestPruneAllowlistRequestsDropsOnlyStaleRows(t *testing.T) {
 	s := newTestStore(t)
@@ -459,5 +504,89 @@ func TestPendingAllowlistRequestsHonoursTheLimit(t *testing.T) {
 	}
 	if len(rows[0].Reasons) != 1 || rows[0].Reasons[0] != "reason for 203.0.113.0/24" {
 		t.Fatalf("reasons: got %+v", rows[0].Reasons)
+	}
+}
+
+// refuseAudit makes every audit insert fail: a busy or locked database at the
+// worst moment, after the change and before its record.
+func refuseAudit(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		CREATE TRIGGER refuse_audit BEFORE INSERT ON threat_allowlist_audit
+		BEGIN SELECT RAISE(ABORT, 'audit refused'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+}
+
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	// #nosec G202 -- table is a test constant, never input.
+	if err := s.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// An allowlist action and its audit row commit together or not at all.
+// Written separately, a failed audit insert left an exemption added or
+// removed with no record of who did it -- the one question the trail exists
+// to answer.
+func TestAnAllowlistActionWhoseAuditFailsChangesNothing(t *testing.T) {
+	const cidr = "203.0.113.0/24"
+	entry := AllowlistRow{CIDR: cidr, Reason: "partner scanner", CreatedBy: "alice", CreatedAt: 1000}
+	ctx := context.Background()
+
+	t.Run("add", func(t *testing.T) {
+		s := newTestStore(t)
+		refuseAudit(t, s)
+		if err := s.AddAllowlistEntry(ctx, entry); err == nil {
+			t.Fatal("AddAllowlistEntry succeeded with the audit refused")
+		}
+		if n := countRows(t, s, "threat_allowlist"); n != 0 {
+			t.Fatalf("allowlist rows: got %d, want 0", n)
+		}
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.AddAllowlistEntry(ctx, entry); err != nil {
+			t.Fatalf("AddAllowlistEntry: %v", err)
+		}
+		refuseAudit(t, s)
+		if _, err := s.RemoveAllowlistEntry(ctx, cidr, "bob", 2000); err == nil {
+			t.Fatal("RemoveAllowlistEntry succeeded with the audit refused")
+		}
+		if n := countRows(t, s, "threat_allowlist"); n != 1 {
+			t.Fatalf("allowlist rows: got %d, want the entry still there", n)
+		}
+	})
+
+	for _, decide := range []struct {
+		name string
+		fn   func(*Store) error
+	}{
+		{"approve", func(s *Store) error { return s.ApproveAllowlistRequest(ctx, entry, "ok") }},
+		{"reject", func(s *Store) error { return s.RejectAllowlistRequest(ctx, cidr, "alice", "no", 1000) }},
+	} {
+		t.Run(decide.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if _, err := s.UpsertAllowlistRequest(ctx, cidr, "sys-1", "please", 500, 0); err != nil {
+				t.Fatalf("UpsertAllowlistRequest: %v", err)
+			}
+			refuseAudit(t, s)
+			if err := decide.fn(s); err == nil {
+				t.Fatalf("%s succeeded with the audit refused", decide.name)
+			}
+			for table, want := range map[string]int{
+				"threat_allowlist":          0,
+				"threat_allowlist_reviews":  0,
+				"threat_allowlist_requests": 1,
+			} {
+				if n := countRows(t, s, table); n != want {
+					t.Fatalf("%s rows: got %d, want %d", table, n, want)
+				}
+			}
+		})
 	}
 }
