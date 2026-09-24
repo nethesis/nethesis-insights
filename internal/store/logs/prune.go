@@ -144,9 +144,10 @@ func (s *Store) PruneFindings(ctx context.Context, olderThan int64) (int, error)
 // /cost and /gate pages are both built by rolling this table up (CostRollup
 // has no time bound at all -- see internal/store/logs/ui.go). There is no
 // rollup table for the logs pipeline (out of scope for this change, unlike
-// threatd's threat_daily_stats and sizingd's sizing_node_monthly, both
-// written before their own prune specifically so a dropped day's history
-// survives it), so every row this deletes is gone permanently: /cost's spend
+// sizingd's sizing_node_monthly, written before its own prune specifically
+// so a dropped day's history survives it -- threatd has no rollup table
+// either, and reads /stats live from the retained events instead), so every
+// row this deletes is gone permanently: /cost's spend
 // history and /gate's reason history both truncate at olderThan with no way
 // to recover what came before. AnalysisRetention is chosen with that in
 // mind -- see maint.Config.

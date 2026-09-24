@@ -3,9 +3,11 @@
 
 // Package threat is Threat Shield's storage: ingest, consensus inputs, the
 // promoted blocklist, the allowlist and its client-facing review queue, and
-// the rollups that outlive the raw events. It is threatd's only store
-// package -- a separate SQLite file from the logs and sizing pipelines,
-// sharing nothing with them but the sqlitex runtime settings.
+// per-day ingest accounting. There is no rollup table: daily stats are read
+// live from the retained raw events (see ThreatDailyStats in ui.go), so
+// threat history is exactly THREAT_EVENT_RETENTION long. It is threatd's
+// only store package -- a separate SQLite file from the logs and sizing
+// pipelines, sharing nothing with them but the sqlitex runtime settings.
 package threat
 
 import (
@@ -112,11 +114,14 @@ func (s *Store) Init(ctx context.Context) error {
 		// explicit admin decision -- see the "no automatic promotion" rule in
 		// CLAUDE.md.
 		//
-		// Requests are append-only per (cidr, system_id): a rejection or an
-		// approval never deletes them, so "who asked, and when" survives the
-		// decision. The counter that ranks the review queue is
-		// COUNT(DISTINCT system_id) over this table, mirroring the blocklist's
-		// own distinct-systems rule.
+		// Requests persist per (cidr, system_id) only until a decision is
+		// recorded for that cidr: decideAllowlistRequest deletes every
+		// request row it covers, not just the one that prompted the review
+		// (see threat_allowlist_reviews below and PruneAllowlistRequests for
+		// the other way a row goes, by age). "Who asked, and when" survives
+		// in the audit trail instead. The counter that ranks the review
+		// queue is COUNT(DISTINCT system_id) over this table, mirroring the
+		// blocklist's own distinct-systems rule.
 		`CREATE TABLE IF NOT EXISTS threat_allowlist_requests (
 			cidr TEXT,
 			system_id TEXT,
@@ -259,7 +264,9 @@ type AllowlistRow struct {
 	ExpiresAt               *int64
 }
 
-// ThreatDailyRow is one day/scenario rollup.
+// ThreatDailyRow is one day/scenario aggregate, computed live from the
+// retained threat_events (see ThreatDailyStats in ui.go) -- not a stored
+// rollup row: there is no rollup table for this pipeline's daily stats.
 type ThreatDailyRow struct {
 	Day, Scenario string
 	DistinctIPs   int
@@ -274,10 +281,10 @@ type ThreatIngestRow struct {
 	model.ThreatCounters
 }
 
-// DayString formats a unix-millis instant as the UTC day key used by the
-// rollup tables. Day bucketing is integer division on the millis column and
-// formatting in Go, never a SQL date function -- SQLite and Postgres do not
-// share one.
+// DayString formats a unix-millis instant as the UTC day key used by
+// threat_ingest_daily and the live daily-stats query alike. Day bucketing is
+// integer division on the millis column and formatting in Go, never a SQL
+// date function -- SQLite and Postgres do not share one.
 func DayString(ms int64) string {
 	return time.UnixMilli(ms).UTC().Format("2006-01-02")
 }

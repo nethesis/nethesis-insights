@@ -392,13 +392,15 @@ statements, so with the fleet feeding it every 15 minutes,
 
 Unlike the consensus and cohort passes, its three prunes have **no ordering
 constraint** between them — neither dictates the other's correctness, because
-neither threat_daily_stats' nor sizing_node_monthly's situation applies here:
-the logs pipeline keeps no rollup table for any of the three (deliberately
-out of scope; see below), so there is nothing a prune could run ahead of and
-invalidate. `maint.Runner.Run` therefore just prunes all three independently
+`sizing_node_monthly`'s situation (a rollup that must run before its prune, or
+the dropped day's history is lost for good) does not apply here: the logs
+pipeline keeps no rollup table for any of the three (deliberately out of
+scope; see below), and neither does threatd's, so there is nothing a prune
+could run ahead of and invalidate. `maint.Runner.Run` therefore just prunes
+all three independently
 and logs, rather than aborts, on a failure in any one — pruning is this
 pass's entire job, not a secondary step guarding a published artifact the
-way blocklist's and baseline's rollup/prune steps are.
+way baseline's rollup-then-prune steps are.
 
 ```
 1. PruneTemplates(now - TEMPLATE_RETENTION)
@@ -447,10 +449,11 @@ reasoning):
   to read carefully before shortening.** `analyses` is both the cost ledger
   and the gate-reason record, and it is what the operator UI's `/cost` and
   `/gate` pages roll up. There is **no rollup table** for this pipeline
-  (unlike `threat_daily_stats` and `sizing_node_monthly`, each written
-  before its own prune specifically so a dropped day's history survives it —
-  building one here was considered and is explicitly out of scope for this
-  change). So every row `PruneAnalyses` removes is gone for good:
+  (unlike `sizing_node_monthly`, written before its own prune specifically so
+  a dropped day's history survives it — building one here was considered and
+  is explicitly out of scope for this change; threatd has no rollup table
+  either, and reads `/stats` live from its retained events instead). So
+  every row `PruneAnalyses` removes is gone for good:
   `CostRollup` has **no time bound at all** (`internal/store/logs/ui.go`), so
   `/cost`'s spend history silently truncates at `ANALYSIS_RETENTION`, and
   `GateRollup` already windows to 7 days by default on `/gate`, so as long as

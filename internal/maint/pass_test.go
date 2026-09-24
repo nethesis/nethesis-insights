@@ -80,8 +80,8 @@ func TestRunAlwaysReturnsNilEvenWhenEveryPruneFails(t *testing.T) {
 
 // A failure pruning one table must not stop the others -- the three tables
 // are independent (no rollup-before-prune ordering exists for this
-// pipeline, unlike Threat Shield's or fleet sizing's), so all three must
-// still be attempted regardless of an earlier one's outcome.
+// pipeline, unlike fleet sizing's), so all three must still be attempted
+// regardless of an earlier one's outcome.
 func TestOnePruneFailingDoesNotSkipTheOthers(t *testing.T) {
 	r := &recordingReader{templatesErr: errors.New("boom")}
 	if err := New(r, testConfig()).Run(context.Background(), 0); err != nil {
@@ -154,7 +154,7 @@ func newTestLogsStore(t *testing.T) *logsstore.Store {
 // TestPassPrunesEachTableIndependently is the executable form of this
 // package's central design choice: system_templates, findings and analyses
 // are pruned on their own schedules with no ordering constraint between
-// them (unlike Threat Shield's rollup-before-prune), and a run against a mix
+// them (unlike fleet sizing's rollup-before-prune), and a run against a mix
 // of eligible and ineligible rows in all three tables leaves exactly the
 // expected survivors in each.
 func TestPassPrunesEachTableIndependently(t *testing.T) {
