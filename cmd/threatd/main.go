@@ -12,6 +12,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -102,6 +104,39 @@ func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w
 	}
 }
 
+// validateConsensus refuses a consensus configuration threatd must not run
+// with. Every problem is reported at once, each naming its variable, so the
+// line in systemctl status says what to fix.
+func validateConsensus(cfg blocklist.Config, interval time.Duration) error {
+	var errs []error
+	if interval <= 0 {
+		// time.NewTicker panics on it: a crash loop under Restart=always.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_CONSENSUS_INTERVAL must be positive, got %s", interval))
+	}
+	if cfg.MinSystems < blocklist.MinSystemsFloor {
+		errs = append(errs, fmt.Errorf("BLOCKLIST_MIN_SYSTEMS must be at least %d, got %d", blocklist.MinSystemsFloor, cfg.MinSystems))
+	}
+	if cfg.Window <= 0 {
+		errs = append(errs, fmt.Errorf("BLOCKLIST_WINDOW must be positive, got %s", cfg.Window))
+	}
+	if cfg.TTL < cfg.Window {
+		// A listing expires TTL after its last sighting, which is inside the
+		// window: a shorter TTL writes an entry already expired.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_TTL (%s) must be at least BLOCKLIST_WINDOW (%s)", cfg.TTL, cfg.Window))
+	}
+	if cfg.MaxEntries <= 0 {
+		errs = append(errs, fmt.Errorf("BLOCKLIST_MAX_ENTRIES must be positive, got %d", cfg.MaxEntries))
+	}
+	if cfg.Retention < cfg.Window {
+		// Events pruned before the window closes are never counted.
+		errs = append(errs, fmt.Errorf("THREAT_EVENT_RETENTION (%s) must be at least BLOCKLIST_WINDOW (%s)", cfg.Retention, cfg.Window))
+	}
+	if cfg.AllowlistRequestRetention <= 0 {
+		errs = append(errs, fmt.Errorf("THREAT_ALLOWLIST_REQUEST_RETENTION must be positive, got %s", cfg.AllowlistRequestRetention))
+	}
+	return errors.Join(errs...)
+}
+
 func main() {
 	startedAt := time.Now().UnixMilli()
 
@@ -148,6 +183,20 @@ func main() {
 	threatQueueWorkers := svc.GetenvInt("THREAT_QUEUE_WORKERS", 2)
 	threatQueueTimeout := svc.GetenvDuration("THREAT_QUEUE_TIMEOUT", 30*time.Second)
 
+	consensusCfg := blocklist.Config{
+		Window:     blocklistWindow,
+		MinSystems: blocklistMinSystems,
+		TTL:        blocklistTTL,
+		MaxEntries: blocklistMaxEntries,
+		Retention:  threatRetention,
+
+		AllowlistRequestRetention: allowlistRequestRetention,
+	}
+	if err := validateConsensus(consensusCfg, consensusInterval); err != nil {
+		slog.Error("invalid Threat Shield configuration", "error", err)
+		os.Exit(1)
+	}
+
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
@@ -189,15 +238,7 @@ func main() {
 
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
-	consensus := blocklist.New(s, snapshot, blocklist.Config{
-		Window:     blocklistWindow,
-		MinSystems: blocklistMinSystems,
-		TTL:        blocklistTTL,
-		MaxEntries: blocklistMaxEntries,
-		Retention:  threatRetention,
-
-		AllowlistRequestRetention: allowlistRequestRetention,
-	})
+	consensus := blocklist.New(s, snapshot, consensusCfg)
 
 	// The queue's handler is bound to the store here, before either the queue
 	// or the API server exists: the queue's handler must be fixed at

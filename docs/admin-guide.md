@@ -350,18 +350,22 @@ depth. It never logs a credential: the model API key appears only as
 
 ### `threatd`
 
+`threatd` checks the consensus settings below at startup. A value outside
+the stated limits stops it with an error naming the variable, visible in
+`systemctl status threatd`.
+
 | Variable | Purpose |
 |---|---|
 | `ADMIN_API_KEY` | password for the blocklist dashboard's write routes — secret. Unset means those routes answer `405`, never a default credential. Only `threatd` reads this |
-| `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`) |
-| `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`) |
-| `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`) |
-| `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`) |
-| `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`) |
-| `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). The daily rollup is written before the prune, so the trend outlives them |
+| `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`). Must be positive |
+| `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`). Must be positive |
+| `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
+| `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
+| `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive |
+| `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). The daily rollup is written before the prune, so the trend outlives them. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`) |
 | `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` | distinct pending CIDRs one system may hold in the allowlist review queue (default `25`). Over-cap asks are **refused** with `429`, not truncated — a request is a permanent row only a human decision deletes. Re-asking about a CIDR the system already raised is always accepted, since it adds no row |
-| `THREAT_ALLOWLIST_REQUEST_RETENTION` | how long an unreviewed client allowlist request is kept (default `2160h`, 90 days). Pruned as a step in the consensus pass; a dropped ask can simply be made again, which also re-ranks it as current evidence. The audit trail is never pruned |
+| `THREAT_ALLOWLIST_REQUEST_RETENTION` | how long an unreviewed client allowlist request is kept (default `2160h`, 90 days). Pruned as a step in the consensus pass; a dropped ask can simply be made again, which also re-ranks it as current evidence. The audit trail is never pruned. Must be positive |
 | `THREAT_QUEUE_SIZE` | sanitized reports buffered before ingest answers 503 (default `256`) |
 | `THREAT_QUEUE_WORKERS` | concurrent store writes (default `2`) |
 | `THREAT_QUEUE_TIMEOUT` | ceiling for one report's write (default `30s`) |

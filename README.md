@@ -85,10 +85,20 @@ reasons, templates, baselines, queue depth and the effective configuration.
 (`health`, `findings`, `open`, `post <bundle.json>`, `events`, `feed`,
 `allowlist-request`, `raw <path>`).
 
-Threat Shield, with the promotion rule relaxed to a single reporter:
+Threat Shield, with a fast consensus pass:
 
-    BLOCKLIST_MIN_SYSTEMS=1 BLOCKLIST_CONSENSUS_INTERVAL=10s \
+    BLOCKLIST_CONSENSUS_INTERVAL=10s \
     UI_LISTEN_ADDR=127.0.0.1:9606 DB_PATH=/tmp/threat.db go run ./cmd/threatd
+
+The promotion rule cannot be relaxed: `threatd` refuses to start with
+`BLOCKLIST_MIN_SYSTEMS` below 3. To see an address promoted, post the same
+report ([format](docs/api/threat-events-ingest.md)) as three systems —
+standalone, the Basic username is the system:
+
+    for s in sys-a sys-b sys-c; do
+      curl -u $s:x -X POST -H 'Content-Type: application/json' \
+        --data @events.json localhost:9595/v1/events
+    done
 
 ### The edge collector, without installing the module
 

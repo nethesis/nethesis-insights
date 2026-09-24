@@ -31,6 +31,12 @@ type Reader interface {
 	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
 }
 
+// MinSystemsFloor is the fewest distinct systems threatd will start with as
+// its promotion rule. It may be raised, never lowered: below it one noisy
+// fleet, or one subscriber with a second credential, publishes an address to
+// every entitled node.
+const MinSystemsFloor = 3
+
 // Config is the consensus rule plus its housekeeping windows.
 type Config struct {
 	Window     time.Duration // rolling observation window
