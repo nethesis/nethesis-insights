@@ -14,6 +14,22 @@ This exists so that, on a dev box, you can look at what the four binaries and
 Traefik are actually reporting without first standing up an external
 monitoring system and handing it a credential.
 
+> **Never install this on a host that serves real nodes.** It weakens two
+> boundaries the production shape depends on:
+>
+> - **The trusted proxy.** Inside the pod, Grafana and Prometheus connect to
+>   the backends from `127.0.0.1`, which is inside `TRUSTED_PROXY_CIDRS`. A
+>   request from either — Grafana's datasource proxy, say — is therefore
+>   believed about its `system_id` with no password check, exactly as if
+>   Traefik had authenticated it. Anyone who can make Grafana send a request
+>   can post threat events as three different systems and get any address
+>   published.
+> - **The operator UI's origin.** Grafana is served at `/grafana` on the same
+>   hostname as the dashboards, so a script running on a Grafana page is
+>   *same-origin* with `/blocklist`. It passes the cross-site check, and the
+>   browser attaches the operator's cached Basic credentials, so it can add an
+>   allowlist entry.
+
 ## What it adds
 
 Two containers in the **same pod** as the five production ones, so they share

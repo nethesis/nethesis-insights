@@ -680,7 +680,10 @@ in the pod itself, scraping the four binaries over loopback with no credential
 at all — see [the development monitoring
 stack](../deploy/dev/README.md). That is a dev convenience and is deliberately
 absent from a production deployment, which is expected to be scraped by the
-monitoring system that already exists.
+monitoring system that already exists. **Never install it on a host serving
+real nodes**: inside the pod, Grafana counts as the trusted proxy and shares
+the dashboards' web address, which lets it post events under any system and
+make allowlist changes. The development stack's README explains both.
 
 The five jobs all scrape the same host on the same port, differing only in
 `metrics_path`, so the `job` label is what separates them. That label is what
