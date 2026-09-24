@@ -71,14 +71,21 @@ func (s *Store) ListThreatEvents(ctx context.Context, systemID, attackerIP strin
 // prune had left, so every day past retention ended up describing only its
 // last few minutes. The day bucket is integer division on the millis column,
 // with the label formatted in Go.
-func (s *Store) ThreatDailyStats(ctx context.Context, limit int) ([]ThreatDailyRow, error) {
+//
+// Unlike every other UI listing, this one takes no limit: THREAT_EVENT_RETENTION
+// already bounds how many (day, scenario) groups exist -- a row-count LIMIT on
+// top of that cut days short instead of bounding an otherwise-unbounded query,
+// since a retention window a few scenarios wider than 200/7 rows silently lost
+// its oldest kept day mid-scenario. The caller (internal/ui/threat) caches the
+// result instead, since the scan holds the store's only connection for its
+// duration.
+func (s *Store) ThreatDailyStats(ctx context.Context) ([]ThreatDailyRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT observed_at / ?, scenario, COUNT(DISTINCT attacker_ip), SUM(hit_count)
 		FROM threat_events
 		GROUP BY observed_at / ?, scenario
 		ORDER BY observed_at / ? DESC, scenario
-		LIMIT ?
-	`, dayMillis, dayMillis, dayMillis, clampLimit(limit))
+	`, dayMillis, dayMillis, dayMillis)
 	if err != nil {
 		return nil, fmt.Errorf("store: threat daily stats: %w", err)
 	}

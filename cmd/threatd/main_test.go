@@ -19,7 +19,7 @@ import (
 // rather than trusting that threatd's copy of newUIServer kept the same
 // early return.
 func TestNewUIServerIsNilWhenTheAddressIsEmpty(t *testing.T) {
-	if got := newUIServer("", "", nil, nil, nil, nil, "", chrome.Info{}); got != nil {
+	if got := newUIServer("", "", nil, nil, nil, nil, "", chrome.Info{}, time.Hour); got != nil {
 		t.Fatalf("newUIServer(\"\") returned %v, want nil -- the UI must be off by default", got)
 	}
 }

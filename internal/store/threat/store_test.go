@@ -45,7 +45,7 @@ func TestThreatMethodsOnEmptyDatabase(t *testing.T) {
 	if rows, err := s.ListThreatEvents(ctx, "", "", 0); err != nil || len(rows) != 0 {
 		t.Fatalf("ListThreatEvents: %v, %d rows", err, len(rows))
 	}
-	if rows, err := s.ThreatDailyStats(ctx, 0); err != nil || len(rows) != 0 {
+	if rows, err := s.ThreatDailyStats(ctx); err != nil || len(rows) != 0 {
 		t.Fatalf("ThreatDailyStats: %v, %d rows", err, len(rows))
 	}
 	if rows, err := s.ThreatIngestStats(ctx, 0); err != nil || len(rows) != 0 {
@@ -473,7 +473,7 @@ func TestThreatDailyStatsIsComputedFromTheRawEvents(t *testing.T) {
 		threatEvent("203.0.113.7", "ssh_bruteforce", day1+2000, 1),
 	})
 
-	stats, err := s.ThreatDailyStats(ctx, 0)
+	stats, err := s.ThreatDailyStats(ctx)
 	if err != nil {
 		t.Fatalf("ThreatDailyStats: %v", err)
 	}
@@ -493,12 +493,42 @@ func TestThreatDailyStatsIsComputedFromTheRawEvents(t *testing.T) {
 	if _, err := s.PruneThreatEvents(ctx, day2); err != nil {
 		t.Fatalf("PruneThreatEvents: %v", err)
 	}
-	stats, err = s.ThreatDailyStats(ctx, 0)
+	stats, err = s.ThreatDailyStats(ctx)
 	if err != nil {
 		t.Fatalf("ThreatDailyStats after the prune: %v", err)
 	}
 	if len(stats) != 1 || stats[0].Day != "2026-08-27" {
 		t.Fatalf("after the prune: got %+v, want only 2026-08-27", stats)
+	}
+}
+
+// ThreatDailyStats must never cut a day short. A row-count LIMIT here is not
+// bounding an otherwise-unbounded query -- THREAT_EVENT_RETENTION already
+// does that -- it is quietly truncating the oldest kept day mid-scenario the
+// first time a retention window holds more than LIMIT/7 scenarios in a day,
+// which presents as a day whose "total" is missing whatever scenario the cut
+// landed on.
+func TestThreatDailyStatsHasNoRowLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const scenarios = 250 // comfortably over the old per-query LIMIT of 200
+	day := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC).UnixMilli()
+	for i := 0; i < scenarios; i++ {
+		scenario := fmt.Sprintf("scenario-%03d", i)
+		if _, _, err := s.InsertThreatEvents(ctx, "sys-a", []model.ThreatEvent{
+			threatEvent(fmt.Sprintf("203.0.113.%d", i%250), scenario, day, 1),
+		}); err != nil {
+			t.Fatalf("insert scenario %d: %v", i, err)
+		}
+	}
+
+	stats, err := s.ThreatDailyStats(ctx)
+	if err != nil {
+		t.Fatalf("ThreatDailyStats: %v", err)
+	}
+	if len(stats) != scenarios {
+		t.Fatalf("daily stats rows: got %d, want %d (every scenario, uncut)", len(stats), scenarios)
 	}
 }
 

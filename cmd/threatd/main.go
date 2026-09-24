@@ -37,8 +37,10 @@ import (
 
 // newUIServer builds threatd's operator UI listener, or nil when
 // UI_LISTEN_ADDR is empty -- the UI is off unless an operator explicitly
-// turns it on.
-func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info) *http.Server {
+// turns it on. retention is THREAT_EVENT_RETENTION: /stats needs it to know
+// which of the days it shows is the oldest one, cut mid-day by the rolling
+// prune rather than complete.
+func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info, retention time.Duration) *http.Server {
 	if addr == "" {
 		return nil
 	}
@@ -46,7 +48,7 @@ func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w
 		BasePath: basePath,
 		AdminKey: adminKey,
 		Info:     info,
-	}, func() int64 { return time.Now().UnixMilli() })
+	}, retention, func() int64 { return time.Now().UnixMilli() })
 	if err != nil {
 		slog.Error("failed to build the operator UI", "error", err)
 		os.Exit(1)
@@ -340,7 +342,7 @@ func main() {
 		StartedAt: startedAt,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
-	})
+	}, consensusCfg.Retention)
 
 	// NEVER log the API key or any credential.
 	slog.Info("starting threatd", "listen_addr", listenAddr, "ui_listen_addr", uiListenAddr,

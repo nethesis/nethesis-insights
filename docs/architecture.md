@@ -598,7 +598,15 @@ load-bearing:
    SQLite connection for its duration, so `internal/ui/threat` caches it —
    at most one scan every five minutes, whatever the page traffic, and a
    request arriving mid-refresh blocks on the same cache rather than
-   starting a second scan of its own.
+   starting a second scan of its own. `ThreatDailyStats` itself takes no row
+   limit, unlike every other UI listing: `THREAT_EVENT_RETENTION` already
+   bounds how many `(day, scenario)` groups exist, and a row-count `LIMIT` on
+   top of that used to cut the oldest kept day short mid-scenario the first
+   time a retention window held more scenarios than the limit allowed for.
+   Two of the days `/stats` shows are routinely incomplete regardless of that
+   fix, and the page says so: the oldest retained day, because the rolling
+   prune above cuts it mid-day rather than at a boundary, and today (UTC),
+   because it has not finished yet.
 8. `PruneThreatIngestDaily(now - THREAT_INGEST_RETENTION)` drops per-system
    ingest-accounting rows past their own, much longer retention (default
    `2160h`, 90 days, against `THREAT_EVENT_RETENTION`'s default week).

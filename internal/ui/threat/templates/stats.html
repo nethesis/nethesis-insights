@@ -27,7 +27,11 @@ five minutes.{{end}}</small></p>
 </tr>
 {{end}}
 <tr>
-<td class="mono"><strong>{{$day}} total</strong></td>
+<td class="mono">
+<strong>{{$day}} total</strong>
+{{if .Partial}} <small>(partial: starts before the retention cutoff)</small>{{end}}
+{{if .InProgress}} <small>(today, still in progress)</small>{{end}}
+</td>
 <td></td><td></td>
 <td class="num"><strong>{{.TotalHits}}</strong></td>
 </tr>

@@ -18,10 +18,17 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
 
-// testNow is the fixed clock every constructor below wires in, so the
-// /stats cache's notion of elapsed time is deterministic across the whole
-// package instead of depending on wall-clock time.
+// testNow and testRetention are the fixed clock and retention window every
+// constructor below wires in, so the /stats page's day labels (partial,
+// in-progress) are deterministic across the whole package instead of
+// depending on wall-clock time. threatReader's one daily-stats fixture
+// ("2026-08-27") is neither today nor before this retention's cutoff under
+// this clock, so the generic route/rendering tests see neither label; the
+// dedicated tests for the labels build their own fixtures against the same
+// clock.
 var testNow = time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC).UnixMilli()
+
+const testRetention = 168 * time.Hour
 
 func testClock() int64 { return testNow }
 
@@ -92,7 +99,7 @@ func (f *fakeReader) ListThreatEvents(_ context.Context, systemID, attackerIP st
 	return out, nil
 }
 
-func (f *fakeReader) ThreatDailyStats(_ context.Context, _ int) ([]threatstore.ThreatDailyRow, error) {
+func (f *fakeReader) ThreatDailyStats(_ context.Context) ([]threatstore.ThreatDailyRow, error) {
 	atomic.AddInt32(&f.threatDailyCalls, 1)
 	if f.threatDailyStarted != nil {
 		select {
@@ -237,7 +244,7 @@ func testInfo() chrome.Info {
 // meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()}, testClock)
+	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -248,7 +255,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 // live state on the status page.
 func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()}, testClock)
+	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -259,7 +266,7 @@ func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 // w, authenticated with adminKey.
 func newWriteTestServer(t *testing.T, r Reader, feed Feed, w Writer, adminKey string) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testClock)
+	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

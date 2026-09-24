@@ -49,7 +49,7 @@ func TestStatsPageCachesDailyTotalsForTheTTL(t *testing.T) {
 	now := testNow
 	clock := func() int64 { return now }
 	r := threatReader()
-	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, clock)
+	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, clock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestStatsPageSingleFlightsAConcurrentRefresh(t *testing.T) {
 	r := threatReader()
 	r.threatDailyGate = make(chan struct{})
 	r.threatDailyStarted = make(chan struct{}, 1)
-	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, testClock)
+	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

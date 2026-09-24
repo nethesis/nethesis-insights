@@ -37,10 +37,13 @@ type Reader interface {
 	Counts(ctx context.Context) (threatstore.Counts, error)
 	ListBlocklistEntries(ctx context.Context, limit int) ([]threatstore.BlocklistRow, error)
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]threatstore.ThreatEventRow, error)
-	// ThreatDailyStats is a GROUP BY day, scenario scan over every retained
-	// event -- expensive enough that the server caches it; see
-	// dailyStatsCache.
-	ThreatDailyStats(ctx context.Context, limit int) ([]threatstore.ThreatDailyRow, error)
+	// ThreatDailyStats takes no limit, unlike every other listing here:
+	// THREAT_EVENT_RETENTION already bounds how many (day, scenario) groups
+	// exist, and a row-count limit on top of that used to cut the oldest kept
+	// day short mid-scenario rather than bound anything unbounded. The scan
+	// is still expensive -- GROUP BY day, scenario over every retained event
+	// -- so the caller caches it; see dailyStatsCache.
+	ThreatDailyStats(ctx context.Context) ([]threatstore.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]threatstore.ThreatIngestRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]threatstore.AllowlistRow, error)
@@ -173,6 +176,7 @@ type server struct {
 	writer     Writer
 	rt         Runtime
 	config     []chrome.ConfigItem
+	retention  time.Duration
 	now        func() int64
 	dailyStats *dailyStatsCache
 }
@@ -184,9 +188,12 @@ type server struct {
 // read-only dashboard, with no write form reachable at all -- and a nil rt
 // renders the status page's queue section as "n/a".
 //
-// now is the injected clock /stats' cache reads to decide whether it is
-// still within statsCacheTTL of its last refresh.
-func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, now func() int64) (http.Handler, error) {
+// retention is THREAT_EVENT_RETENTION, the same window the ingest pipeline
+// prunes on: /stats needs it to know which of the days it shows is the oldest
+// one, cut mid-day by the rolling prune rather than complete. now is the
+// injected clock both /stats' cache and its day labels read -- one clock, so
+// a test can pin "today" and the cache's notion of elapsed time together.
+func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, retention time.Duration, now func() int64) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -212,6 +219,7 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, now
 		writer:     w,
 		rt:         rt,
 		config:     cfg.Info.Config,
+		retention:  retention,
 		now:        now,
 		dailyStats: newDailyStatsCache(now),
 	}
@@ -456,16 +464,33 @@ type statsPageData struct {
 // additive so it sums cleanly; DistinctIPs is deliberately not summed here,
 // since the same address can appear under more than one scenario and a
 // naive sum would overcount it.
+//
+// Partial and InProgress both mean "this day's total is not the whole day,
+// don't read it as one": Partial is the oldest kept day, cut short by the
+// rolling THREAT_EVENT_RETENTION prune sweeping mid-day rather than at a day
+// boundary; InProgress is today, UTC, which has not finished yet. A one-day
+// fleet can be both at once, and both render if so.
 type dayGroup struct {
-	Day       string
-	Rows      []threatstore.ThreatDailyRow
-	TotalHits int64
+	Day        string
+	Rows       []threatstore.ThreatDailyRow
+	TotalHits  int64
+	Partial    bool
+	InProgress bool
+}
+
+// dayStartMillis parses a "YYYY-MM-DD" day key (threatstore.DayString's
+// format) back into the UTC instant it starts at, the inverse operation
+// needed to compare a day against the retention cutoff.
+func dayStartMillis(day string) (int64, bool) {
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return 0, false
+	}
+	return t.UnixMilli(), true
 }
 
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
-	dailyRows, computedAt, err := s.dailyStats.get(r.Context(), func(ctx context.Context) ([]threatstore.ThreatDailyRow, error) {
-		return s.reader.ThreatDailyStats(ctx, threatStatsLimit)
-	})
+	dailyRows, computedAt, err := s.dailyStats.get(r.Context(), s.reader.ThreatDailyStats)
 	if err != nil {
 		s.chrome.StoreError(w, "stats", err)
 		return
@@ -479,6 +504,21 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		g.Rows = append(g.Rows, row)
 		g.TotalHits += row.TotalHits
 	}
+	// ThreatDailyStats orders newest day first, so the oldest retained day --
+	// the one the rolling prune may have cut mid-day -- is the last group.
+	if n := len(daily); n > 0 {
+		now := s.now()
+		if start, ok := dayStartMillis(daily[n-1].Day); ok && start < now-s.retention.Milliseconds() {
+			daily[n-1].Partial = true
+		}
+		today := threatstore.DayString(now)
+		for i := range daily {
+			if daily[i].Day == today {
+				daily[i].InProgress = true
+			}
+		}
+	}
+
 	ingest, err := s.reader.ThreatIngestStats(r.Context(), threatStatsLimit)
 	if err != nil {
 		s.chrome.StoreError(w, "stats", err)
