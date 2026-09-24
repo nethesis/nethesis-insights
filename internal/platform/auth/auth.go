@@ -15,7 +15,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -131,7 +130,7 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 		MaxPositiveEntries: defaultMaxPositiveEntries,
 		MaxNegativeEntries: defaultMaxNegativeEntries,
 		pepper:             pepper,
-		fwd:                &forwarder{url: validateURL, client: &http.Client{Timeout: timeout}},
+		fwd:                &forwarder{url: validateURL, client: newValidatorClient(timeout)},
 		cache:              newCache(now, 0, 0),
 		now:                now,
 	}

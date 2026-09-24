@@ -1708,7 +1708,11 @@ three pipelines instead of each running its own cache.
 The validator being unreachable is a distinct case from it rejecting
 credentials: `ErrUnavailable` maps to `503` (fail closed — an edge retries a
 gap, but a false `401` is a customer-visible outage), while
-`ErrInvalidCredentials` maps to `401`. A stale cache entry is preferred over
+`ErrInvalidCredentials` maps to `401`. Only `200`, `401` and `403` are
+verdicts; any other status is `ErrUnavailable`, and that includes a `3xx`,
+which the validator client never follows. Followed, a redirect is scored by
+whatever its target answers, and a login or maintenance page's `200` would
+validate every credential and cache it. A stale cache entry is preferred over
 `ErrUnavailable` when the validator is down and something was cached before.
 Traefik's `forwardAuth` middleware calls `GET /auth` on `authd` and passes its
 status straight back to the client on anything but `2xx`, which is what keeps

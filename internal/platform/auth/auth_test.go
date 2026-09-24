@@ -149,6 +149,33 @@ func TestUnavailableWithNoCacheFailsClosed(t *testing.T) {
 	}
 }
 
+// A redirect is not a verdict. Followed, it lands on whatever the target
+// answers -- a login or maintenance page answering 200 -- and that 200 was
+// scored as a valid credential, for any credential at all, then cached.
+func TestARedirectIsUnavailableNeverFollowed(t *testing.T) {
+	var landed int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&landed, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/login", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	a := newAuth(t, srv.URL, time.Now)
+	for _, service := range []string{"", "ng-blacklist"} {
+		systemID, err := a.Validate(context.Background(), basicHeader("garbage", "nope"), service)
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("service %q: got systemID=%q err=%v, want ErrUnavailable", service, systemID, err)
+		}
+	}
+	if got := atomic.LoadInt32(&landed); got != 0 {
+		t.Fatalf("the redirect target was requested %d times, want 0", got)
+	}
+}
+
 func TestUnavailableFallsBackToStaleCache(t *testing.T) {
 	v := &validator{status: http.StatusOK}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 )
 
 // outcome is what the remote validator answered for one Authorization
@@ -33,6 +34,19 @@ const (
 type forwarder struct {
 	url    string
 	client *http.Client
+}
+
+// newValidatorClient never follows a redirect: the 3xx itself reaches check,
+// which scores it unavailable. Go's default policy would follow it and score
+// whatever the target answered -- a login or maintenance page's 200 then
+// validates any credential at all, and caches it.
+func newValidatorClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func (f *forwarder) check(ctx context.Context, validateURL, authHeader string) outcome {
