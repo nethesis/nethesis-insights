@@ -123,68 +123,37 @@ func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, capped b
 	return nil
 }
 
-// Ready reports whether a snapshot has ever been generated. Before the first
-// successful pass the feed must answer 503 rather than an empty body: an
-// empty list means "no threats", which silently disables protection on every
-// client that imports it.
-func (s *Snapshot) Ready() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ready
-}
-
-// View is one generation's servable state, read together.
+// View is one generation's servable state, read together under a single
+// lock. It is the ONLY way anything outside this package observes a
+// Snapshot: Body(), Gzip(), ETag(), Entries(), GeneratedAt(), Ready() and
+// Capped() used to exist as separate accessors, each taking its own RLock,
+// and a Generate landing between two of those calls could pair one
+// generation's ETag with another's entry count or capped flag -- the same
+// torn read the feed handler used to have, just moved into the operator UI's
+// status page instead of fixed. View is what both callers (the feed handler
+// in internal/api/threat and the status/index pages in internal/ui/threat)
+// use now; there is no other way to read this state.
 type View struct {
-	Ready      bool
-	ETag       string
-	Body, Gzip []byte
+	Ready       bool
+	ETag        string
+	Body, Gzip  []byte
+	Entries     int
+	GeneratedAt int64
+	Capped      bool
 }
 
-// View returns the ETag and both bodies under a single read lock. The feed
-// handler must use it rather than ETag() and Body() separately: a Generate
-// landing between two reads pairs one generation's tag with another's body,
-// and a client caching that pair is then pinned to the wrong list by 304s.
-// The slices are never mutated after Generate, so sharing them is safe.
+// View returns one generation's full state under a single read lock. The
+// slices are never mutated after Generate, so sharing them is safe.
 func (s *Snapshot) View() View {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return View{Ready: s.ready, ETag: s.etag, Body: s.body, Gzip: s.gz}
-}
-
-func (s *Snapshot) Body() []byte {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.body
-}
-
-func (s *Snapshot) Gzip() []byte {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.gz
-}
-
-func (s *Snapshot) ETag() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.etag
-}
-
-func (s *Snapshot) GeneratedAt() int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.generatedAt
-}
-
-func (s *Snapshot) Entries() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.entries
-}
-
-// Capped reports whether the last generation left live entries out because
-// of BLOCKLIST_MAX_ENTRIES.
-func (s *Snapshot) Capped() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.capped
+	return View{
+		Ready:       s.ready,
+		ETag:        s.etag,
+		Body:        s.body,
+		Gzip:        s.gz,
+		Entries:     s.entries,
+		GeneratedAt: s.generatedAt,
+		Capped:      s.capped,
+	}
 }

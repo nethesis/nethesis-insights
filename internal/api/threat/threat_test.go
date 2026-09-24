@@ -668,7 +668,7 @@ func TestBlocklistNeverPairsAnETagWithAnotherGenerationsBody(t *testing.T) {
 		if err := snap.Generate(rows, rule, false, threatNow); err != nil {
 			t.Fatalf("generate: %v", err)
 		}
-		tagOf[snap.ETag()] = rows[0].AttackerIP
+		tagOf[snap.View().ETag] = rows[0].AttackerIP
 	}
 
 	snap := blocklist.NewSnapshot()
@@ -711,14 +711,15 @@ func TestBlocklistServesThePlainTextFeed(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
 		t.Fatalf("content-type: got %q", ct)
 	}
-	if rec.Header().Get("ETag") != snap.ETag() {
-		t.Fatalf("etag: got %q, want %q", rec.Header().Get("ETag"), snap.ETag())
+	view := snap.View()
+	if rec.Header().Get("ETag") != view.ETag {
+		t.Fatalf("etag: got %q, want %q", rec.Header().Get("ETag"), view.ETag)
 	}
 	if rec.Header().Get("Cache-Control") != "max-age=900" {
 		t.Fatalf("cache-control: got %q", rec.Header().Get("Cache-Control"))
 	}
-	if rec.Body.String() != string(snap.Body()) {
-		t.Fatalf("body: got %q, want %q", rec.Body.String(), string(snap.Body()))
+	if rec.Body.String() != string(view.Body) {
+		t.Fatalf("body: got %q, want %q", rec.Body.String(), string(view.Body))
 	}
 }
 
@@ -735,7 +736,8 @@ func TestBlocklistAnswers304OnAMatchingETag(t *testing.T) {
 	snap := generatedSnapshot(t, "203.0.113.7", threatNow)
 	h := threatServer(&fakeThreatStore{}, nil, snap)
 
-	for _, header := range []string{snap.ETag(), `W/` + snap.ETag(), `"other", ` + snap.ETag(), "*"} {
+	etag := snap.View().ETag
+	for _, header := range []string{etag, `W/` + etag, `"other", ` + etag, "*"} {
 		rec := getBlocklist(t, h, true, map[string]string{"If-None-Match": header})
 		if rec.Code != http.StatusNotModified {
 			t.Fatalf("If-None-Match %q: got %d, want 304", header, rec.Code)
@@ -767,8 +769,8 @@ func TestBlocklistServesGzipWhenAccepted(t *testing.T) {
 		t.Fatalf("gzip reader: %v", err)
 	}
 	got, _ := io.ReadAll(zr)
-	if string(got) != string(snap.Body()) {
-		t.Fatalf("decompressed body: %q, want %q", got, snap.Body())
+	if want := snap.View().Body; string(got) != string(want) {
+		t.Fatalf("decompressed body: %q, want %q", got, want)
 	}
 }
 

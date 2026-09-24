@@ -298,8 +298,8 @@ func TestExpiryRemovesTheEntry(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("expired entry survived: %+v", rows)
 	}
-	if snap.Entries() != 0 {
-		t.Fatalf("snapshot entries: got %d, want 0", snap.Entries())
+	if e := snap.View().Entries; e != 0 {
+		t.Fatalf("snapshot entries: got %d, want 0", e)
 	}
 }
 
@@ -383,7 +383,7 @@ func TestAddingAnAllowlistEntryUnlistsAPromotedAddress(t *testing.T) {
 	if got := listed(t, s); len(got) != 1 || got[0] != "198.51.100.9" {
 		t.Fatalf("got %v, want the allowlisted row deleted", got)
 	}
-	if body := string(snap.Body()); strings.Contains(body, "203.0.113.7") {
+	if body := string(snap.View().Body); strings.Contains(body, "203.0.113.7") {
 		t.Fatalf("the regenerated feed still serves the allowlisted address: %q", body)
 	}
 }
@@ -438,7 +438,7 @@ func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	if len(listed(t, s)) != 0 {
 		t.Fatal("the aborted pass promoted anyway")
 	}
-	if snap.Ready() {
+	if snap.View().Ready {
 		t.Fatal("the aborted pass replaced the snapshot")
 	}
 }
@@ -461,7 +461,7 @@ func TestTheFeedCapKeepsTheMostRecentlySeen(t *testing.T) {
 
 	_, snap := runPass(t, s, cfg)
 
-	body := string(snap.Body())
+	body := string(snap.View().Body)
 	for _, ip := range []string{"203.0.113.2", "203.0.113.3"} {
 		if !strings.Contains(body, ip+"\n") {
 			t.Fatalf("feed is missing recently seen %s:\n%s", ip, body)
@@ -470,8 +470,8 @@ func TestTheFeedCapKeepsTheMostRecentlySeen(t *testing.T) {
 	if strings.Contains(body, "203.0.113.1\n") {
 		t.Fatalf("feed kept the least recently seen address over a fresher one:\n%s", body)
 	}
-	if snap.Entries() != 2 || !snap.Capped() {
-		t.Fatalf("entries=%d capped=%v, want 2 and capped", snap.Entries(), snap.Capped())
+	if v := snap.View(); v.Entries != 2 || !v.Capped {
+		t.Fatalf("entries=%d capped=%v, want 2 and capped", v.Entries, v.Capped)
 	}
 }
 
@@ -488,8 +488,8 @@ func TestTheFeedIsNotCappedAtExactlyMaxEntries(t *testing.T) {
 
 	_, snap := runPass(t, s, cfg)
 
-	if snap.Entries() != 2 || snap.Capped() {
-		t.Fatalf("entries=%d capped=%v, want 2 and not capped", snap.Entries(), snap.Capped())
+	if v := snap.View(); v.Entries != 2 || v.Capped {
+		t.Fatalf("entries=%d capped=%v, want 2 and not capped", v.Entries, v.Capped)
 	}
 }
 
@@ -557,8 +557,8 @@ func TestIngestDailyPruneFailureDoesNotAbortThePass(t *testing.T) {
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("Run: got %v, want the pass to survive a failed ingest-daily prune", err)
 	}
-	if !strings.Contains(string(snap.Body()), "203.0.113.7") {
-		t.Fatalf("the snapshot was not regenerated: %q", snap.Body())
+	if !strings.Contains(string(snap.View().Body), "203.0.113.7") {
+		t.Fatalf("the snapshot was not regenerated: %q", snap.View().Body)
 	}
 }
 
@@ -574,8 +574,9 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
-	firstBody := string(snap.Body())
-	firstGenerated := snap.GeneratedAt()
+	firstView := snap.View()
+	firstBody := string(firstView.Body)
+	firstGenerated := firstView.GeneratedAt
 	if !strings.Contains(firstBody, "203.0.113.7") {
 		t.Fatalf("first snapshot: %q", firstBody)
 	}
@@ -585,11 +586,12 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 		t.Fatal("second pass: got nil error, want failure")
 	}
 
-	if string(snap.Body()) != firstBody {
-		t.Fatalf("the failed pass replaced the body: %q", snap.Body())
+	secondView := snap.View()
+	if string(secondView.Body) != firstBody {
+		t.Fatalf("the failed pass replaced the body: %q", secondView.Body)
 	}
-	if snap.GeneratedAt() != firstGenerated {
-		t.Fatalf("the failed pass moved generated_at: %d -> %d", firstGenerated, snap.GeneratedAt())
+	if secondView.GeneratedAt != firstGenerated {
+		t.Fatalf("the failed pass moved generated_at: %d -> %d", firstGenerated, secondView.GeneratedAt)
 	}
 }
 
@@ -686,7 +688,7 @@ func TestAllowlistRequestPruneFailureDoesNotAbortThePass(t *testing.T) {
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("Run: got %v, want the pass to survive a failed request prune", err)
 	}
-	if !strings.Contains(string(snap.Body()), "203.0.113.7") {
-		t.Fatalf("the snapshot was not regenerated: %q", snap.Body())
+	if v := snap.View(); !strings.Contains(string(v.Body), "203.0.113.7") {
+		t.Fatalf("the snapshot was not regenerated: %q", v.Body)
 	}
 }

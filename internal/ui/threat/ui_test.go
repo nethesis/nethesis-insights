@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
@@ -107,7 +108,8 @@ func (f *fakeReader) ListAllowlistAudit(_ context.Context, limit int) ([]threats
 	return out, nil
 }
 
-// fakeFeed is a fixed snapshot state.
+// fakeFeed is a fixed snapshot state, returned whole from View() the same way
+// *blocklist.Snapshot returns it -- one call, not five separate accessors.
 type fakeFeed struct {
 	ready       bool
 	entries     int
@@ -116,11 +118,15 @@ type fakeFeed struct {
 	capped      bool
 }
 
-func (f fakeFeed) Ready() bool        { return f.ready }
-func (f fakeFeed) Entries() int       { return f.entries }
-func (f fakeFeed) GeneratedAt() int64 { return f.generatedAt }
-func (f fakeFeed) ETag() string       { return f.etag }
-func (f fakeFeed) Capped() bool       { return f.capped }
+func (f fakeFeed) View() blocklist.View {
+	return blocklist.View{
+		Ready:       f.ready,
+		Entries:     f.entries,
+		GeneratedAt: f.generatedAt,
+		ETag:        f.etag,
+		Capped:      f.capped,
+	}
+}
 
 // fakeRuntime is a fixed ingest-queue state, mirroring logsui's fakeRuntime.
 type fakeRuntime struct {

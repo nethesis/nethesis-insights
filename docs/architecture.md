@@ -627,18 +627,24 @@ and publish an address someone had explicitly excluded.
 
 ### Feed: `GET /v1/feed` (public path `/blocklist/v1/feed`)
 
-`blocklist.Snapshot` holds the body, its gzip encoding and its `ETag`
+`blocklist.Snapshot` holds the body, its gzip encoding, its `ETag`
 (`sha256` of the entry set and the rule, not of the body, whose `generated:`
-line changes every pass) behind an `RWMutex`. Serving never touches the
-database, so the cost of the feed is flat regardless of subscriber count, and
-only a successful generation replaces what is held — a failed pass keeps
-serving the previous list with its original `generated:` timestamp.
+line changes every pass), the entry count, `generated_at` and whether the
+feed cap bound, behind an `RWMutex`. Serving never touches the database, so
+the cost of the feed is flat regardless of subscriber count, and only a
+successful generation replaces what is held — a failed pass keeps serving the
+previous list with its original `generated:` timestamp.
 
-The handler reads all three through one `Snapshot.View()`, under a single read
-lock. Read separately, a generation landing between the `ETag` and the body
-paired one generation's tag with another's body, and a client caching that
-pair was then held on the wrong list by `304`s whenever the entry set came back
-to the first one.
+`View()` is the only way anything outside the package reads that state, and
+it returns every field together under one read lock — there are no separate
+per-field accessors. This handler reads it for the `ETag` and the two bodies:
+read separately, a generation landing between the `ETag` and the body paired
+one generation's tag with another's body, and a client caching that pair was
+then held on the wrong list by `304`s whenever the entry set came back to the
+first one. `internal/ui/threat`'s status and index pages read the same `View`
+for the entry count, `generated_at` and capped flag, for the same reason: five
+separate accessors under five separate locks used to let a Generate landing
+mid-read pair one generation's `ETag` with another's entry count.
 
 Before the first successful pass the snapshot is not ready and the handler
 answers `503`. That distinction matters: to a client importing the list, an
@@ -765,10 +771,12 @@ shared `internal/ui/chrome`. Each depends only on `model` and its own
 `store/*` package (through a local `Reader` interface, plus a local `Writer`
 for threatd's write routes); `ui/logs` adds a local `Runtime` interface
 (`Depth`/`Cap`, satisfied by `*queue.Queue`) for queue state, `ui/threat` adds
-a local `Feed` interface (satisfied by `*blocklist.Snapshot`) for the
-blocklist's live state, and `ui/sizing` imports `internal/sizing` for the
-score's threshold table and its constants. None imports `api/*`, `analyzer`,
-`blocklist` or `baseline`.
+a local `Feed` interface (satisfied by `*blocklist.Snapshot`), whose one method
+returns `blocklist.View` — the same type the feed handler itself reads, so
+both callers share one torn-read-free view of the snapshot's state — and
+`ui/sizing` imports `internal/sizing` for the score's threshold table and its
+constants. None imports `api/*`, `analyzer` or `baseline`, and `ui/threat`'s
+only reason to import `blocklist` at all is that one type.
 
 In front of all three sits Traefik, serving them at `/logs`, `/blocklist` and
 `/sizing` and BasicAuth-protecting every request with `ADMIN_API_KEY` as the

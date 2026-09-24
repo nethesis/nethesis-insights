@@ -179,7 +179,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 
 	slog.Info("blocklist consensus pass",
 		"candidates", len(rows), "promoted", len(promoted), "expired", expired,
-		"unlisted", unlisted, "entries", r.snap.Entries(), "min_systems", r.cfg.MinSystems)
+		"unlisted", unlisted, "entries", r.snap.View().Entries, "min_systems", r.cfg.MinSystems)
 	return nil
 }
 

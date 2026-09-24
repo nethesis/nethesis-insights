@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
@@ -73,17 +74,19 @@ type Writer interface {
 	RejectAllowlistRequest(ctx context.Context, cidr, actor, note string, now int64) error
 }
 
-// Feed reports the state of the rendered blocklist snapshot.
-// *blocklist.Snapshot satisfies it. It may be nil -- tests, and a
-// misconfigured deployment -- in which case the pages render "n/a" rather
-// than panicking. Only the snapshot's *state* crosses this boundary, never
-// its body: the UI does not serve the feed.
+// Feed reports the state of the rendered blocklist snapshot, through the
+// same blocklist.View the feed handler (internal/api/threat) reads: one
+// RLock, one point-in-time generation. Five separate accessors under five
+// separate locks used to back this interface, and a Generate landing between
+// two of those calls could pair one generation's ETag with another's entry
+// count or capped flag -- the same torn read the feed handler itself was
+// once fixed for. *blocklist.Snapshot satisfies it. It may be nil -- tests,
+// and a misconfigured deployment -- in which case the pages render "n/a"
+// rather than panicking. feedState is built from one View call; the two
+// pages that show the feed never read View.Body or View.Gzip, only the
+// status fields.
 type Feed interface {
-	Ready() bool
-	Entries() int
-	GeneratedAt() int64
-	ETag() string
-	Capped() bool
+	View() blocklist.View
 }
 
 // Runtime reports the live state of threatd's ingest queue.
@@ -299,13 +302,14 @@ func (s *server) feedState() feedState {
 	if s.feed == nil {
 		return feedState{}
 	}
+	v := s.feed.View()
 	return feedState{
 		Present:     true,
-		Ready:       s.feed.Ready(),
-		Entries:     s.feed.Entries(),
-		GeneratedAt: s.feed.GeneratedAt(),
-		ETag:        s.feed.ETag(),
-		Capped:      s.feed.Capped(),
+		Ready:       v.Ready,
+		Entries:     v.Entries,
+		GeneratedAt: v.GeneratedAt,
+		ETag:        v.ETag,
+		Capped:      v.Capped,
 	}
 }
 

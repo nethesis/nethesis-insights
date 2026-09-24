@@ -31,11 +31,12 @@ func testRule() Rule {
 // protection on every client that imports it.
 func TestNewSnapshotIsNotReady(t *testing.T) {
 	s := NewSnapshot()
-	if s.Ready() {
+	v := s.View()
+	if v.Ready {
 		t.Fatal("a fresh snapshot must not be ready")
 	}
-	if s.Body() != nil || s.ETag() != "" || s.Entries() != 0 {
-		t.Fatalf("fresh snapshot is not empty: %q %q %d", s.Body(), s.ETag(), s.Entries())
+	if v.Body != nil || v.ETag != "" || v.Entries != 0 {
+		t.Fatalf("fresh snapshot is not empty: %q %q %d", v.Body, v.ETag, v.Entries)
 	}
 }
 
@@ -47,7 +48,7 @@ func TestGenerateRendersHeaderAndEntries(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	lines := strings.Split(strings.TrimRight(string(s.Body()), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(string(s.View().Body), "\n"), "\n")
 	if lines[0] != "# nethesis threat shield v1" {
 		t.Fatalf("first line: %q", lines[0])
 	}
@@ -59,8 +60,8 @@ func TestGenerateRendersHeaderAndEntries(t *testing.T) {
 	if lines[2] != "198.51.100.44" || lines[3] != "203.0.113.12" {
 		t.Fatalf("entries out of order: %v", lines[2:])
 	}
-	if !s.Ready() || s.Entries() != 2 || s.GeneratedAt() != now {
-		t.Fatalf("state: ready=%v entries=%d generated=%d", s.Ready(), s.Entries(), s.GeneratedAt())
+	if v := s.View(); !v.Ready || v.Entries != 2 || v.GeneratedAt != now {
+		t.Fatalf("state: ready=%v entries=%d generated=%d", v.Ready, v.Entries, v.GeneratedAt)
 	}
 }
 
@@ -78,14 +79,15 @@ func TestGenerateIsDeterministic(t *testing.T) {
 		t.Fatalf("Generate b: %v", err)
 	}
 
-	if string(a.Body()) != string(b.Body()) {
-		t.Fatalf("bodies differ:\n%q\n%q", a.Body(), b.Body())
+	aView, bView := a.View(), b.View()
+	if string(aView.Body) != string(bView.Body) {
+		t.Fatalf("bodies differ:\n%q\n%q", aView.Body, bView.Body)
 	}
-	if a.ETag() != b.ETag() {
-		t.Fatalf("etags differ: %q vs %q", a.ETag(), b.ETag())
+	if aView.ETag != bView.ETag {
+		t.Fatalf("etags differ: %q vs %q", aView.ETag, bView.ETag)
 	}
 	// IPv4 sorts before IPv6.
-	got := strings.Split(strings.TrimRight(string(a.Body()), "\n"), "\n")[2:]
+	got := strings.Split(strings.TrimRight(string(aView.Body), "\n"), "\n")[2:]
 	want := []string{"198.51.100.1", "203.0.113.9", "2001:db8::5"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -105,17 +107,17 @@ func TestETagIsStableAcrossRegenerationsOfTheSameEntries(t *testing.T) {
 	if err := s.Generate(entries, testRule(), false, 1000); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	first, firstBody := s.ETag(), string(s.Body())
+	firstView := s.View()
+	first, firstBody := firstView.ETag, string(firstView.Body)
 
 	if err := s.Generate(entries, testRule(), false, 1000+5*60*1000); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 
-	if s.ETag() != first {
-		t.Fatalf("etag rotated on an unchanged list: %q -> %q", first, s.ETag())
-	}
-	// The body must still be refreshed, so a client can judge staleness.
-	if string(s.Body()) == firstBody {
+	if got := s.View(); got.ETag != first {
+		t.Fatalf("etag rotated on an unchanged list: %q -> %q", first, got.ETag)
+	} else if string(got.Body) == firstBody {
+		// The body must still be refreshed, so a client can judge staleness.
 		t.Fatal("the body's generated timestamp did not advance")
 	}
 }
@@ -125,13 +127,13 @@ func TestETagIsStableAcrossRegenerationsOfTheSameEntries(t *testing.T) {
 func TestETagChangesWithTheRule(t *testing.T) {
 	s := NewSnapshot()
 	_ = s.Generate(rows("203.0.113.1"), testRule(), false, 1000)
-	first := s.ETag()
+	first := s.View().ETag
 
 	stricter := testRule()
 	stricter.MinSystems = 5
 	_ = s.Generate(rows("203.0.113.1"), stricter, false, 1000)
 
-	if s.ETag() == first {
+	if s.View().ETag == first {
 		t.Fatal("etag did not change when the promotion rule did")
 	}
 }
@@ -141,13 +143,13 @@ func TestETagChangesWithContent(t *testing.T) {
 	s := NewSnapshot()
 
 	_ = s.Generate(rows("203.0.113.1"), testRule(), false, now)
-	first := s.ETag()
+	first := s.View().ETag
 	if !strings.HasPrefix(first, `"sha256-`) {
 		t.Fatalf("etag format: %q", first)
 	}
 
 	_ = s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), false, now)
-	if s.ETag() == first {
+	if s.View().ETag == first {
 		t.Fatal("etag did not change when the body did")
 	}
 }
@@ -158,7 +160,8 @@ func TestGzipRoundTripsToTheBody(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	zr, err := gzip.NewReader(bytes.NewReader(s.Gzip()))
+	view := s.View()
+	zr, err := gzip.NewReader(bytes.NewReader(view.Gzip))
 	if err != nil {
 		t.Fatalf("gzip reader: %v", err)
 	}
@@ -167,8 +170,8 @@ func TestGzipRoundTripsToTheBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gzip: %v", err)
 	}
-	if string(got) != string(s.Body()) {
-		t.Fatalf("gzip body mismatch:\n%q\n%q", got, s.Body())
+	if string(got) != string(view.Body) {
+		t.Fatalf("gzip body mismatch:\n%q\n%q", got, view.Body)
 	}
 }
 
@@ -179,13 +182,13 @@ func TestGenerateRecordsWhetherTheFeedWasCapped(t *testing.T) {
 	if err := s.Generate(rows("203.0.113.1", "203.0.113.2"), testRule(), true, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if s.Entries() != 2 || !s.Capped() {
-		t.Fatalf("entries=%d capped=%v, want 2 and capped", s.Entries(), s.Capped())
+	if v := s.View(); v.Entries != 2 || !v.Capped {
+		t.Fatalf("entries=%d capped=%v, want 2 and capped", v.Entries, v.Capped)
 	}
 	if err := s.Generate(rows("203.0.113.1"), testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if s.Capped() {
+	if s.View().Capped {
 		t.Fatal("a later uncapped generation still reports capped")
 	}
 }
@@ -197,8 +200,8 @@ func TestGenerateSkipsUnparseableRows(t *testing.T) {
 	if err := s.Generate(rows("203.0.113.1", "garbage", ""), testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if s.Entries() != 1 {
-		t.Fatalf("entries: got %d, want 1", s.Entries())
+	if s.View().Entries != 1 {
+		t.Fatalf("entries: got %d, want 1", s.View().Entries)
 	}
 }
 
@@ -209,13 +212,14 @@ func TestGenerateWithNoEntriesIsStillReady(t *testing.T) {
 	if err := s.Generate(nil, testRule(), false, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if !s.Ready() {
+	v := s.View()
+	if !v.Ready {
 		t.Fatal("an empty but successful generation must be ready")
 	}
-	if s.Entries() != 0 {
-		t.Fatalf("entries: got %d, want 0", s.Entries())
+	if v.Entries != 0 {
+		t.Fatalf("entries: got %d, want 0", v.Entries)
 	}
-	if !strings.HasPrefix(string(s.Body()), "# nethesis threat shield v1\n") {
-		t.Fatalf("body: %q", s.Body())
+	if !strings.HasPrefix(string(v.Body), "# nethesis threat shield v1\n") {
+		t.Fatalf("body: %q", v.Body)
 	}
 }
