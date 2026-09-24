@@ -5,6 +5,7 @@ package chrome
 
 import (
 	"io/fs"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"testing"
@@ -180,5 +181,39 @@ func TestSameOriginWrite(t *testing.T) {
 				t.Fatalf("sameOriginWrite = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A username made only of zero-width characters and spaces is visually
+// indistinguishable from an empty one, and used to slip past the actor == ""
+// check below: CleanText trimmed the surrounding real space before it
+// stripped the zero-width characters hiding it from TrimSpace, leaving a
+// single space behind rather than collapsing to "". Fixed in CleanText
+// itself (internal/threat), by stripping before trimming; this test pins the
+// consumer's behavior, since AuthenticateWrite is what an empty actor would
+// actually reach.
+func TestAuthenticateWriteRejectsAZeroWidthActor(t *testing.T) {
+	b, err := New(Config{
+		Name:     "testd",
+		AdminKey: "k",
+		Pages:    []string{"status.html"},
+		Templates: fstest.MapFS{
+			"status.html": &fstest.MapFile{Data: []byte(`{{define "content"}}ok{{end}}`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "http://example.test/blocklist/allowlist", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.SetBasicAuth("\u200b \u200b", "k")
+
+	w := httptest.NewRecorder()
+	if _, ok := b.AuthenticateWrite(w, req); ok {
+		t.Fatal("a username of only zero-width characters and spaces was accepted as an actor")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }

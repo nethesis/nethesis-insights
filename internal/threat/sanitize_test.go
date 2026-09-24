@@ -370,6 +370,21 @@ func TestCleanTextStripsFormatCharacters(t *testing.T) {
 		{"\ufeffcrowdsecurity/http-probing", "crowdsecurity/http-probing"}, // BOM
 		{"soft\u00adhyphen", "softhyphen"},
 		{"Müller's scanner — ok", "Müller's scanner — ok"},
+		// Stripping must run before trimming, not after. TrimSpace stops the
+		// instant it meets a rune that is not IsSpace, so a format character
+		// sitting at the very boundary hides a real space one step further in
+		// from ever being reached: "ssh-bf \u200b" trims to itself, unchanged,
+		// because the outermost rune is the zero-width space, not the space
+		// beneath it. Stripped first, the zero-width space is gone before
+		// TrimSpace ever runs, so the real space it was hiding is now the
+		// outermost rune and trims away normally. Leading variant below.
+		{"crowdsecurity/ssh-bf \u200b", "crowdsecurity/ssh-bf"},
+		{"\u200b crowdsecurity/ssh-bf", "crowdsecurity/ssh-bf"},
+		// The isolating case: nothing here is anything but format characters
+		// and plain spaces, so the whole value must collapse to empty --
+		// exactly what a caller checking actor == "" (chrome.AuthenticateWrite)
+		// relies on to refuse it.
+		{"\u200b \u200b", ""},
 	} {
 		if got := CleanText(tc.in, 128); got != tc.want {
 			t.Fatalf("CleanText(%q) = %q, want %q", tc.in, got, tc.want)

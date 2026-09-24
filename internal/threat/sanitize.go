@@ -348,16 +348,22 @@ func cleanScenario(s string) string {
 // scenarios distinct. These fields are machine names and short notes, where
 // such characters have no legitimate use.
 //
+// Stripping runs before TrimSpace, deliberately. A zero-width space is not
+// whitespace, so trimming first stops at it and leaves the real space it
+// hides: "ssh-bf \u200b" became "ssh-bf ", a scenario distinct from
+// "ssh-bf", and a Basic username of "\u200b \u200b" became " ", which
+// passed AuthenticateWrite's empty-actor check.
+//
 // This never rejects -- fail-open on content is the rule for text fields
 // throughout this pipeline (see Sanitize's doc comment) -- so a caller that
 // needs to reject unprintable input must check before calling this.
 func CleanText(s string, max int) string {
-	s = strings.Map(func(r rune) rune {
+	s = strings.TrimSpace(strings.Map(func(r rune) rune {
 		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
-	}, strings.TrimSpace(s))
+	}, s))
 
 	if runes := []rune(s); len(runes) > max {
 		s = string(runes[:max])
