@@ -198,6 +198,39 @@ func TestPromotedEntryCarriesItsEvidence(t *testing.T) {
 	}
 }
 
+// A reporter's clock running fast must not decide which addresses survive
+// the feed cap or how long an entry's TTL runs: the feed is ordered by
+// last_seen_at DESC and BLOCKLIST_MAX_ENTRIES cuts on that order, so a
+// sighting dated hours into the future would put its address first under the
+// cap and extend its expiry by the same margin. promote must clamp the
+// sighting it uses for last_seen_at (and therefore expires_at) at now; the
+// event itself keeps whatever timestamp it was stored with.
+func TestPromoteClampsAFutureSightingToNow(t *testing.T) {
+	s := newTestStore(t)
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		// ago is negative: now - (-23h) = now + 23h, a sighting dated into
+		// the future, exactly what a reporter with a fast clock would send.
+		report(t, s, sys, "203.0.113.7", "ssh_bruteforce", -23*hour)
+	}
+
+	runPass(t, s, testConfig())
+
+	rows, err := s.ListBlocklist(context.Background(), now, 0)
+	if err != nil {
+		t.Fatalf("ListBlocklist: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows: got %d, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.LastSeenAt != now {
+		t.Fatalf("last_seen_at: got %d, want %d (clamped to now)", got.LastSeenAt, now)
+	}
+	if want := now + testConfig().TTL.Milliseconds(); got.ExpiresAt != want {
+		t.Fatalf("expires_at: got %d, want %d (now + TTL)", got.ExpiresAt, want)
+	}
+}
+
 // A refresh extends the TTL but does not restart the listing history.
 func TestRefreshExtendsTTLButKeepsFirstListedAt(t *testing.T) {
 	s := newTestStore(t)

@@ -294,14 +294,25 @@ func (r *Runner) promote(rows []threatstore.ThreatCandidateRow, allow threat.All
 		if len(c.systems) < r.cfg.MinSystems {
 			continue
 		}
+		// Clamped at now: the feed is ordered by last_seen_at DESC and
+		// BLOCKLIST_MAX_ENTRIES cuts on that order, so a reporter with a fast
+		// clock posting sightings dated hours into the future would put its
+		// addresses first under the cap and, since expires_at hangs off the
+		// same value, extend their listing by the same margin. Only the
+		// derived blocklist row is clamped -- the underlying threat_events
+		// row keeps whatever timestamp it was stored with.
+		lastSeen := c.lastSeen
+		if lastSeen > now {
+			lastSeen = now
+		}
 		scenarios := keys(c.scenarios)
 		out = append(out, threatstore.BlocklistRow{
 			AttackerIP: addr.String(),
 			// Ignored by the upsert when the row already exists: a refresh is
 			// not a new listing.
 			FirstListedAt:   now,
-			LastSeenAt:      c.lastSeen,
-			ExpiresAt:       c.lastSeen + r.cfg.TTL.Milliseconds(),
+			LastSeenAt:      lastSeen,
+			ExpiresAt:       lastSeen + r.cfg.TTL.Milliseconds(),
 			DistinctSystems: len(c.systems),
 			Scenarios:       scenarios,
 			Reason: threatstore.ListingReason{

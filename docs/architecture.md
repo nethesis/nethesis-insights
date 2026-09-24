@@ -565,7 +565,14 @@ load-bearing:
    adding an entry unlists an address rather than hiding it.
 4. Addresses with at least `BLOCKLIST_MIN_SYSTEMS` distinct systems are
    upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
-   `listing_reason` snapshot of the evidence.
+   `listing_reason` snapshot of the evidence. `last_seen` is clamped to `now`
+   here if the newest sighting is dated later than that: the feed is ordered
+   by `last_seen_at DESC` and `BLOCKLIST_MAX_ENTRIES` cuts on that order, so a
+   reporter with a fast clock posting sightings hours into the future would
+   otherwise put its addresses first under the cap and, since `expires_at`
+   hangs off the same value, extend their listing by the same margin. Only
+   the derived `threat_blocklist` row is clamped; the `threat_events` row
+   keeps whatever timestamp it was stored with.
 5. Expired entries are deleted.
 6. `Runner.unlist` deletes the **live** entries the allowlist now covers —
    `ListBlocklistIPs` then `DeleteBlocklistEntries`. Step 3 is only half of
