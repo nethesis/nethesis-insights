@@ -165,6 +165,10 @@ func TestSanitizeDropsNonPublicAddresses(t *testing.T) {
 		// this sanitizer deliberately keeps. Only the zone rule drops this.
 		{"zoned otherwise-acceptable v6", "2001:db8::1%eth0"},
 		{"zoned IPv4-mapped private v6", "::ffff:10.0.0.5%eth0"},
+		// The isolating case for the mapped form: Unmap discards a zone, so
+		// unless the zone is refused first this public address is stored
+		// as a bare 203.0.113.7.
+		{"zoned IPv4-mapped public v6", "::ffff:203.0.113.7%eth0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

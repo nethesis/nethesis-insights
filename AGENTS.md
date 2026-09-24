@@ -220,8 +220,11 @@ Threat Shield rules that are as load-bearing as the gate's:
   `IsLinkLocalUnicast` and `IsMulticast` are zone-agnostic, which is why the
   hole was only in the others. `publicUnicast` now rejects a zoned address
   outright (a zone is a local interface scope; it cannot describe a remote
-  attacker), and `Allowlist.Contains` and `blocklist.promote` normalise anyway —
-  the second lock, on the side that reads addresses back out of the store.
+  attacker), and `Sanitize` checks the zone **before** `Unmap`, which silently
+  discards the zone of a v4-mapped address — `::ffff:203.0.113.7%eth0` would
+  otherwise reach `publicUnicast` as a bare `203.0.113.7`. `Allowlist.Contains`
+  and `blocklist.promote` normalise anyway — the second lock, on the side that
+  reads addresses back out of the store.
 - **Every endpoint must appear in `docs/api/openapi.yaml`**, whose schemas mirror
   `internal/model` field-for-field. `docs/api/openapi_test.go` fails the build on a
   missing or stale path. The operator UI is deliberately not documented there.
@@ -693,9 +696,9 @@ successful no-op, not an error.
   `192.0.0.0/24`, `240.0.0.0/4` with broadcast, 6to4 and NAT64 — the two
   prefixes embedding an IPv4 address verbatim — and the reporter's own
   address), **each zoned as well as bare** (`fec0::1%eth0`, `::%eth0`,
-  `2002:c0a8:0101::1%eth0`), with `2001:db8::1%eth0` as the isolating case: the
-  bare form is a documentation address this sanitizer keeps, so only the zone
-  rule can drop it. Documentation ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
+  `2002:c0a8:0101::1%eth0`), with `2001:db8::1%eth0` and
+  `::ffff:203.0.113.7%eth0` as the isolating cases: each bare form is an
+  address this sanitizer keeps, so only the zone rule can drop it. Documentation ranges *kept*, CAPI-origin rejection, non-`ban`/non-`Ip`, unparseable and future
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".

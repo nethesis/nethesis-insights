@@ -188,11 +188,14 @@ func Sanitize(r model.ThreatReport, opts Options, now int64) Result {
 			res.Counters.DroppedBadIP++
 			continue
 		}
-		// Unmap only: a zone is not stripped here but refused by
-		// publicUnicast, so a scoped address is dropped as evidence rather
-		// than quietly rewritten into an address nobody reported.
+		// A zone is refused, never stripped, so a scoped address is dropped
+		// as evidence rather than quietly rewritten into an address nobody
+		// reported. It is checked before Unmap, which discards the zone of a
+		// v4-mapped address: ::ffff:203.0.113.7%eth0 would otherwise reach
+		// publicUnicast as a bare 203.0.113.7.
+		scoped := addr.Zone() != ""
 		addr = addr.Unmap()
-		if !publicUnicast(addr) || (opts.SourceIP.IsValid() && addr == opts.SourceIP.Unmap()) {
+		if scoped || !publicUnicast(addr) || (opts.SourceIP.IsValid() && addr == opts.SourceIP.Unmap()) {
 			res.Counters.DroppedPrivateIP++
 			continue
 		}
