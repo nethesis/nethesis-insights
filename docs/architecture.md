@@ -607,8 +607,10 @@ load-bearing:
     does, the addresses seen longest ago are cut, a warning is logged and the
     snapshot is marked capped, which both dashboard pages that show the feed
     report. An active attacker matters more than one the fleet last saw hours
-    ago. `limit <= 0` is uncapped: the UI listings' 200-row default used to
-    apply here and silently capped the feed.
+    ago. `BLOCKLIST_MAX_ENTRIES` is validated positive at startup, so `Run`
+    always asks for `MaxEntries + 1`. `ListBlocklist` itself treats
+    `limit <= 0` as every live entry rather than the UI listings' 200-row
+    default, which used to cap the feed silently.
 
 An error in steps 1–6 or 10 aborts the pass and returns; all three prunes
 (7, 8, 9) are logged and skipped instead, because housekeeping must not stop

@@ -38,6 +38,14 @@ type Reader interface {
 const MinSystemsFloor = 3
 
 // Config is the consensus rule plus its housekeeping windows.
+//
+// Runner trusts a validated Config: threatd's startup validation
+// (validateConfig in cmd/threatd/main.go) refuses to start with a
+// non-positive MaxEntries, Retention, IngestRetention or
+// AllowlistRequestRetention, so Run does not guard any of them a second
+// time. A test that builds a Config literal must therefore set every field
+// it exercises -- see testConfig in consensus_test.go -- rather than lean on
+// a zero value silently skipping a step.
 type Config struct {
 	Window     time.Duration // rolling observation window
 	MinSystems int           // distinct systems required to promote
@@ -90,7 +98,7 @@ type candidate struct {
 // Order matters twice: the unlist must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it
 // leaves the table, and the snapshot is regenerated last so it reflects the
-// expiries and unlistings this pass performed. The two prunes have no such
+// expiries and unlistings this pass performed. The three prunes have no such
 // constraint and sit together as housekeeping.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	rows, err := r.store.ConsensusCandidates(ctx, now-r.cfg.Window.Milliseconds())
@@ -120,51 +128,46 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 
 	// Housekeeping failures are logged, not fatal: they must not stop the
 	// feed from being regenerated with the promotions this pass just made.
-	if r.cfg.Retention > 0 {
-		if pruned, err := r.store.PruneThreatEvents(ctx, now-r.cfg.Retention.Milliseconds()); err != nil {
-			slog.Error("blocklist: prune failed", "error", err)
-		} else if pruned > 0 {
-			slog.Debug("blocklist: pruned expired threat events", "rows", pruned)
-		}
+	// cfg is validated at startup (see the doc comment on Config), so none
+	// of the three windows below is ever non-positive in production; a test
+	// that wants a step to no-op sets that field to a duration past its own
+	// data instead of relying on a zero value to skip the call.
+	if pruned, err := r.store.PruneThreatEvents(ctx, now-r.cfg.Retention.Milliseconds()); err != nil {
+		slog.Error("blocklist: prune failed", "error", err)
+	} else if pruned > 0 {
+		slog.Debug("blocklist: pruned expired threat events", "rows", pruned)
 	}
 
 	// Same convention: logged and skipped, never fatal. Without this,
 	// threat_ingest_daily grows one row per reporting system per day
 	// forever, and ListThreatSystems aggregates the whole table on every
 	// GET /systems.
-	if r.cfg.IngestRetention > 0 {
-		if pruned, err := r.store.PruneThreatIngestDaily(ctx, now-r.cfg.IngestRetention.Milliseconds()); err != nil {
-			slog.Error("blocklist: ingest-daily prune failed", "error", err)
-		} else if pruned > 0 {
-			slog.Debug("blocklist: pruned stale ingest-accounting rows", "rows", pruned)
-		}
+	if pruned, err := r.store.PruneThreatIngestDaily(ctx, now-r.cfg.IngestRetention.Milliseconds()); err != nil {
+		slog.Error("blocklist: ingest-daily prune failed", "error", err)
+	} else if pruned > 0 {
+		slog.Debug("blocklist: pruned stale ingest-accounting rows", "rows", pruned)
 	}
 
 	// Same convention: logged and skipped, never fatal. A review queue that
 	// keeps a few stale asks is a smaller problem than a feed that stopped
 	// being regenerated.
-	if r.cfg.AllowlistRequestRetention > 0 {
-		cutoff := now - r.cfg.AllowlistRequestRetention.Milliseconds()
-		if pruned, err := r.store.PruneAllowlistRequests(ctx, cutoff); err != nil {
-			slog.Error("blocklist: allowlist request prune failed", "error", err)
-		} else if pruned > 0 {
-			slog.Debug("blocklist: pruned stale allowlist requests", "rows", pruned)
-		}
+	if pruned, err := r.store.PruneAllowlistRequests(ctx, now-r.cfg.AllowlistRequestRetention.Milliseconds()); err != nil {
+		slog.Error("blocklist: allowlist request prune failed", "error", err)
+	} else if pruned > 0 {
+		slog.Debug("blocklist: pruned stale allowlist requests", "rows", pruned)
 	}
 
 	// One row past the cap is asked for only to learn whether the cap binds.
 	// The store orders most recently seen first, so what is cut is what the
 	// fleet saw longest ago: a feed that outgrows its consumers' memory is
 	// worse than a truncated one, but the truncation must be visible.
-	limit := 0
-	if r.cfg.MaxEntries > 0 {
-		limit = r.cfg.MaxEntries + 1
-	}
-	live, err := r.store.ListBlocklist(ctx, now, limit)
+	// MaxEntries is validated positive at startup, so this never asks for
+	// an uncapped list.
+	live, err := r.store.ListBlocklist(ctx, now, r.cfg.MaxEntries+1)
 	if err != nil {
 		return fmt.Errorf("blocklist: list: %w", err)
 	}
-	capped := r.cfg.MaxEntries > 0 && len(live) > r.cfg.MaxEntries
+	capped := len(live) > r.cfg.MaxEntries
 	if capped {
 		live = live[:r.cfg.MaxEntries]
 		slog.Warn("blocklist: feed capped at BLOCKLIST_MAX_ENTRIES; the least recently seen addresses are left out",

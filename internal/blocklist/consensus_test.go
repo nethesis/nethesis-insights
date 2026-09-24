@@ -22,13 +22,18 @@ const (
 
 var now = time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC).UnixMilli()
 
+// testConfig is a complete, valid Config: Run no longer guards a zero-valued
+// field (see Config's doc comment), so every field a test does not
+// specifically want to vary must still be set to something Run can act on.
 func testConfig() Config {
 	return Config{
-		Window:     time.Hour,
-		MinSystems: 3,
-		TTL:        24 * time.Hour,
-		MaxEntries: 50000,
-		Retention:  168 * time.Hour,
+		Window:                    time.Hour,
+		MinSystems:                3,
+		TTL:                       24 * time.Hour,
+		MaxEntries:                50000,
+		Retention:                 168 * time.Hour,
+		IngestRetention:           2160 * time.Hour,
+		AllowlistRequestRetention: 2160 * time.Hour,
 	}
 }
 
@@ -139,7 +144,9 @@ func TestOneSystemAcrossTwoScenariosIsStillOneSystem(t *testing.T) {
 	report(t, s, "sys-a", "203.0.113.7", "port_scan", 4*minute)
 	report(t, s, "sys-b", "203.0.113.7", "ssh_bruteforce", 3*minute)
 
-	runPass(t, s, Config{Window: time.Hour, MinSystems: 3, TTL: 24 * time.Hour, MaxEntries: 100})
+	cfg := testConfig()
+	cfg.MaxEntries = 100
+	runPass(t, s, cfg)
 
 	if got := listed(t, s); len(got) != 0 {
 		t.Fatalf("got %v, want nothing: two systems cannot become three by scenario", got)
