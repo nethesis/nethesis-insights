@@ -13,7 +13,7 @@ ARG SERVICE=insightsd
 # Stage 1: build a static, CGO-free binary.
 # --platform=$BUILDPLATFORM keeps multi-arch builds native: the Go toolchain
 # cross-compiles for $TARGETARCH instead of running the whole stage under QEMU.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.23-alpine3.21 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27-alpine3.24 AS builder
 
 ARG SERVICE
 
@@ -33,7 +33,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # Stage 2: runtime. No ENV, EXPOSE, VOLUME or HEALTHCHECK here -- each of the
 # four services binds its own port and path, so those belong to its quadlet
 # (deploy/quadlet/*.container), not to a single image shared by all of them.
-FROM docker.io/library/alpine:3.21
+FROM docker.io/library/alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -u 1001 -h /var/lib/app app
