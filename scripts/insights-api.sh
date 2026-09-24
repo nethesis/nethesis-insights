@@ -16,7 +16,7 @@
 #
 # Talking to one binary directly instead (no Traefik in front), e.g. during
 # development -- see README.md's manual round trip -- set INSIGHTS_URL to
-# that binary's own LISTEN_ADDR (default http://localhost:9595) and drop the
+# that binary's own LISTEN_ADDR (default http://127.0.0.1:9595) and drop the
 # /logs, /blocklist or /sizing prefix from the path yourself; the handlers
 # register unprefixed routes so a pipeline can run standalone.
 

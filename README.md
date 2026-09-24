@@ -65,15 +65,17 @@ Or directly:
 
     DB_PATH=/tmp/insights.db UI_LISTEN_ADDR=127.0.0.1:9596 go run ./cmd/insightsd
 
-    curl -u <system_id>:<anything> -X POST localhost:9595/v1/bundles -d @bundle.json
-    curl -u <system_id>:<anything> 'localhost:9595/v1/findings?since=0'
+    curl -u <system_id>:<anything> -X POST 127.0.0.1:9595/v1/bundles -d @bundle.json
+    curl -u <system_id>:<anything> '127.0.0.1:9595/v1/findings?since=0'
 
 This runs one service standalone, with no Traefik and no `authd` in front of
 it, so it answers on its own unprefixed routes. **Any password works**: the
 credential is checked by `authd` in a real deployment, and a standalone
 service only checks that the request came from `TRUSTED_PROXY_CIDRS` (default
-`127.0.0.0/8`, which already covers a local `curl`) before reading the
-`system_id` off the Basic username. Calling it from another machine needs that
+`127.0.0.0/8`) before reading the `system_id` off the Basic username. Call it
+on `127.0.0.1`, not `localhost`: where `localhost` resolves to `::1` first, as
+it does on Fedora, the request arrives from outside that range and is refused
+with `401`. Calling it from another machine needs that
 setting widened — see the admin guide's Authentication section for what that
 grants.
 
@@ -125,10 +127,6 @@ too old and would be dropped as `dropped_time`.
 After the next consensus pass (10s here), the address is on the feed:
 
     curl -u sys-a:x 127.0.0.1:9595/v1/feed
-
-`127.0.0.1`, not `localhost`: where `localhost` resolves to `::1` first, the
-request arrives from outside the default `TRUSTED_PROXY_CIDRS` and is
-refused.
 
 ### The edge collector, without installing the module
 
