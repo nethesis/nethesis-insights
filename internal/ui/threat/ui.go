@@ -37,6 +37,9 @@ type Reader interface {
 	Counts(ctx context.Context) (threatstore.Counts, error)
 	ListBlocklistEntries(ctx context.Context, limit int) ([]threatstore.BlocklistRow, error)
 	ListThreatEvents(ctx context.Context, systemID, attackerIP string, limit int) ([]threatstore.ThreatEventRow, error)
+	// ThreatDailyStats is a GROUP BY day, scenario scan over every retained
+	// event -- expensive enough that the server caches it; see
+	// dailyStatsCache.
 	ThreatDailyStats(ctx context.Context, limit int) ([]threatstore.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]threatstore.ThreatIngestRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
@@ -164,12 +167,14 @@ var writableRoutes = map[string]bool{
 }
 
 type server struct {
-	chrome *chrome.Base
-	reader Reader
-	feed   Feed
-	writer Writer
-	rt     Runtime
-	config []chrome.ConfigItem
+	chrome     *chrome.Base
+	reader     Reader
+	feed       Feed
+	writer     Writer
+	rt         Runtime
+	config     []chrome.ConfigItem
+	now        func() int64
+	dailyStats *dailyStatsCache
 }
 
 // NewServer builds threatd's operator UI handler. feed, w and rt may all be
@@ -178,7 +183,10 @@ type server struct {
 // unreachable -- an operator who has not set ADMIN_API_KEY gets the plain
 // read-only dashboard, with no write form reachable at all -- and a nil rt
 // renders the status page's queue section as "n/a".
-func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config) (http.Handler, error) {
+//
+// now is the injected clock /stats' cache reads to decide whether it is
+// still within statsCacheTTL of its last refresh.
+func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, now func() int64) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -198,12 +206,14 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config) (ht
 	}
 
 	srv := &server{
-		chrome: base,
-		reader: r,
-		feed:   feed,
-		writer: w,
-		rt:     rt,
-		config: cfg.Info.Config,
+		chrome:     base,
+		reader:     r,
+		feed:       feed,
+		writer:     w,
+		rt:         rt,
+		config:     cfg.Info.Config,
+		now:        now,
+		dailyStats: newDailyStatsCache(now),
 	}
 
 	mux := http.NewServeMux()
@@ -435,6 +445,10 @@ type statsPageData struct {
 	chrome.PageData
 	Daily  []dayGroup
 	Ingest []threatstore.ThreatIngestRow
+	// ComputedAt is when dailyStats last actually scanned threat_events --
+	// not "now": the cache can be up to statsCacheTTL old. Zero (never
+	// computed) renders nothing, the same convention chrome.FmtTime uses.
+	ComputedAt int64
 }
 
 // dayGroup folds ThreatDailyStats' per-day-per-scenario rows into one group
@@ -449,7 +463,9 @@ type dayGroup struct {
 }
 
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
-	dailyRows, err := s.reader.ThreatDailyStats(r.Context(), threatStatsLimit)
+	dailyRows, computedAt, err := s.dailyStats.get(r.Context(), func(ctx context.Context) ([]threatstore.ThreatDailyRow, error) {
+		return s.reader.ThreatDailyStats(ctx, threatStatsLimit)
+	})
 	if err != nil {
 		s.chrome.StoreError(w, "stats", err)
 		return
@@ -469,9 +485,10 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.chrome.Render(w, "stats.html", statsPageData{
-		PageData: s.chrome.PageData(r, "stats"),
-		Daily:    daily,
-		Ingest:   ingest,
+		PageData:   s.chrome.PageData(r, "stats"),
+		Daily:      daily,
+		Ingest:     ingest,
+		ComputedAt: computedAt,
 	})
 }
 

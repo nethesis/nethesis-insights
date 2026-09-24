@@ -46,7 +46,7 @@ func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w
 		BasePath: basePath,
 		AdminKey: adminKey,
 		Info:     info,
-	})
+	}, func() int64 { return time.Now().UnixMilli() })
 	if err != nil {
 		slog.Error("failed to build the operator UI", "error", err)
 		os.Exit(1)

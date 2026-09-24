@@ -7,7 +7,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 <h2>Daily totals</h2>
 <p><small>Addresses and hits per day and scenario, counted from the raw events
-still kept (<code>THREAT_EVENT_RETENTION</code>, 7 days by default).</small></p>
+still kept (<code>THREAT_EVENT_RETENTION</code>, 7 days by default).
+{{if .ComputedAt}}Computed at {{fmtTime .ComputedAt}}, refreshed at most every
+five minutes.{{end}}</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>

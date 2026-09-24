@@ -9,12 +9,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
 	threatstore "github.com/nethesis/nethesis-insights/internal/store/threat"
 	"github.com/nethesis/nethesis-insights/internal/ui/chrome"
 )
+
+// testNow is the fixed clock every constructor below wires in, so the
+// /stats cache's notion of elapsed time is deterministic across the whole
+// package instead of depending on wall-clock time.
+var testNow = time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC).UnixMilli()
+
+func testClock() int64 { return testNow }
 
 var errStore = errors.New("store unavailable")
 
@@ -33,6 +42,19 @@ type fakeReader struct {
 	audit            []threatstore.AllowlistAuditRow
 
 	err error // when set, every method returns this error instead
+
+	// threatDailyCalls counts every ThreatDailyStats call, atomically: the
+	// cache concurrency test drives this method from more than one goroutine.
+	threatDailyCalls int32
+	// threatDailyStarted, when non-nil, is sent to (non-blocking) the instant
+	// ThreatDailyStats begins -- before it might block on threatDailyGate --
+	// so a test can wait for "the first call is now in flight" without a
+	// sleep.
+	threatDailyStarted chan struct{}
+	// threatDailyGate, when non-nil, is read from before ThreatDailyStats
+	// returns, letting a test hold a call open to prove a concurrent request
+	// blocks on the cache instead of starting a second scan.
+	threatDailyGate chan struct{}
 }
 
 func (f *fakeReader) Counts(context.Context) (threatstore.Counts, error) {
@@ -71,6 +93,16 @@ func (f *fakeReader) ListThreatEvents(_ context.Context, systemID, attackerIP st
 }
 
 func (f *fakeReader) ThreatDailyStats(_ context.Context, _ int) ([]threatstore.ThreatDailyRow, error) {
+	atomic.AddInt32(&f.threatDailyCalls, 1)
+	if f.threatDailyStarted != nil {
+		select {
+		case f.threatDailyStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.threatDailyGate != nil {
+		<-f.threatDailyGate
+	}
 	return f.threatDaily, f.err
 }
 
@@ -205,7 +237,7 @@ func testInfo() chrome.Info {
 // meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()})
+	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()}, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -216,7 +248,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 // live state on the status page.
 func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()})
+	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()}, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -227,7 +259,7 @@ func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 // w, authenticated with adminKey.
 func newWriteTestServer(t *testing.T, r Reader, feed Feed, w Writer, adminKey string) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()})
+	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

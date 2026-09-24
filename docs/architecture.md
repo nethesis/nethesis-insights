@@ -592,7 +592,13 @@ load-bearing:
    exactly the retention window. A `threat_daily_stats` rollup used to run
    here and was removed — recomputed every pass while this prune cut mid-day,
    it re-rolled the oldest day from whatever the prune had left, so every day
-   past retention described only its last few minutes.
+   past retention described only its last few minutes. That live scan
+   (`GROUP BY day, scenario` with `COUNT(DISTINCT attacker_ip)` over every
+   retained event) is still expensive enough to hold `threatd`'s single
+   SQLite connection for its duration, so `internal/ui/threat` caches it —
+   at most one scan every five minutes, whatever the page traffic, and a
+   request arriving mid-refresh blocks on the same cache rather than
+   starting a second scan of its own.
 8. `PruneThreatIngestDaily(now - THREAT_INGEST_RETENTION)` drops per-system
    ingest-accounting rows past their own, much longer retention (default
    `2160h`, 90 days, against `THREAT_EVENT_RETENTION`'s default week).
