@@ -400,3 +400,20 @@ func TestSelectKeepsLinesFromADeviatingInstance(t *testing.T) {
 		t.Fatalf("the deviating instance's line was dropped, kept %q", lines[0].Template.ModuleID)
 	}
 }
+
+// A finding's class is built from the modules it cites and its primary
+// line, so a finding that mixes modules makes a class mixing unrelated
+// conclusions (on the dev fleet: a nethvoice certificate warning folded into
+// kamailio TCP errors). The model is told to keep one module per finding,
+// except for a direct cause, and the rule must not be dropped silently.
+func TestSystemPromptKeepsOneModulePerFinding(t *testing.T) {
+	for _, want := range []string{
+		"Each finding is one condition in one module",
+		"report conditions in different modules as separate findings",
+		"The only exception is a direct cause",
+	} {
+		if !strings.Contains(System, want) {
+			t.Errorf("System prompt lost %q", want)
+		}
+	}
+}

@@ -1687,6 +1687,22 @@ identifiers the model cites resolve to different templates than the ones it was
 shown. `analyzer.Process` builds it once, from `gate.Decision.Novel` and
 `gate.Decision.DeviatingModules`, and passes that one value to both.
 
+**One module per finding, unless one causes the other.** The server never
+takes identity from the model's text, but it does take the model's grouping:
+a finding's modules and its evidence key — and therefore its class — come from
+the templates it cites together. A finding that mixes modules makes a class
+that mixes conclusions. On the dev fleet one finding titled "NethVoice Problem
+with Self-Signed Certificate" cited one `nethvoice` certificate warning and
+five `nethvoice-proxy` kamailio TCP errors, which the same window had already
+reported on their own; the class it produced could only be delivered or kept
+internal as a whole. Since `prompt.Version` `v4` the system prompt asks for
+one module per finding, except when one module's lines are the direct cause of
+another's failure, and then for the summary to say which causes which. It is
+an instruction, not a check: the server does not split a mixed finding, because
+both halves would carry one title and summary that fits only one of them, and a
+genuine cross-module cause would be cut in two. `/review/stats` per
+`first_prompt_version` is where to see whether it holds.
+
 ## Cost control: the ceiling
 
 The gate is a per-window judgement and cannot answer the fleet-level question:

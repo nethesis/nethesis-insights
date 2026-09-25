@@ -12,7 +12,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-const Version = "v3"
+const Version = "v4"
 
 const System = `You analyze NethServer logs. You receive a digest of log volumes and masked ` +
 	`log-line templates with counts for one time window. Report ONLY real problems: ` +
@@ -27,7 +27,11 @@ const System = `You analyze NethServer logs. You receive a digest of log volumes
 	`exactly as shown at the start of each TEMPLATES line. Do not copy template text, ` +
 	`counts, module names or any other part of the line into evidence, and never ` +
 	`invent an identifier. Leave "modules" empty; it is derived from the identifiers ` +
-	`you cite. The title, summary and suggested_action are read by a system ` +
+	`you cite. Each finding is one condition in one module: cite only templates ` +
+	`that share the same module= value, and report conditions in different modules ` +
+	`as separate findings. The only exception is a direct cause: when one module's ` +
+	`lines are the cause of another module's failure, report them as one finding ` +
+	`citing both, and say in the summary which one causes which. The title, summary and suggested_action are read by a system ` +
 	`administrator: write them in plain language, and never mention template ` +
 	`identifiers or numeric priority levels in them -- name the module, or say ` +
 	`nothing. If nothing in this window warrants reporting, return an empty findings ` +
