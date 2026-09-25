@@ -72,7 +72,7 @@ func sortedKeys(set map[string]bool) []string {
 // never serve an unauthenticated fleet-wide page, so a reverse-proxy or
 // firewall mistake on :9595 cannot expose it.
 //
-// w and adminKey enable the trigger review routes; with adminKey empty the
+// w and adminKey enable the class review routes; with adminKey empty the
 // dashboard is read-only and renders no decision form.
 func newUIServer(addr, basePath string, r logsui.Reader, w logsui.Writer, rt logsui.Runtime, adminKey string, info chrome.Info) *http.Server {
 	if addr == "" {
@@ -105,7 +105,7 @@ func main() {
 	// enabling it is one explicit operator act, never a default.
 	uiListenAddr := svc.Getenv("UI_LISTEN_ADDR", "")
 	uiBasePath := svc.Getenv("UI_BASE_PATH", "")
-	// Off by default: the trigger review routes decide what customers are
+	// Off by default: the class review routes decide what customers are
 	// shown, so they stay unreachable until an operator sets the key.
 	adminAPIKey := svc.Getenv("ADMIN_API_KEY", "")
 	dbPath := svc.Getenv("DB_PATH", "/var/lib/insights/insights.db")

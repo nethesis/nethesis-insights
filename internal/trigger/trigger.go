@@ -11,7 +11,10 @@
 // A trigger key is not a finding's identity. fingerprint.Compute names what
 // the model concluded, per system; a trigger key names what the gate saw,
 // across systems, before any model ran. It carries no system_id on purpose:
-// the same condition on two clusters is one trigger, reviewed once.
+// the same condition on two clusters is one trigger. The reuse memory kept
+// against it is per system (see internal/store/logs/triggers.go), and no
+// operator decision is ever recorded against it -- review is per finding
+// class (fingerprint.Class).
 package trigger
 
 import (
@@ -27,9 +30,9 @@ import (
 )
 
 // Version prefixes every key. Changing what Key hashes renames every trigger
-// fleet-wide, and every operator decision recorded against the old names
-// stops applying -- so, like fingerprint.Version, it is bumped deliberately
-// and the break is visible.
+// fleet-wide: every system's reuse memory misses once, and the next window of
+// every remembered condition pays again. Like fingerprint.Version, it is
+// therefore bumped deliberately and the break is visible.
 const Version = "t1"
 
 // Key returns the trigger key for a gate decision:
@@ -92,10 +95,10 @@ func Key(d gate.Decision) string {
 	return Version + ":" + hex.EncodeToString(h.Sum(nil))
 }
 
-// IsSecurity reports whether the key for d carries the security bit. A
-// security trigger is delivered to the customer without review and can never
-// be ignored, so the analyzer and the store both ask this, and they must ask
-// the same question the key encodes.
+// IsSecurity reports whether the key for d carries the security bit: whether
+// one of the gate's security conditions (security_new, security_surge) fired.
+// The bit keeps a security window and a non-security window over the same
+// lines on distinct keys, so a reuse never answers one with the other's call.
 func IsSecurity(d gate.Decision) bool {
 	return d.SecurityNew || d.SecuritySurge
 }

@@ -165,7 +165,8 @@ func (s *Store) PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 // for a trigger, which the reuse check measures TriggerReuseWindow against.
 // A row past FindingRetention describes a call whose findings are being
 // pruned too, so it can answer nothing; the only cost of dropping it is that
-// distinct_systems counts the system again if the trigger returns there.
+// the next window on that system with the same trigger pays once before
+// reuse resumes.
 func (s *Store) PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error) {
 	return s.pruneLoop(ctx, `
 		DELETE FROM system_triggers

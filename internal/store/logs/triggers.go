@@ -14,13 +14,14 @@ import (
 
 // Trigger memory: what the analyzer consults between the gate and the LLM
 // call. A trigger key (internal/trigger) names the condition the gate saw,
-// per system; this file stores what this system last paid for it and what
-// its last paid call raised, so an unchanged condition is answered from
-// memory instead of paid for again.
+// fleet-wide -- it carries no system_id. The memory stored against it is per
+// system: this file records when each system last paid for a key and what
+// that call raised, so an unchanged condition is answered from memory
+// instead of paid for again.
 //
-// Nothing an operator decides lives here any more -- that is finding_classes
-// (see classes.go). A trigger key is per-system reuse memory only: it never
-// reaches the prompt, and no decision is ever recorded against it.
+// Nothing an operator decides lives here -- that is finding_classes (see
+// classes.go). The trigger memory is per-system reuse only: it never reaches
+// the prompt, and no decision is ever recorded against a trigger key.
 
 // TriggerLookup is everything the analyzer needs to decide a window, read
 // before anything about it is written.
@@ -51,9 +52,9 @@ type TriggerSighting struct {
 	Now    int64
 }
 
-// LookupTrigger reads a system's per-trigger state directly -- no alias
-// resolution, no fleet-wide row: those belonged to the operator decisions
-// this file no longer keeps.
+// LookupTrigger reads one system's state for key: its system_triggers row
+// and the findings its last paid call raised. There is no fleet-wide row to
+// consult -- reuse is per system.
 func (s *Store) LookupTrigger(ctx context.Context, systemID, key string) (TriggerLookup, error) {
 	var look TriggerLookup
 
