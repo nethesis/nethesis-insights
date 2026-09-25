@@ -51,7 +51,7 @@ everywhere it has ever happened.</small></p>
 <td><span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span></td>
 <td><span class="pill" data-status="{{.Status}}">{{.Status}}</span></td>
 <td class="num">{{.OccurrenceCount}}</td>
-<td class="mono nodes">{{range .NodeRefs}}<div{{if not .FQDN}} title="no name reported"{{end}}>{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
+<td class="mono nodes">{{range headNodes .NodeRefs}}<div title="{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{else}} (no name reported){{end}}">{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}{{with moreNodes .NodeRefs}}<div><small>+{{.}} more</small></div>{{end}}</td>
 <td>
 <button type="button" class="linklike truncate" title="{{.Title}}" commandfor="finding-{{.ID}}" command="show-modal">{{truncate .Title 80}}</button>
 <dialog id="finding-{{.ID}}" closedby="any">

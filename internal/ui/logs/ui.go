@@ -191,7 +191,11 @@ func NewServer(r Reader, w Writer, rt Runtime, cfg chrome.Config) (http.Handler,
 	cfg.Nav = nav
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
-	cfg.Funcs = template.FuncMap{"fmtIgnoreUntil": fmtIgnoreUntil}
+	cfg.Funcs = template.FuncMap{
+		"fmtIgnoreUntil": fmtIgnoreUntil,
+		"headNodes":      headNodes,
+		"moreNodes":      moreNodes,
+	}
 
 	base, err := chrome.New(cfg)
 	if err != nil {
@@ -389,6 +393,24 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 		Sort:       sort,
 		Severities: model.Severities,
 	})
+}
+
+// rowNodes is how many nodes a findings row lists before "+N more". A
+// finding on every node of a seven-node cluster made its row seven lines
+// tall; the dialog lists them all.
+const rowNodes = 3
+
+// headNodes returns the nodes a findings row lists.
+func headNodes(refs []model.NodeInfo) []model.NodeInfo {
+	if len(refs) > rowNodes {
+		return refs[:rowNodes]
+	}
+	return refs
+}
+
+// moreNodes returns how many nodes headNodes left out, 0 for none.
+func moreNodes(refs []model.NodeInfo) int {
+	return max(len(refs)-rowNodes, 0)
 }
 
 // sanitizeFindingsSort rejects anything but the known sort modes, defaulting

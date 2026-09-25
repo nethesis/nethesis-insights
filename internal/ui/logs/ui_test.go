@@ -795,3 +795,25 @@ func TestFindingsRowCellsLineUpWithHeader(t *testing.T) {
 		t.Errorf("empty-state row should span all %d columns (%s)", len(header), want)
 	}
 }
+
+// A row lists at most rowNodes nodes and says how many more there are; the
+// dialog still lists every one.
+func TestFindingsRowCapsTheNodeList(t *testing.T) {
+	r := seededReader()
+	r.findings = []model.Finding{nodeFinding(1, 2, 3, 4, 5, 6)}
+	r.roster = map[string]map[int]string{"sys-1": {1: "n1.example.org", 6: "n6.example.org"}}
+
+	body := get(t, newTestServer(t, r, nil), "/").Body.String()
+	header, cells := findingsTable(t, body)
+	nodes := cells[column(t, header, "Nodes")]
+	if !strings.Contains(nodes, "n1.example.org") || strings.Contains(nodes, "n6.example.org") {
+		t.Fatalf("the row must list the first %d nodes only: %q", rowNodes, nodes)
+	}
+	if !strings.Contains(nodes, "+3 more") {
+		t.Fatalf("the row does not say how many nodes it left out: %q", nodes)
+	}
+	title := cells[column(t, header, "Title")]
+	if !strings.Contains(title, "6 · n6.example.org") {
+		t.Fatal("the dialog must still list every node")
+	}
+}

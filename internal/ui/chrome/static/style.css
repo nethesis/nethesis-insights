@@ -26,6 +26,12 @@ figure.overflow-auto {
 figure.overflow-auto table {
   font-size: 0.875em;
 }
+/* Pico pads every cell by a full --pico-spacing on each side: ~320px across
+   the findings table's eight columns, enough on its own to push Last seen
+   off a 1200px container. Half keeps the columns readable. */
+figure.overflow-auto :is(th, td) {
+  padding-inline: calc(var(--pico-spacing) * 0.5);
+}
 
 .mono, td.mono, th.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -77,10 +83,16 @@ dialog > button.dialog-dismiss {
   cursor: default;
 }
 
-/* A node line ("7 · n6.example.org") reads as one unit; wrapping it inside
-   itself made rows taller without making the table any narrower. */
+/* A node line ("7 · n6.example.org") reads as one unit, so it does not
+   wrap; it is capped with an ellipsis instead, because an unwrapped line
+   sets the column's minimum width and one long FQDN anywhere on the page
+   used to stretch the column for every row. The full name is in the title
+   and in the finding's dialog. */
 td.nodes div {
+  max-width: 22ch;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 button.linklike {
