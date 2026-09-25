@@ -211,3 +211,58 @@ func TestClassDecisionIsAudited(t *testing.T) {
 		}
 	}
 }
+
+func TestListClassesRanksBySystemsAndCarriesTheirContext(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	// v3:wide on two systems, v3:narrow on one system twice.
+	seedClassFinding(t, s, "sys1", "fp-w1", "v3:wide", "low", "Wide old title", false, 1000)
+	seedClassFinding(t, s, "sys2", "fp-w2", "v3:wide", "low", "Wide new title", false, 2000)
+	seedClassFinding(t, s, "sys1", "fp-n1", "v3:narrow", "low", "Narrow", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-n2", "v3:narrow", "low", "Narrow", false, 3000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:narrow", VisibilityOperator, "op", 4000))
+
+	rows, err := s.ListClasses(ctx, ClassFilter{})
+	mustDo(t, err)
+	if len(rows) != 2 || rows[0].Key != "v3:wide" || rows[0].Systems != 2 || rows[0].Findings != 2 {
+		t.Fatalf("ranking: %+v", rows)
+	}
+	if got := rows[0].Titles; len(got) != 2 || got[0] != "Wide new title" {
+		t.Fatalf("titles must be distinct, newest first: %v", got)
+	}
+	if rows[1].Titles[0] != "Narrow" || len(rows[1].Titles) != 1 {
+		t.Fatalf("duplicate titles must collapse: %v", rows[1].Titles)
+	}
+
+	pending, err := s.ListClasses(ctx, ClassFilter{Visibility: VisibilityPending})
+	mustDo(t, err)
+	if len(pending) != 1 || pending[0].Key != "v3:wide" {
+		t.Fatalf("visibility filter: %+v", pending)
+	}
+	byKey, err := s.ListClasses(ctx, ClassFilter{Key: "v3:nar"})
+	mustDo(t, err)
+	if len(byKey) != 1 || byKey[0].Key != "v3:narrow" {
+		t.Fatalf("key prefix filter: %+v", byKey)
+	}
+}
+
+func TestClassStatsPartitionsEachPromptVersion(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-b", "v3:b", "low", "b", true, 1000)
+	seedClassFinding(t, s, "sys1", "fp-c", "v3:c", "low", "c", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:b", VisibilityCustomer, "op", 2000))
+	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityOperator, "op", 2000))
+	rows, err := s.ClassStats(ctx)
+	mustDo(t, err)
+	want := ClassStatsRow{PromptVersion: "p1", Classes: 3, Pending: 1, Delivered: 1, Internal: 1, Security: 1}
+	if len(rows) != 1 || rows[0] != want {
+		t.Fatalf("got %+v, want %+v", rows, want)
+	}
+	all, err := s.ListClassDecisions(ctx, 0)
+	mustDo(t, err)
+	if len(all) != 2 || all[0].Key != "v3:c" {
+		t.Fatalf("decisions newest first: %+v", all)
+	}
+}
