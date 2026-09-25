@@ -108,6 +108,36 @@ func TestAReusedSightingBumpsTheLinkedOpenFindings(t *testing.T) {
 	}
 }
 
+// A reuse bumps the findings it linked (TestAReusedSightingBumpsTheLinkedOpenFindings
+// above); it must bump their class's last_seen too, or a class that is still
+// being reused every window looks stale to the review queue.
+func TestReuseBumpsTheClassLastSeen(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	f := model.Finding{SystemID: "sys1", Fingerprint: "fp1", Severity: "high", Title: "t",
+		Modules: []string{}, Evidence: []string{}, TriggerKey: "t1:k", ClassKey: "v3:cls"}
+	if _, err := s.UpsertFinding(ctx, f, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordTriggerSighting(ctx, sighting("sys1", "t1:k", 1000)); err != nil {
+		t.Fatal(err)
+	}
+	reuse := sighting("sys1", "t1:k", 4000)
+	reuse.Called, reuse.Reused = false, true
+	if err := s.RecordTriggerSighting(ctx, reuse); err != nil {
+		t.Fatal(err)
+	}
+
+	c, ok, err := s.GetClass(ctx, "v3:cls")
+	if err != nil || !ok {
+		t.Fatalf("get class: %v %v", ok, err)
+	}
+	if c.LastSeen != 4000 {
+		t.Fatalf("class last_seen = %d, want 4000 (bumped by the reuse)", c.LastSeen)
+	}
+}
+
 func TestAnalysisRowCarriesItsTriggerKey(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

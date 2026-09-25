@@ -1875,6 +1875,14 @@ Rules that are not visible from the code:
   conflict, so an operator's `off` survives the next recurrence. It is
   returned to the customer as `Finding.security`; the fingerprint and class
   still hash the edge's category, so the tag never changes identity.
+- **A trigger reuse bumps the class too.** `RecordTriggerSighting`'s
+  `sg.Reused` branch bumps the findings the last paid call linked
+  (`findings.last_seen`); in the same transaction, before the
+  `system_triggers` upsert and against the same unchanged `last_called_at`,
+  it bumps `finding_classes.last_seen` forward-only (the same CASE
+  `UpsertFinding`'s conflict clause uses) for the class keys of the findings
+  it just bumped. Without it, a class answered from the trigger memory every
+  window forever would look stale to the queue's own `last_seen` ordering.
 - **A decision changes what the customer reads, never the finding row.**
   The severity override replaces `severity` in `ListFindings` only; the
   stored severity is what `prompt.Render` prints, and `OpenFindings` joins

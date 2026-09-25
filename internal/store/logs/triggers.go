@@ -108,6 +108,23 @@ func (s *Store) RecordTriggerSighting(ctx context.Context, sg TriggerSighting) e
 		`, sg.Now, sg.Key, sg.SystemID, model.StatusOpen, sg.SystemID, sg.Key); err != nil {
 			return fmt.Errorf("store: bump reused findings: %w", err)
 		}
+
+		// The class of a finding this reuse just bumped is still alive, so
+		// its last_seen must move too -- forward only, the same CASE
+		// UpsertFinding uses on conflict -- or a class that is reused every
+		// window forever looks stale to the review queue. Same predicate as
+		// the findings bump above, against the same unchanged last_called_at.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE finding_classes SET last_seen = CASE WHEN last_seen < ? THEN ? ELSE last_seen END
+			WHERE class_key IN (
+				SELECT class_key FROM findings
+				WHERE trigger_key = ? AND system_id = ? AND status = ? AND class_key != ''
+				  AND last_seen >= (SELECT coalesce(last_called_at, 0) FROM system_triggers
+				                    WHERE system_id = ? AND trigger_key = ?)
+			)
+		`, sg.Now, sg.Now, sg.Key, sg.SystemID, model.StatusOpen, sg.SystemID, sg.Key); err != nil {
+			return fmt.Errorf("store: bump reused finding classes: %w", err)
+		}
 	}
 
 	var calledAt sql.NullInt64
