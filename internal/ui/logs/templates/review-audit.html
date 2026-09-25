@@ -10,7 +10,7 @@ key: a readable trail, not proof of identity &mdash; anyone holding the key can 
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
-<tr><th scope="col">When</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Trigger</th><th scope="col">Detail</th><th scope="col">Prompt version</th></tr>
+<tr><th scope="col">When</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Class</th><th scope="col">Detail</th><th scope="col">Prompt version</th></tr>
 </thead>
 <tbody>
 {{range .Decisions}}
@@ -19,7 +19,7 @@ key: a readable trail, not proof of identity &mdash; anyone holding the key can 
 <td>{{.Actor}}</td>
 <td>{{.Action}}</td>
 <td class="mono"><a href="{{$.Base}}/review?key={{.Key}}" title="{{.Key}}">{{short .Key 16}}</a></td>
-<td class="mono">{{if eq .Action "ignore"}}until {{fmtIgnoreUntil .Detail}}{{else if .Detail}}{{.Detail}}{{else}}&mdash;{{end}}</td>
+<td class="mono">{{if .Detail}}{{.Detail}}{{else}}&mdash;{{end}}</td>
 <td class="mono">{{.PromptVersion}}</td>
 </tr>
 {{else}}

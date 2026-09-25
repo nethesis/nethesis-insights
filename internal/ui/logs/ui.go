@@ -3,10 +3,11 @@
 
 // Package logs serves insightsd's operator dashboard: findings, systems, the
 // analyses cost ledger, the gate rollup, per-day spend, the stored
-// templates and baselines, and the trigger review queue. It replaces the shell helper that used to need
-// sqlite3, root on the node and the podman volume path, and adds the live
-// process state a query over the database could never see: queue depth and
-// worker count, uptime, and the effective configuration.
+// templates and baselines, and the finding-class review queue. It replaces
+// the shell helper that used to need sqlite3, root on the node and the
+// podman volume path, and adds the live process state a query over the
+// database could never see: queue depth and worker count, uptime, and the
+// effective configuration.
 //
 // It sits on chrome the same way threatd's and sizingd's dashboards do -- see
 // internal/ui/chrome's own doc comment for the shared layout and route
@@ -21,7 +22,7 @@
 //   - Every list is bounded server-side.
 //   - Secrets never render: cfg.Info.Config arrives already redacted by the
 //     caller, and this package never reads the environment.
-//   - The only writes are the trigger review decisions (writableRoutes),
+//   - The only writes are the class review decisions (writableRoutes),
 //     reachable only when ADMIN_API_KEY is set, with the same discipline as
 //     Threat Shield's allowlist routes (internal/ui/threat): POST only, the
 //     admin key, a cross-site refusal, and an audit row per decision.
@@ -66,23 +67,22 @@ type Reader interface {
 	ResolveNodesFleet(ctx context.Context, findings []model.Finding) error
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error)
-	ListTriggers(ctx context.Context, f logsstore.TriggerFilter) ([]logsstore.TriggerRow, error)
-	TriggerStats(ctx context.Context) ([]logsstore.TriggerStatsRow, error)
-	ListTriggerDecisions(ctx context.Context, limit int) ([]logsstore.TriggerDecision, error)
+	ListClasses(ctx context.Context, f logsstore.ClassFilter) ([]logsstore.ClassRow, error)
+	ClassStats(ctx context.Context) ([]logsstore.ClassStatsRow, error)
+	ListClassDecisions(ctx context.Context, limit int) ([]logsstore.ClassDecision, error)
 }
 
 // Writer is the slice of logsstore.Store the review routes need, one method
 // per decision. Each is a single transaction that also appends the
-// decision's trigger_decisions row, so a trigger never changes without the
+// decision's class_decisions row, so a class never changes without the
 // record of who changed it. It is wired in, and its routes are reachable,
 // only when ADMIN_API_KEY is set -- see NewServer and writableRoutes.
 // *logsstore.Store satisfies it.
 type Writer interface {
-	SetTriggerVisibility(ctx context.Context, key, visibility, actor string, now int64) error
-	IgnoreTrigger(ctx context.Context, key string, until int64, actor string, now int64) error
-	MergeTrigger(ctx context.Context, key, into, actor string, now int64) error
-	SetTriggerSeverity(ctx context.Context, key, severity, actor string, now int64) error
-	SetTriggerDocRef(ctx context.Context, key, docRef, actor string, now int64) error
+	SetClassVisibility(ctx context.Context, key, visibility, actor string, now int64) error
+	SetClassSecurity(ctx context.Context, key string, security bool, actor string, now int64) error
+	SetClassSeverity(ctx context.Context, key, severity, actor string, now int64) error
+	SetClassDocRef(ctx context.Context, key, docRef, actor string, now int64) error
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -107,16 +107,12 @@ const (
 	reviewAuditLimit   = 500
 )
 
-// Review input bounds. A trigger key is "t1:" plus 64 hex characters; the
-// cap only has to refuse garbage, not describe the format. An ignore is
-// between a day and a year: it always ends (IgnoreTrigger refuses the past),
-// and a year is long enough that a longer one is a decision nobody will
-// remember making.
+// Review input bounds. A class key is "v3:" plus 64 hex characters; the cap
+// only has to refuse garbage, not describe the format.
 const (
-	maxTriggerKeyLen = 128
-	maxDocRefLen     = 512
-	maxIgnoreDays    = 365
-	maxReviewForm    = 16 << 10 // 16 KiB; see internal/ui/threat's maxAllowlistFormSize
+	maxClassKeyLen = 128
+	maxDocRefLen   = 512
+	maxReviewForm  = 16 << 10 // 16 KiB; see internal/ui/threat's maxAllowlistFormSize
 )
 
 // writableRoutes is the small, explicit, enumerated set of paths that also
@@ -124,12 +120,11 @@ const (
 // against ADMIN_API_KEY and refuses a cross-site request first, exactly like
 // internal/ui/threat's: Traefik's BasicAuth in front of this subtree is
 // still Basic auth, which a browser replays on a forged cross-site POST.
-// The trigger key is always a form field, never part of the path.
+// The class key is always a form field, never part of the path.
 var writableRoutes = map[string]bool{
 	"/review/deliver":  true,
 	"/review/internal": true,
-	"/review/ignore":   true,
-	"/review/merge":    true,
+	"/review/security": true,
 	"/review/severity": true,
 	"/review/doc-ref":  true,
 }
@@ -192,9 +187,8 @@ func NewServer(r Reader, w Writer, rt Runtime, cfg chrome.Config) (http.Handler,
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
 	cfg.Funcs = template.FuncMap{
-		"fmtIgnoreUntil": fmtIgnoreUntil,
-		"headNodes":      headNodes,
-		"moreNodes":      moreNodes,
+		"headNodes": headNodes,
+		"moreNodes": moreNodes,
 	}
 
 	base, err := chrome.New(cfg)

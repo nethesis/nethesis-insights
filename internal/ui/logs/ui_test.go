@@ -33,11 +33,11 @@ type fakeReader struct {
 	findings  []model.Finding
 	templates []logsstore.TemplateRow
 	baselines []logsstore.BaselineRow
-	roster    map[string]map[int]string
-	triggers  []logsstore.TriggerRow
-	trigStats []logsstore.TriggerStatsRow
-	decisions []logsstore.TriggerDecision
-	trigSeen  logsstore.TriggerFilter // the last filter ListTriggers was called with
+	roster     map[string]map[int]string
+	classes    []logsstore.ClassRow
+	classStats []logsstore.ClassStatsRow
+	decisions  []logsstore.ClassDecision
+	classSeen  logsstore.ClassFilter // the last filter ListClasses was called with
 
 	err error // when set, every method returns this error instead
 }
@@ -145,29 +145,29 @@ func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]logs
 	return out, nil
 }
 
-func (f *fakeReader) ListTriggers(_ context.Context, filter logsstore.TriggerFilter) ([]logsstore.TriggerRow, error) {
-	f.trigSeen = filter
+func (f *fakeReader) ListClasses(_ context.Context, filter logsstore.ClassFilter) ([]logsstore.ClassRow, error) {
+	f.classSeen = filter
 	if f.err != nil {
 		return nil, f.err
 	}
-	var out []logsstore.TriggerRow
-	for _, tr := range f.triggers {
-		if filter.Visibility != "" && tr.Visibility != filter.Visibility {
+	var out []logsstore.ClassRow
+	for _, c := range f.classes {
+		if filter.Visibility != "" && c.Visibility != filter.Visibility {
 			continue
 		}
-		if filter.Key != "" && !strings.HasPrefix(tr.Key, filter.Key) {
+		if filter.Key != "" && !strings.HasPrefix(c.Key, filter.Key) {
 			continue
 		}
-		out = append(out, tr)
+		out = append(out, c)
 	}
 	return out, nil
 }
 
-func (f *fakeReader) TriggerStats(context.Context) ([]logsstore.TriggerStatsRow, error) {
-	return f.trigStats, f.err
+func (f *fakeReader) ClassStats(context.Context) ([]logsstore.ClassStatsRow, error) {
+	return f.classStats, f.err
 }
 
-func (f *fakeReader) ListTriggerDecisions(context.Context, int) ([]logsstore.TriggerDecision, error) {
+func (f *fakeReader) ListClassDecisions(context.Context, int) ([]logsstore.ClassDecision, error) {
 	return f.decisions, f.err
 }
 
@@ -230,25 +230,29 @@ func seededReader() *fakeReader {
 		baselines: []logsstore.BaselineRow{
 			{SystemID: "sys-1", ModuleID: "sshd", Priority: 5, EWMARate: 3.14159, UpdatedAt: 1700000100000},
 		},
-		triggers: []logsstore.TriggerRow{
+		classes: []logsstore.ClassRow{
 			{
-				Trigger: logsstore.Trigger{Key: "t1:aaaa", Status: logsstore.TriggerActive,
+				Class: logsstore.Class{Key: "v3:aaaa",
 					Visibility: logsstore.VisibilityPending, FirstPromptVersion: "v1",
-					FirstSeen: 1700000000000, LastSeen: 1700000100000, DistinctSystems: 3, Count: 9},
-				Findings: 2, Titles: []string{"disk filling on mail"}, GateReasons: []string{"deviation:mail/4"},
+					FirstSeen: 1700000000000, LastSeen: 1700000100000},
+				Systems: 3, Findings: 2, Titles: []string{"disk filling on mail"},
+				Summary: "disk usage is climbing", SuggestedAction: "check log rotation",
+				Modules: []string{"mail"}, Evidence: []string{"line one"},
 			},
 			{
-				Trigger: logsstore.Trigger{Key: "t1:bbbb", Security: true, Status: logsstore.TriggerActive,
+				Class: logsstore.Class{Key: "v3:bbbb", Security: true,
 					Visibility: logsstore.VisibilityCustomer, FirstPromptVersion: "v1",
-					FirstSeen: 1700000000000, LastSeen: 1700000100000, DistinctSystems: 1, Count: 1},
-				Findings: 1, Titles: []string{"sshd failing repeatedly"}, GateReasons: []string{"security_new"},
+					FirstSeen: 1700000000000, LastSeen: 1700000100000},
+				Systems: 1, Findings: 1, Titles: []string{"sshd failing repeatedly"},
+				Summary: "many failed logins", SuggestedAction: "check sshd config",
+				Modules: []string{"sshd"}, Evidence: []string{"line two"},
 			},
 		},
-		trigStats: []logsstore.TriggerStatsRow{
-			{PromptVersion: "v1", Triggers: 2, Security: 1, Pending: 1},
+		classStats: []logsstore.ClassStatsRow{
+			{PromptVersion: "v1", Classes: 2, Security: 1, Pending: 1, Delivered: 1},
 		},
-		decisions: []logsstore.TriggerDecision{
-			{Key: "t1:aaaa", Actor: "alice", Action: logsstore.ActionIgnore, Detail: "1700000900000",
+		decisions: []logsstore.ClassDecision{
+			{Key: "v3:aaaa", Actor: "alice", Action: logsstore.ActionSeverity, Detail: "high",
 				PromptVersion: "v1", CreatedAt: 1700000100000},
 		},
 	}

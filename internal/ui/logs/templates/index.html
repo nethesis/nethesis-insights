@@ -10,13 +10,13 @@ server-computed fingerprint (never the AI's wording), so the same problem recurr
 active or recent; <strong>stale</strong> means it hasn't reoccurred in a while and is
 presumed resolved &mdash; it can later reopen. Click a title for the summary, evidence,
 suggested action and whether the customer sees it: a finding reaches the customer only once
-its trigger has been delivered on the <a href="{{.Base}}/review">review queue</a>. <strong>Nodes</strong> are the cluster machines the
+its class has been delivered on the <a href="{{.Base}}/review">review queue</a>. <strong>Nodes</strong> are the cluster machines the
 cited log lines came from in the most recent occurrence &mdash; where it is happening now, not
 everywhere it has ever happened.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id (prefix)">
-<input type="text" name="id" value="{{.ID}}" placeholder="id, fingerprint or trigger">
+<input type="text" name="id" value="{{.ID}}" placeholder="id, fingerprint or class">
 <select name="status">
 <option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
 <option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>
@@ -69,9 +69,11 @@ everywhere it has ever happened.</small></p>
 <dd>{{range .NodeRefs}}<div class="mono">{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{else}} (no name reported){{end}}</div>{{else}}&mdash;{{end}}</dd>
 <dt>Suggested action</dt><dd>{{.SuggestedAction}}</dd>
 <dt>Delivered to the customer</dt>
-<dd>{{if eq .Visibility "customer"}}yes{{else if eq .Visibility "operator"}}no &mdash; internal{{else if eq .Visibility "pending"}}not yet &mdash; pending review{{else}}no &mdash; no trigger{{end}}{{if .TriggerKey}} &middot; <a href="{{$.Base}}/review?key={{.TriggerKey}}">review trigger</a>{{end}}</dd>
+<dd>{{if eq .Visibility "customer"}}yes{{else if eq .Visibility "operator"}}no &mdash; internal{{else if eq .Visibility "pending"}}not yet &mdash; pending review{{else}}no &mdash; no class{{end}}{{if .ClassKey}} &middot; <a href="{{$.Base}}/review?key={{.ClassKey}}">review class</a>{{end}}</dd>
 {{if .SeverityOverride}}<dt>Severity the customer sees</dt><dd><span class="chip" data-severity="{{.SeverityOverride}}">{{.SeverityOverride}}</span></dd>{{end}}
 {{if .DocRef}}<dt>Documentation</dt><dd class="mono">{{.DocRef}}</dd>{{end}}
+<dt>Class</dt><dd class="mono">{{if .ClassKey}}{{.ClassKey}}{{else}}&mdash;{{end}}</dd>
+<dt>Security</dt><dd>{{if .Security}}tagged{{else}}no{{end}}</dd>
 <dt>Trigger</dt><dd class="mono">{{if .TriggerKey}}{{.TriggerKey}}{{else}}&mdash;{{end}}</dd>
 <dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>
 <dt>Occurrence count</dt><dd>{{.OccurrenceCount}}</dd>
