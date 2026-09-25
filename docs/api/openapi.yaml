@@ -199,12 +199,11 @@ paths:
       description: |
         Returns findings for the system named by the authenticated
         credential only -- there is no cross-system read on this surface.
-        Only delivered findings are returned: a new non-security finding is
-        withheld until an operator delivers its trigger, and one an operator
-        keeps internal never appears. Security findings are delivered
-        without review. `severity` is the operator's override when one is
-        set. Findings are ordered severity-descending (`critical > high >
-        medium > low`), then `last_seen` descending.
+        Only findings whose class an operator has delivered are returned:
+        every new class -- security included -- waits for review, and a
+        class kept internal never appears. `severity` is the operator's
+        override when one is set. Findings are ordered severity-descending
+        (`critical > high > medium > low`), then `last_seen` descending.
       security:
         - basicAuth: []
       parameters:
@@ -1130,6 +1129,7 @@ components:
         - last_seen
         - llm_model
         - prompt_version
+        - security
       properties:
         id: { type: string, description: ULID. }
         system_id: { type: string }
@@ -1185,6 +1185,12 @@ components:
           description: >-
             An absolute http(s) URL to remediation documentation an operator
             attached to this kind of finding. Absent when none is set.
+        security:
+          type: boolean
+          description: >-
+            The operator's security tag for this finding's class. Seeded
+            from the edge's category when the class is first seen, then set
+            by review.
 
     Decision:
       type: object

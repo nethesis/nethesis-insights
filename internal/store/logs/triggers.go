@@ -29,19 +29,11 @@ const (
 	TriggerActive  = "active"
 	TriggerIgnored = "ignored"
 
-	// A new trigger is pending review, except a security one, which is
-	// delivered without review: a break-in must never wait in a queue.
-	VisibilityPending  = "pending"
-	VisibilityCustomer = "customer"
-	VisibilityOperator = "operator"
-
-	// The trigger_decisions actions, one per operator decision.
-	ActionDeliver  = "deliver"
-	ActionInternal = "internal"
-	ActionIgnore   = "ignore"
-	ActionMerge    = "merge"
-	ActionSeverity = "severity"
-	ActionDocRef   = "doc_ref"
+	// The trigger_decisions actions, one per operator decision. Visibility*
+	// and the actions shared with finding classes moved to classes.go;
+	// ActionIgnore and ActionMerge have no class equivalent and stay here.
+	ActionIgnore = "ignore"
+	ActionMerge  = "merge"
 )
 
 var (
@@ -55,9 +47,7 @@ var (
 	// ErrMergeCycle refuses a merge whose two keys already share a root --
 	// a key into itself, into its own alias, or into the root it was
 	// already merged into.
-	ErrMergeCycle        = errors.New("store: both keys already resolve to the same trigger")
-	ErrInvalidSeverity   = errors.New("store: unknown severity")
-	ErrInvalidVisibility = errors.New("store: visibility must be customer or operator")
+	ErrMergeCycle = errors.New("store: both keys already resolve to the same trigger")
 )
 
 // Trigger is one triggers row.

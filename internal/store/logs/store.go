@@ -176,7 +176,8 @@ func (s *Store) Init(ctx context.Context) error {
 			llm_model TEXT,
 			prompt_version TEXT,
 			nodes TEXT,
-			trigger_key TEXT
+			trigger_key TEXT,
+			class_key TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_system_fingerprint ON findings(system_id, fingerprint)`,
 		// Supports PruneTemplates' `last_seen < ?` scan (see prune.go) --
@@ -267,6 +268,34 @@ func (s *Store) Init(ctx context.Context) error {
 		// The review queue shows each trigger's most recent gate reasons,
 		// one seek per trigger rather than a scan of the cost ledger.
 		`CREATE INDEX IF NOT EXISTS idx_analyses_trigger ON analyses(trigger_key, created_at)`,
+		// Finding classes: see classes.go. One row per class, fleet-wide,
+		// carrying every review decision's current effect; class_decisions
+		// is the append-only audit trail -- an UPDATE destroys the value
+		// that would otherwise say who changed it.
+		`CREATE TABLE IF NOT EXISTS finding_classes (
+			class_key TEXT PRIMARY KEY,
+			visibility TEXT NOT NULL,
+			security INTEGER NOT NULL,
+			severity_override TEXT,
+			doc_ref TEXT,
+			first_prompt_version TEXT,
+			first_seen INTEGER NOT NULL,
+			last_seen INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_finding_classes_last_seen ON finding_classes(last_seen)`,
+		`CREATE TABLE IF NOT EXISTS class_decisions (
+			id TEXT PRIMARY KEY,
+			class_key TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			detail TEXT,
+			prompt_version TEXT,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_class_decisions_key ON class_decisions(class_key)`,
+		// The review queue counts each class's findings and systems, and
+		// the class pruning asks whether any finding still names one.
+		`CREATE INDEX IF NOT EXISTS idx_findings_class ON findings(class_key, system_id)`,
 	}
 
 	for _, stmt := range stmts {
@@ -526,35 +555,38 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 }
 
 // findingColumns is what queryFindings scans: the findings row, then the
-// review state of its trigger. The last three are NULL wherever the query
-// does not join triggers.
+// review state of its class. The last four are NULL wherever the query
+// does not join finding_classes.
 const findingColumns = `f.id, f.system_id, f.fingerprint, f.severity, f.title, f.summary, f.suggested_action,
 	f.modules, f.evidence, f.status, f.occurrence_count, f.first_seen, f.last_seen, f.reopened_at,
-	f.llm_model, f.prompt_version, f.nodes, f.trigger_key`
+	f.llm_model, f.prompt_version, f.nodes, f.trigger_key, f.class_key`
 
-// findingTriggerJoin reaches a finding's root trigger in one join: aliases
-// always name a root, so a finding under a merged key reads its root's
-// decisions. It is a LEFT JOIN; ListFindings makes it an inner one by
-// requiring a visibility.
-const findingTriggerJoin = `
-	LEFT JOIN trigger_aliases a ON a.alias_key = f.trigger_key
-	LEFT JOIN triggers t ON t.trigger_key = coalesce(a.canonical_key, f.trigger_key)`
+// findingClassJoin reaches a finding's class. It is a LEFT JOIN; ListFindings
+// makes it an inner one by requiring a visibility.
+const findingClassJoin = `
+	LEFT JOIN finding_classes c ON c.class_key = f.class_key`
 
-// OpenFindings feeds prompt.Render, so it deliberately does not join the
-// triggers: no operator decision -- visibility, severity override, doc_ref
-// -- can reach the model through it.
+// OpenFindings feeds prompt.Render, so it deliberately does not join
+// finding_classes: no operator decision -- visibility, severity override,
+// doc_ref -- can reach the model through it.
 func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
-	return s.queryFindings(ctx, `SELECT `+findingColumns+`, NULL, NULL, NULL FROM findings f WHERE f.system_id = ? AND f.status = ?`, systemID, model.StatusOpen)
+	return s.queryFindings(ctx, `SELECT `+findingColumns+`, NULL, NULL, NULL, NULL FROM findings f WHERE f.system_id = ? AND f.status = ?`, systemID, model.StatusOpen)
 }
 
 func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
 	s.db.Lock()
 	defer s.db.Unlock()
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Read prior status FIRST: it is what distinguishes a bump from a
 	// reopen, and the upsert below would otherwise destroy it.
 	var priorStatus sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT status FROM findings WHERE system_id = ? AND fingerprint = ?`, f.SystemID, f.Fingerprint).Scan(&priorStatus)
+	err = tx.QueryRowContext(ctx, `SELECT status FROM findings WHERE system_id = ? AND fingerprint = ?`, f.SystemID, f.Fingerprint).Scan(&priorStatus)
 	if err != nil && err != sql.ErrNoRows {
 		return "", fmt.Errorf("store: read prior finding: %w", err)
 	}
@@ -595,8 +627,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	// stamped when actually reopening -- a plain bump must leave whatever
 	// reopened_at value the row already has untouched.
 	baseSQL := `
-		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?)
+		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key, class_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?, ?)
 		ON CONFLICT(system_id, fingerprint) DO UPDATE SET
 			severity = excluded.severity,
 			title = excluded.title,
@@ -608,9 +640,10 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 			occurrence_count = findings.occurrence_count + 1,
 			last_seen = ?,
 			nodes = excluded.nodes,
-			trigger_key = excluded.trigger_key%s
+			trigger_key = excluded.trigger_key,
+			class_key = excluded.class_key%s
 	`
-	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.TriggerKey), model.StatusOpen, now}
+	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.TriggerKey), nullIfEmpty(f.ClassKey), model.StatusOpen, now}
 
 	var extraSet string
 	if outcome == OutcomeReopened {
@@ -620,8 +653,29 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	extraSet += ",\n\t\t\tllm_model = excluded.llm_model,\n\t\t\tprompt_version = excluded.prompt_version"
 
 	query := fmt.Sprintf(baseSQL, extraSet)
-	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return "", fmt.Errorf("store: upsert finding: %w", err)
+	}
+
+	// A class row is created and kept current only when the finding names
+	// one: a row written before this change, or any path that forgets the
+	// key, must never mint a finding_classes row with an empty key -- that
+	// would make an empty class key deliverable.
+	if f.ClassKey != "" {
+		visibility := VisibilityPending
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO finding_classes (class_key, visibility, security, first_prompt_version, first_seen, last_seen)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(class_key) DO UPDATE SET
+				last_seen = CASE WHEN finding_classes.last_seen < excluded.last_seen
+				                 THEN excluded.last_seen ELSE finding_classes.last_seen END
+		`, f.ClassKey, visibility, boolToInt(f.Security), nullIfEmpty(f.PromptVersion), now, now); err != nil {
+			return "", fmt.Errorf("store: upsert finding class: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: commit upsert finding: %w", err)
 	}
 
 	return outcome, nil
@@ -644,16 +698,15 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 }
 
 // ListFindings is the customer read API's query: one system's findings whose
-// root trigger has been delivered (visibility = customer). A pending or
-// internal trigger's findings are withheld, and so is a finding with no
-// trigger at all -- only a reviewed trigger, or a security one, which is
-// delivered on first sight, reaches the customer. The trigger's severity
-// override replaces the stored severity here, and only here: the stored
-// value is what prompt.Render prints.
+// class has been delivered (visibility = customer). A pending or internal
+// class's findings are withheld, and so is a finding with no class at all --
+// only a reviewed class reaches the customer. The class's severity override
+// replaces the stored severity here, and only here: the stored value is what
+// prompt.Render prints.
 func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
-	query := `SELECT ` + findingColumns + `, t.visibility, t.severity_override, t.doc_ref
-		FROM findings f` + findingTriggerJoin + `
-		WHERE f.system_id = ? AND f.last_seen >= ? AND t.visibility = ?`
+	query := `SELECT ` + findingColumns + `, c.visibility, c.severity_override, c.doc_ref, c.security
+		FROM findings f` + findingClassJoin + `
+		WHERE f.system_id = ? AND f.last_seen >= ? AND c.visibility = ?`
 	args := []any{systemID, since, VisibilityCustomer}
 	if status != "" {
 		query += ` AND f.status = ?`
@@ -684,18 +737,21 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
-		var nodesJSON, triggerKey, visibility, severityOverride, docRef sql.NullString
+		var nodesJSON, triggerKey, classKey, visibility, severityOverride, docRef sql.NullString
 		var reopenedAt sql.NullInt64
+		var security sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
-			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey,
-			&visibility, &severityOverride, &docRef); err != nil {
+			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey, &classKey,
+			&visibility, &severityOverride, &docRef, &security); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
 		}
 		f.TriggerKey = triggerKey.String
+		f.ClassKey = classKey.String
 		f.Visibility = visibility.String
 		f.SeverityOverride = severityOverride.String
 		f.DocRef = docRef.String
+		f.Security = security.Int64 != 0
 		if nodesJSON.Valid && nodesJSON.String != "" {
 			if err := json.Unmarshal([]byte(nodesJSON.String), &f.Nodes); err != nil {
 				return nil, fmt.Errorf("store: unmarshal nodes: %w", err)

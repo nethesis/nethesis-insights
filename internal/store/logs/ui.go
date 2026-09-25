@@ -403,30 +403,30 @@ const SortRecent = "recent"
 
 // ListAllFindings is the fleet-wide counterpart to ListFindings: no implicit
 // system scope, no visibility filter -- the operator sees every finding, and
-// each one's trigger review state alongside it -- and systemID/status/
+// each one's class review state alongside it -- and systemID/status/
 // severity/idLike are each optional filters ("" means no filter). systemID
 // and idLike both match with SQL LIKE, letting an operator paste a prefix of
 // the (unshortened) system ID, the short finding ID shown in the UI table,
-// or a trigger key (the key a finding was raised under, or the root it was
-// merged into); see likePattern for how a bare value (no "%") is turned into
-// a prefix match. Severity filters and shows the stored severity, not the
-// override. Results are capped to limit (most recently seen first). sort
-// selects the order of that capped page: "" (default) re-sorts into the
-// canonical severity/last_seen order via model.SortFindings; SortRecent
-// leaves the SQL's last_seen-descending order as is.
+// or a class key (fingerprint.Class); see likePattern for how a bare value
+// (no "%") is turned into a prefix match. Severity filters and shows the
+// stored severity, not the override. Results are capped to limit (most
+// recently seen first). sort selects the order of that capped page: ""
+// (default) re-sorts into the canonical severity/last_seen order via
+// model.SortFindings; SortRecent leaves the SQL's last_seen-descending order
+// as is.
 func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
 	query := `
-		SELECT ` + findingColumns + `, t.visibility, t.severity_override, t.doc_ref
-		FROM findings f` + findingTriggerJoin + `
+		SELECT ` + findingColumns + `, c.visibility, c.severity_override, c.doc_ref, c.security
+		FROM findings f` + findingClassJoin + `
 		WHERE (? = '' OR f.system_id LIKE ?) AND (? = '' OR f.status = ?) AND (? = '' OR f.severity = ?)
-		  AND (? = '' OR f.id LIKE ? OR f.fingerprint LIKE ? OR f.trigger_key LIKE ? OR a.canonical_key LIKE ?)
+		  AND (? = '' OR f.id LIKE ? OR f.fingerprint LIKE ? OR f.class_key LIKE ?)
 		ORDER BY f.last_seen DESC
 		LIMIT ?
 	`
 	systemPattern := likePattern(systemID)
 	idPattern := likePattern(idLike)
 	findings, err := s.queryFindings(ctx, query, systemID, systemPattern, status, status, severity, severity,
-		idLike, idPattern, idPattern, idPattern, idPattern, clampLimit(limit))
+		idLike, idPattern, idPattern, idPattern, clampLimit(limit))
 	if err != nil {
 		return nil, err
 	}

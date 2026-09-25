@@ -97,11 +97,20 @@ type Finding struct {
 	// memory's reuse check and review decisions go through, never part of
 	// the read API.
 	TriggerKey string `json:"-"`
+	// ClassKey is the finding's class (fingerprint.Class): its fingerprint
+	// without the system. Server-internal, like TriggerKey: it is the join
+	// every review decision goes through, never part of the read API.
+	ClassKey string `json:"-"`
+	// Security is the class's security tag as read for the customer. On a
+	// write it says whether the edge classified a cited template as
+	// security, and only seeds a new class -- after that the tag is the
+	// operator's.
+	Security bool `json:"security"`
 	// DocRef links remediation documentation an operator attached to the
-	// finding's trigger. Read-time only, like the severity override, and
+	// finding's class. Read-time only, like the severity override, and
 	// always an http(s) URL -- the operator UI accepts nothing else.
 	DocRef string `json:"doc_ref,omitempty"`
-	// Visibility and SeverityOverride are the finding's trigger's review
+	// Visibility and SeverityOverride are the finding's class's review
 	// state, joined at read time for the operator UI. Server-internal: the
 	// read API returns only delivered findings and applies the override to
 	// Severity itself.
