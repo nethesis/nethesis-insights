@@ -495,7 +495,11 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		// hash made the same condition a new finding every window. The full
 		// cited list is still stored on the row -- it is what the operator
 		// reads -- it just does not decide identity.
-		fp := fingerprint.Compute(b.SystemID, modules, fingerprint.EvidenceKey(cited), category)
+		evidenceKey := fingerprint.EvidenceKey(cited)
+		fp := fingerprint.Compute(b.SystemID, modules, evidenceKey, category)
+		// The class is the same identity without the system: what an
+		// operator reviews, once, for every system that raises it.
+		class := fingerprint.Class(modules, evidenceKey, category)
 
 		outcome, err := a.store.UpsertFinding(ctx, model.Finding{
 			SystemID:        b.SystemID,
@@ -510,6 +514,8 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			LLMModel:        resp.Model,
 			PromptVersion:   prompt.Version,
 			TriggerKey:      look.Root,
+			ClassKey:        class,
+			Security:        category == "security",
 		}, now)
 		if err != nil {
 			return fmt.Errorf("analyzer: upsert finding: %w", err)

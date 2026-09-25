@@ -757,3 +757,147 @@ func TestSecondInstanceOfAModuleIsNotNovel(t *testing.T) {
 		t.Errorf("expected both instances' counts summed, got %d", rows[0].TotalCount)
 	}
 }
+
+// A class is a finding's identity without the system: the same condition on
+// three systems is three findings and one class, reviewed once. Once that
+// class is delivered, a system raising it later -- even for the first time --
+// is delivered immediately, with no separate review.
+func TestFindingClassIgnoresSystem(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	reply := `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"Disk full","summary":"disk is full",` +
+		`"suggested_action":"clean up","modules":[],"evidence":["T1"]}]}`
+	stub := &llm.Stub{Content: reply, Model: "m"}
+	a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+
+	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+		t.Fatalf("sys1: %v", err)
+	}
+	if err := a.Process(ctx, steadyBundle("sys2")); err != nil {
+		t.Fatalf("sys2: %v", err)
+	}
+
+	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("ListAllFindings: %v", err)
+	}
+	byID := map[string]model.Finding{}
+	for _, fd := range all {
+		byID[fd.SystemID] = fd
+	}
+	sys1, ok1 := byID["sys1"]
+	sys2, ok2 := byID["sys2"]
+	if !ok1 || !ok2 {
+		t.Fatalf("expected a finding for sys1 and sys2, got %+v", all)
+	}
+	if sys1.Fingerprint == sys2.Fingerprint {
+		t.Fatalf("expected distinct fingerprints per system, got the same: %s", sys1.Fingerprint)
+	}
+	if sys1.ClassKey == "" || sys1.ClassKey != sys2.ClassKey {
+		t.Fatalf("expected the same non-empty class key, got %q and %q", sys1.ClassKey, sys2.ClassKey)
+	}
+	classKey := sys1.ClassKey
+
+	class, found, err := s.GetClass(ctx, classKey)
+	if err != nil {
+		t.Fatalf("GetClass: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected the class to exist")
+	}
+	if class.Visibility != logsstore.VisibilityPending {
+		t.Fatalf("expected a new class to be pending, got %q", class.Visibility)
+	}
+
+	for _, sys := range []string{"sys1", "sys2"} {
+		delivered, err := s.ListFindings(ctx, sys, 0, "")
+		if err != nil {
+			t.Fatalf("ListFindings(%s): %v", sys, err)
+		}
+		if len(delivered) != 0 {
+			t.Fatalf("expected a pending class withheld from %s, got %d", sys, len(delivered))
+		}
+	}
+
+	if err := s.SetClassVisibility(ctx, classKey, logsstore.VisibilityCustomer, "op", 2000); err != nil {
+		t.Fatalf("SetClassVisibility: %v", err)
+	}
+
+	for _, sys := range []string{"sys1", "sys2"} {
+		delivered, err := s.ListFindings(ctx, sys, 0, "")
+		if err != nil {
+			t.Fatalf("ListFindings(%s): %v", sys, err)
+		}
+		if len(delivered) != 1 {
+			t.Fatalf("expected the delivered class's finding on %s, got %d", sys, len(delivered))
+		}
+	}
+
+	// A third system raising the same condition, even for the first time,
+	// is delivered immediately -- the class was already decided.
+	if err := a.Process(ctx, steadyBundle("sys3")); err != nil {
+		t.Fatalf("sys3: %v", err)
+	}
+	delivered, err := s.ListFindings(ctx, "sys3", 0, "")
+	if err != nil {
+		t.Fatalf("ListFindings(sys3): %v", err)
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("expected sys3's finding delivered with no new review, got %d", len(delivered))
+	}
+}
+
+// The edge's security classification seeds the class's security tag, and a
+// new security class is withheld from the customer exactly like any other,
+// pending an operator's review.
+func TestSecurityFindingIsTaggedAndPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	b := steadyBundle("sys1")
+	b.Templates[0].Category = "security"
+
+	reply := `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"Brute force","summary":"many failed logins",` +
+		`"suggested_action":"block the source","modules":[],"evidence":["T1"]}]}`
+	stub := &llm.Stub{Content: reply, Model: "m"}
+	a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+
+	if err := a.Process(ctx, b); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	openFindings, err := s.OpenFindings(ctx, "sys1")
+	if err != nil {
+		t.Fatalf("OpenFindings: %v", err)
+	}
+	if len(openFindings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(openFindings))
+	}
+	classKey := openFindings[0].ClassKey
+	if classKey == "" {
+		t.Fatalf("expected a non-empty class key")
+	}
+
+	class, found, err := s.GetClass(ctx, classKey)
+	if err != nil {
+		t.Fatalf("GetClass: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected the class to exist")
+	}
+	if !class.Security {
+		t.Fatalf("expected the class to be tagged security")
+	}
+	if class.Visibility != logsstore.VisibilityPending {
+		t.Fatalf("expected a new security class to be pending, got %q", class.Visibility)
+	}
+
+	delivered, err := s.ListFindings(ctx, "sys1", 0, "")
+	if err != nil {
+		t.Fatalf("ListFindings: %v", err)
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("expected a pending class withheld from the customer, got %d", len(delivered))
+	}
+}
