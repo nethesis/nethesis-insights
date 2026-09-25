@@ -158,7 +158,7 @@ func main() {
 	// keeps open cannot outlive the call it came from by more than a day, so
 	// a persistent condition is re-analysed at least daily. On the dev
 	// fleet a 1-day and a 7-day window saved the same (18.1% vs 18.6% of
-	// spend), so longer buys little. 0 disables reuse; ignores still apply.
+	// spend), so longer buys little. 0 disables reuse.
 	triggerReuseWindow := svc.GetenvDuration("TRIGGER_REUSE_WINDOW", 24*time.Hour)
 	ewmaAlpha := svc.GetenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := svc.GetenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)

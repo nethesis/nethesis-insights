@@ -24,11 +24,11 @@ import (
 type recordingReader struct {
 	calls []string
 
-	templatesErr, findingsErr, analysesErr, nodesErr, systemTriggersErr, triggersErr error
+	templatesErr, findingsErr, analysesErr, nodesErr, systemTriggersErr, classesErr error
 	// olderThan captures what each call was asked to prune before, so a test
 	// can assert Run derived it from `now` and the right Config field.
 	templatesOlderThan, findingsOlderThan, analysesOlderThan, nodesOlderThan int64
-	systemTriggersOlderThan, triggersOlderThan                               int64
+	systemTriggersOlderThan, classesOlderThan                                int64
 }
 
 func (r *recordingReader) PruneSystemTriggers(_ context.Context, olderThan int64) (int, error) {
@@ -37,10 +37,10 @@ func (r *recordingReader) PruneSystemTriggers(_ context.Context, olderThan int64
 	return 5, r.systemTriggersErr
 }
 
-func (r *recordingReader) PruneTriggers(_ context.Context, olderThan int64) (int, error) {
-	r.calls = append(r.calls, "triggers")
-	r.triggersOlderThan = olderThan
-	return 6, r.triggersErr
+func (r *recordingReader) PruneClasses(_ context.Context, olderThan int64) (int, error) {
+	r.calls = append(r.calls, "classes")
+	r.classesOlderThan = olderThan
+	return 6, r.classesErr
 }
 
 func (r *recordingReader) PruneTemplates(_ context.Context, olderThan int64) (int, error) {
@@ -100,7 +100,7 @@ func TestOnePruneFailingDoesNotSkipTheOthers(t *testing.T) {
 	if err := New(r, testConfig()).Run(context.Background(), 0); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	for _, want := range []string{"templates", "findings", "analyses", "system_triggers", "triggers"} {
+	for _, want := range []string{"templates", "findings", "analyses", "system_triggers", "classes"} {
 		found := false
 		for _, c := range r.calls {
 			if c == want {
@@ -137,12 +137,13 @@ func TestEachTableUsesItsOwnRetention(t *testing.T) {
 		t.Errorf("analyses olderThan = %d, want %d", r.analysesOlderThan, wantAnalyses)
 	}
 	// The per-system trigger memory lives as long as the findings it links;
-	// the fleet-wide rows as long as the novelty memory they describe.
+	// classes go once their findings are gone and no decision names them, so
+	// they share the same cutoff.
 	if r.systemTriggersOlderThan != wantFindings {
 		t.Errorf("system_triggers olderThan = %d, want %d", r.systemTriggersOlderThan, wantFindings)
 	}
-	if r.triggersOlderThan != wantTemplates {
-		t.Errorf("triggers olderThan = %d, want %d", r.triggersOlderThan, wantTemplates)
+	if r.classesOlderThan != wantFindings {
+		t.Errorf("classes olderThan = %d, want %d", r.classesOlderThan, wantFindings)
 	}
 	// The three retentions differ (400d/180d/90d), so if the cutoffs were
 	// accidentally shared this would already have failed above -- but assert

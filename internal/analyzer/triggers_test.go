@@ -5,11 +5,9 @@ package analyzer
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
-	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
@@ -224,147 +222,11 @@ func TestReuseIsOffWhenTheWindowIsZero(t *testing.T) {
 	}
 }
 
-// ignoreKeyOf ignores the trigger the given window recorded.
-func ignoreKeyOf(t *testing.T, s *logsstore.Store, systemID string, windowStart, until, now int64) string {
-	t.Helper()
-	key := analysisAt(t, s, systemID, windowStart).TriggerKey
-	if key == "" {
-		t.Fatalf("window %d recorded no trigger key", windowStart)
-	}
-	if err := s.IgnoreTrigger(context.Background(), key, until, "op", now); err != nil {
-		t.Fatalf("ignore: %v", err)
-	}
-	return key
-}
-
-// An ignored window is recorded exactly like a gated-out one -- templates,
-// baselines, the analyses row -- or the system never learns what it saw and
-// the next window pays for the same novelty again.
-func TestIgnoredTriggerRecordsTemplatesAndBaselines(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-	stub := &llm.Stub{Content: emptyJSON}
-	c := &clock{t: 1000}
-	a := New(s, stub, testBudget(s), testConfig(), c.now)
-
-	novelOn := func(systemID string) model.Bundle {
-		b := steadyBundle(systemID)
-		b.Templates = []model.Template{{Template: "<3> [svc] brand new line", Count: 5, ModuleID: "mod1", Priority: 1}}
-		return b
-	}
-	process(t, a, novelOn("sys1"))
-	ignoreKeyOf(t, s, "sys1", 100, 100*hour, 1000)
-	calls := stub.Calls
-
-	// The same novelty on another cluster is the same trigger.
-	process(t, a, novelOn("sys2"))
-	if stub.Calls != calls {
-		t.Fatalf("an ignored trigger called the LLM")
-	}
-	row := analysisAt(t, s, "sys2", 100)
-	if row.SuppressedBy != SuppressedTriggerIgnored || row.LLMCalled || len(row.GateReasons) == 0 {
-		t.Fatalf("unexpected ignored analyses row: %+v", row)
-	}
-
-	known, err := s.KnownTemplates(ctx, "sys2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !known[model.CanonicalKey("mod1", "<3> [svc] brand new line")] {
-		t.Fatal("an ignored window must still record its templates")
-	}
-	baselines, err := s.Baselines(ctx, "sys2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := baselines[gate.BaselineKey{ModuleID: "mod1", Priority: 1}]; !ok {
-		t.Fatal("an ignored window must still record its baselines")
-	}
-}
-
-func TestIgnoreExpires(t *testing.T) {
-	s := newTestStore(t)
-	stub := &llm.Stub{Content: emptyJSON}
-	c := &clock{t: 1000}
-	a := New(s, stub, testBudget(s), testConfig(), c.now)
-	seed(t, a, "sys1")
-
-	c.t = 2000
-	process(t, a, deviating("sys1", 1000))
-	ignoreKeyOf(t, s, "sys1", 1000, 5000, 2000)
-	calls := stub.Calls
-
-	c.t = 4999
-	process(t, a, deviating("sys1", 2000))
-	if stub.Calls != calls {
-		t.Fatalf("the ignore did not hold before its expiry")
-	}
-	c.t = 5000
-	process(t, a, deviating("sys1", 3000))
-	if stub.Calls != calls+1 {
-		t.Fatalf("the ignore still held at its expiry")
-	}
-}
-
-// ignoringStore reports every trigger as ignored, whatever the store holds,
-// so the test can prove the analyzer's own refusal rather than the store's.
-type ignoringStore struct{ *logsstore.Store }
-
-func (s ignoringStore) LookupTrigger(ctx context.Context, systemID, key string) (logsstore.TriggerLookup, error) {
-	look, err := s.Store.LookupTrigger(ctx, systemID, key)
-	look.IgnoredUntil = 1 << 60
-	return look, err
-}
-
-// The analyzer half (the store half is in store/logs): a security trigger is
-// delivered without review, the store refuses to ignore, hide or merge it,
-// and even an ignore that somehow reached the store would not stop the call.
-func TestSecurityTriggersAreNeverQueuedIgnoredOrMerged(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-	stub := &llm.Stub{Content: emptyJSON}
-	a := New(ignoringStore{s}, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
-
-	b := steadyBundle("sys1")
-	b.Templates[0].Category = "security"
-	process(t, a, b)
-	if stub.Calls != 1 {
-		t.Fatalf("a new security template was not analysed although only a (forced) ignore stood in the way")
-	}
-	key := analysisAt(t, s, "sys1", 100).TriggerKey
-	tr, ok, err := s.GetTrigger(ctx, key)
-	if err != nil || !ok {
-		t.Fatalf("trigger not recorded: %v", err)
-	}
-	if !tr.Security || tr.Visibility != logsstore.VisibilityCustomer {
-		t.Fatalf("a security trigger was queued for review: %+v", tr)
-	}
-	if err := s.IgnoreTrigger(ctx, key, 1<<50, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
-		t.Fatalf("the store accepted an ignore of a security trigger: %v", err)
-	}
-	if err := s.SetTriggerVisibility(ctx, key, logsstore.VisibilityOperator, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
-		t.Fatalf("the store hid a security trigger: %v", err)
-	}
-
-	// A second, non-security trigger to merge with, in both directions.
-	process(t, a, deviating("sys2", 100))
-	other := analysisAt(t, s, "sys2", 100).TriggerKey
-	if other == "" || other == key {
-		t.Fatalf("expected a distinct non-security trigger, got %q", other)
-	}
-	if err := s.MergeTrigger(ctx, key, other, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
-		t.Fatalf("the store merged a security trigger away: %v", err)
-	}
-	if err := s.MergeTrigger(ctx, other, key, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
-		t.Fatalf("the store merged a trigger into a security one: %v", err)
-	}
-}
-
 // Decisions change what is paid for and what is delivered, never what the
-// model is told. Two deployments that differ only by decisions on the
-// trigger behind an open finding -- an ignore, hiding it, a severity
-// override, a doc reference -- must render byte-identical prompts for the
-// next window.
+// model is told. Two deployments that differ only by decisions on the class
+// behind an open finding -- hiding it, retagging its security bit, a
+// severity override, a doc reference -- must render byte-identical prompts
+// for the next window.
 func TestDecisionsNeverReachThePrompt(t *testing.T) {
 	render := func(decide bool) string {
 		s := newTestStore(t)
@@ -376,15 +238,25 @@ func TestDecisionsNeverReachThePrompt(t *testing.T) {
 		c.t = 2000
 		process(t, a, deviating("sys1", 1000)) // raises the open finding
 		if decide {
-			key := ignoreKeyOf(t, s, "sys1", 1000, 100*hour, 2000)
+			findings, err := s.ListAllFindings(context.Background(), "sys1", "", "", "", "", 0)
+			if err != nil || len(findings) != 1 {
+				t.Fatalf("list findings: %v %v", findings, err)
+			}
+			key := findings[0].ClassKey
+			if key == "" {
+				t.Fatal("the open finding carries no class key")
+			}
 			ctx := context.Background()
-			if err := s.SetTriggerVisibility(ctx, key, logsstore.VisibilityOperator, "op", 2000); err != nil {
+			if err := s.SetClassVisibility(ctx, key, logsstore.VisibilityOperator, "op", 2000); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SetTriggerSeverity(ctx, key, "critical", "op", 2000); err != nil {
+			if err := s.SetClassSecurity(ctx, key, true, "op", 2000); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SetTriggerDocRef(ctx, key, "https://docs.example.org/x", "op", 2000); err != nil {
+			if err := s.SetClassSeverity(ctx, key, "critical", "op", 2000); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetClassDocRef(ctx, key, "https://docs.example.org/x", "op", 2000); err != nil {
 				t.Fatal(err)
 			}
 		}

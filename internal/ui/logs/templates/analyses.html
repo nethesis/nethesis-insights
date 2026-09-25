@@ -10,8 +10,8 @@ nothing was new or unusual enough to bother the AI; <strong>LLM</strong> shows w
 was actually called (skipped windows are gated-out ones handled for free). A window with
 a <strong>suppressed</strong> value made no AI call: <code>system_call_cap</code> was refused
 by a spend limit and carries no gate reasons; <code>trigger_hit</code> was answered from the
-last call for the same <strong>trigger</strong> on this system, and <code>trigger_ignored</code>
-matched a trigger an operator ignored &mdash; both keep the reasons the gate fired with. <strong>Cached</strong>
+last call for the same <strong>trigger</strong> on this system &mdash; it keeps the reasons
+the gate fired with. <strong>Cached</strong>
 is the part of the input the model provider served from its prompt cache, at half price.
 Hover a truncated cell (gate reasons, error) for the full text.</small></p>
 <form method="get">

@@ -7,8 +7,9 @@ import "github.com/prometheus/client_golang/prometheus"
 
 // Trigger holds insightsd's trigger-memory counter: how many windows the
 // gate fired on were answered without an LLM call, by why (see
-// analyzer.SuppressedTrigger*). The label is that closed set and nothing
-// else -- never the trigger key, which is unbounded, and never system_id.
+// analyzer.SuppressedTrigger*, today just "trigger_hit"). The label is that
+// closed set and nothing else -- never the trigger key, which is unbounded,
+// and never system_id.
 type Trigger struct {
 	suppressions *prometheus.CounterVec
 }

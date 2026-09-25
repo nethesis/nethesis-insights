@@ -42,7 +42,7 @@ type Reader interface {
 	PruneFindings(ctx context.Context, olderThan int64) (int, error)
 	PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 	PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error)
-	PruneTriggers(ctx context.Context, olderThan int64) (int, error)
+	PruneClasses(ctx context.Context, olderThan int64) (int, error)
 }
 
 // Config is the pass's three retention windows. Each is independently
@@ -93,28 +93,28 @@ func New(r Reader, cfg Config) *Runner {
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	templatesPruned := r.prune(ctx, "templates", r.store.PruneTemplates, now-r.cfg.TemplateRetention.Milliseconds())
 	findingsPruned := r.prune(ctx, "findings", r.store.PruneFindings, now-r.cfg.FindingRetention.Milliseconds())
+	// Classes go once their findings are gone and no decision names them --
+	// see PruneClasses -- so this shares FindingRetention and runs right
+	// after PruneFindings: a class only PruneFindings just orphaned is
+	// collected in this same pass rather than the next.
+	classesPruned := r.prune(ctx, "classes", r.store.PruneClasses, now-r.cfg.FindingRetention.Milliseconds())
 	analysesPruned := r.prune(ctx, "analyses", r.store.PruneAnalyses, now-r.cfg.AnalysisRetention.Milliseconds())
 	// The node roster shares the template cutoff -- see PruneNodes for why
 	// it has no retention knob of its own.
 	nodesPruned := r.prune(ctx, "nodes", r.store.PruneNodes, now-r.cfg.TemplateRetention.Milliseconds())
-	// The trigger memory has no knobs of its own either. The per-system rows
-	// link a trigger to the findings its last call raised, so they share
-	// FindingRetention; the fleet-wide rows describe what the gate saw, the
-	// way system_templates does, so they share TemplateRetention -- and
-	// PruneTriggers spares any with an operator decision or a remaining
-	// reference. system_triggers goes first only so a trigger freed by it
-	// is collected in the same pass rather than the next.
+	// The trigger memory's per-system rows have no knob of their own either:
+	// they link a trigger key to the findings its last call raised, so they
+	// share FindingRetention the same way classes does.
 	systemTriggersPruned := r.prune(ctx, "system_triggers", r.store.PruneSystemTriggers,
 		now-r.cfg.FindingRetention.Milliseconds())
-	triggersPruned := r.prune(ctx, "triggers", r.store.PruneTriggers, now-r.cfg.TemplateRetention.Milliseconds())
 
 	slog.Info("log maintenance pass",
 		"templates_pruned", templatesPruned,
 		"findings_pruned", findingsPruned,
+		"classes_pruned", classesPruned,
 		"analyses_pruned", analysesPruned,
 		"nodes_pruned", nodesPruned,
-		"system_triggers_pruned", systemTriggersPruned,
-		"triggers_pruned", triggersPruned)
+		"system_triggers_pruned", systemTriggersPruned)
 	return nil
 }
 

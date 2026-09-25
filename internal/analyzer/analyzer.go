@@ -26,14 +26,11 @@ import (
 // rejection from the LLM, or a non-retryable 4xx).
 var ErrPermanent = errors.New("permanent failure")
 
-// The suppressed_by values the trigger memory writes. A window suppressed
+// The suppressed_by value the trigger memory writes. A window suppressed
 // this way was one the gate fired on: it keeps its gate reasons, unlike a
 // budget-suppressed window, because they are what the saving is measured
 // against.
 const (
-	// SuppressedTriggerIgnored: an operator ignored this trigger fleet-wide
-	// and the ignore has not expired.
-	SuppressedTriggerIgnored = "trigger_ignored"
 	// SuppressedTriggerHit: this system paid for this trigger within
 	// Config.TriggerReuseWindow and every finding that call raised is still
 	// open, so the answer is already known.
@@ -42,7 +39,7 @@ const (
 
 // TriggerSuppressions lists every value above, for the metrics package to
 // pre-create one child per reason.
-var TriggerSuppressions = []string{SuppressedTriggerIgnored, SuppressedTriggerHit}
+var TriggerSuppressions = []string{SuppressedTriggerHit}
 
 // Store is the slice of logsstore.Store the analyzer needs: the write path
 // that records templates, baselines, findings and the analyses ledger, plus
@@ -80,7 +77,7 @@ type Config struct {
 	// the same system is answered from memory rather than paid for again.
 	// It counts from the last paid call, never from the last reuse, so a
 	// persistent condition is re-analysed at least this often. Zero
-	// disables reuse; an ignore still applies.
+	// disables reuse.
 	TriggerReuseWindow time.Duration
 }
 
@@ -300,29 +297,24 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 
 	// 7. Trigger memory. The gate says this window is worth money; the
 	// trigger memory asks whether this exact condition has already been
-	// paid for. It runs after the gate (the key is derived from the gate's
-	// decision) and before anything is rendered, and it never changes what
-	// is rendered: an ignored or reused window makes no call at all, and a
+	// paid for on this system, recently enough that reusing the last
+	// answer is safe. It runs after the gate (the key is derived from the
+	// gate's decision) and before anything is rendered, and it never
+	// changes what is rendered: a reused window makes no call at all, and a
 	// window that does call sees the same prompt it would have without it.
 	key := trigger.Key(decision)
 	look, err := a.store.LookupTrigger(ctx, b.SystemID, key)
 	if err != nil {
 		return fmt.Errorf("analyzer: lookup trigger: %w", err)
 	}
-	// Either side saying security is enough: the key's bit and the stored
-	// row agree by construction, and the answer that silences nothing is the
-	// safe one if they ever did not.
-	security := trigger.IsSecurity(decision) || look.Security
-	if suppressed := a.remembered(look, security, now); suppressed != "" {
+	if suppressed := a.remembered(look, now); suppressed != "" {
 		slog.Info("window answered from trigger memory",
 			"system_id", b.SystemID, "window_start", b.Window.Start, "suppressed_by", suppressed)
 		if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
-			SystemID:      b.SystemID,
-			Key:           look.Root,
-			Security:      security,
-			PromptVersion: prompt.Version,
-			Reused:        suppressed == SuppressedTriggerHit,
-			Now:           now,
+			SystemID: b.SystemID,
+			Key:      key,
+			Reused:   suppressed == SuppressedTriggerHit,
+			Now:      now,
 		}); err != nil {
 			return fmt.Errorf("analyzer: record trigger sighting: %w", err)
 		}
@@ -333,7 +325,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			gated:        true,
 			gateReasons:  decision.Reasons,
 			suppressedBy: suppressed,
-			triggerKey:   look.Root,
+			triggerKey:   key,
 			durationMs:   int(time.Since(start).Milliseconds()),
 		})
 	}
@@ -398,7 +390,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 				Model:       a.cfg.Model,
 				DurationMs:  durationMs,
 				Error:       err.Error(),
-				TriggerKey:  look.Root,
+				TriggerKey:  key,
 			}); finalizeErr != nil {
 				slog.Error("finalize analysis after permanent llm error failed", "error", finalizeErr)
 			}
@@ -440,7 +432,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Model:        a.cfg.Model,
 			DurationMs:   int(time.Since(start).Milliseconds()),
 			Error:        err.Error(),
-			TriggerKey:   look.Root,
+			TriggerKey:   key,
 		})
 		if finalizeErr != nil {
 			slog.Error("finalize analysis after parse error failed", "error", finalizeErr)
@@ -513,7 +505,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Nodes:           nodes,
 			LLMModel:        resp.Model,
 			PromptVersion:   prompt.Version,
-			TriggerKey:      look.Root,
+			TriggerKey:      key,
 			ClassKey:        class,
 			Security:        category == "security",
 		}, now)
@@ -529,12 +521,10 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// next window's reuse check reads. Only a successful call is recorded --
 	// a failed one answered nothing and must not be reused.
 	if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
-		SystemID:      b.SystemID,
-		Key:           look.Root,
-		Security:      security,
-		PromptVersion: prompt.Version,
-		Called:        true,
-		Now:           now,
+		SystemID: b.SystemID,
+		Key:      key,
+		Called:   true,
+		Now:      now,
 	}); err != nil {
 		return fmt.Errorf("analyzer: record trigger sighting: %w", err)
 	}
@@ -562,7 +552,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		cachedTokens: cached,
 		costMicros:   costMicros,
 		model:        resp.Model,
-		triggerKey:   look.Root,
+		triggerKey:   key,
 		durationMs:   int(time.Since(start).Milliseconds()),
 	})
 }
@@ -570,17 +560,13 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 // remembered decides whether the trigger memory answers this window, and
 // returns the suppressed_by value if it does.
 //
-// An ignore is fleet-wide and expires; it never applies to a security
-// trigger, whatever the store says. A reuse is per system: the same trigger,
-// paid for on this system within TriggerReuseWindow of the last PAID call,
-// with every finding that call raised still open. A call that raised nothing
-// is reusable too -- the model looked at exactly this and found nothing --
-// while a finding that went stale means the condition changed shape, and the
-// window is paid for again.
-func (a *Analyzer) remembered(look logsstore.TriggerLookup, security bool, now int64) string {
-	if !security && look.IgnoredUntil > now {
-		return SuppressedTriggerIgnored
-	}
+// A reuse is per system: the same trigger, paid for on this system within
+// TriggerReuseWindow of the last PAID call, with every finding that call
+// raised still open. A call that raised nothing is reusable too -- the model
+// looked at exactly this and found nothing -- while a finding that went
+// stale means the condition changed shape, and the window is paid for
+// again.
+func (a *Analyzer) remembered(look logsstore.TriggerLookup, now int64) string {
 	window := a.cfg.TriggerReuseWindow.Milliseconds()
 	if window > 0 && look.SystemSeen && look.LastCalledAt > 0 &&
 		now-look.LastCalledAt <= window && look.LinkedNotOpen == 0 {

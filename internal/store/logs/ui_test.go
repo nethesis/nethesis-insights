@@ -722,7 +722,7 @@ func TestGateRollupCountsSuppressedWindowsApart(t *testing.T) {
 	for i, a := range []Analysis{
 		{GateReasons: []string{"deviation:mod1/3"}, LLMCalled: true, CostMicros: 10, TriggerKey: "t1:k"},
 		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_hit", TriggerKey: "t1:k"},
-		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_ignored", TriggerKey: "t1:k"},
+		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_hit", TriggerKey: "t1:k"},
 	} {
 		start := int64(100 * (i + 1))
 		if _, err := s.BeginAnalysis(ctx, "sys1", start, start+50, 1000); err != nil {

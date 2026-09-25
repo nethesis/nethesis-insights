@@ -177,24 +177,19 @@ func (s *Store) PruneSystemTriggers(ctx context.Context, olderThan int64) (int, 
 	`, olderThan)
 }
 
-// PruneTriggers deletes fleet-wide trigger rows not seen since olderThan that
-// nothing depends on. A trigger an operator decided on is never a candidate,
-// however old: the decision is what makes its next sighting cheap, and the
-// append-only trail in trigger_decisions would name a trigger that no longer
-// exists. Nor is one still named by a system_triggers row, an alias on
-// either side, or a finding -- each of those is a join that would silently
-// start matching nothing.
-func (s *Store) PruneTriggers(ctx context.Context, olderThan int64) (int, error) {
+// PruneClasses deletes finding classes not seen since olderThan that nothing
+// depends on. A class an operator decided on is never a candidate -- the
+// decision must keep applying when the condition returns, and the
+// append-only trail in class_decisions would otherwise name a class that no
+// longer exists -- nor is one a retained finding still names.
+func (s *Store) PruneClasses(ctx context.Context, olderThan int64) (int, error) {
 	return s.pruneLoop(ctx, `
-		DELETE FROM triggers
-		WHERE trigger_key IN (
-			SELECT t.trigger_key FROM triggers t
-			WHERE t.last_seen < ?
-			  AND NOT EXISTS (SELECT 1 FROM trigger_decisions d WHERE d.trigger_key = t.trigger_key)
-			  AND NOT EXISTS (SELECT 1 FROM trigger_aliases a
-			                  WHERE a.alias_key = t.trigger_key OR a.canonical_key = t.trigger_key)
-			  AND NOT EXISTS (SELECT 1 FROM system_triggers st WHERE st.trigger_key = t.trigger_key)
-			  AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.trigger_key = t.trigger_key)
+		DELETE FROM finding_classes
+		WHERE class_key IN (
+			SELECT c.class_key FROM finding_classes c
+			WHERE c.last_seen < ?
+			  AND NOT EXISTS (SELECT 1 FROM class_decisions d WHERE d.class_key = c.class_key)
+			  AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.class_key = c.class_key)
 			LIMIT ?
 		)
 	`, olderThan)

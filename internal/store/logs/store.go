@@ -212,34 +212,10 @@ func (s *Store) Init(ctx context.Context) error {
 		// DailySpendMicros/SystemCallsSince/CostRollup/GateRollup, all of
 		// which already filter or group on this column.
 		`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at)`,
-		// Trigger memory: see triggers.go. triggers is fleet-wide, one row
-		// per trigger key, and carries every operator decision's current
-		// effect; system_triggers is the per-system half the reuse check
-		// reads; trigger_aliases maps a merged key straight to its root
-		// (never to another alias, so resolving is one lookup); and
-		// trigger_decisions is the append-only audit trail -- an UPDATE
-		// destroys the value that would otherwise say who changed it.
-		`CREATE TABLE IF NOT EXISTS triggers (
-			trigger_key TEXT PRIMARY KEY,
-			security INTEGER NOT NULL,
-			status TEXT NOT NULL,
-			ignore_until INTEGER,
-			visibility TEXT NOT NULL,
-			severity_override TEXT,
-			doc_ref TEXT,
-			first_prompt_version TEXT,
-			first_seen INTEGER,
-			last_seen INTEGER,
-			distinct_systems INTEGER NOT NULL DEFAULT 0,
-			count INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_triggers_last_seen ON triggers(last_seen)`,
-		`CREATE TABLE IF NOT EXISTS trigger_aliases (
-			alias_key TEXT PRIMARY KEY,
-			canonical_key TEXT NOT NULL,
-			created_at INTEGER
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_trigger_aliases_canonical ON trigger_aliases(canonical_key)`,
+		// Trigger memory: see triggers.go. system_triggers is per-system
+		// reuse memory only -- when this system last paid for a trigger key,
+		// and how many times it has seen it -- with nothing an operator
+		// decides stored against it; that lives in finding_classes below.
 		`CREATE TABLE IF NOT EXISTS system_triggers (
 			system_id TEXT,
 			trigger_key TEXT,
@@ -251,23 +227,10 @@ func (s *Store) Init(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_system_triggers_last_seen ON system_triggers(last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_system_triggers_key ON system_triggers(trigger_key)`,
-		`CREATE TABLE IF NOT EXISTS trigger_decisions (
-			id TEXT PRIMARY KEY,
-			trigger_key TEXT NOT NULL,
-			actor TEXT NOT NULL,
-			action TEXT NOT NULL,
-			detail TEXT,
-			prompt_version TEXT,
-			created_at INTEGER NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_trigger_decisions_key ON trigger_decisions(trigger_key)`,
 		// The reuse check counts the findings one trigger raised on one
-		// system, and PruneTriggers asks whether any finding still names a
-		// trigger; trigger_key leads so the one index serves both.
+		// system; trigger_key leads so a lookup for one system's trigger is
+		// a seek, not a scan.
 		`CREATE INDEX IF NOT EXISTS idx_findings_trigger ON findings(trigger_key, system_id)`,
-		// The review queue shows each trigger's most recent gate reasons,
-		// one seek per trigger rather than a scan of the cost ledger.
-		`CREATE INDEX IF NOT EXISTS idx_analyses_trigger ON analyses(trigger_key, created_at)`,
 		// Finding classes: see classes.go. One row per class, fleet-wide,
 		// carrying every review decision's current effect; class_decisions
 		// is the append-only audit trail -- an UPDATE destroys the value

@@ -256,48 +256,43 @@ func TestPruneSystemTriggersByLastSeen(t *testing.T) {
 	}
 }
 
-// A trigger an operator decided on is never pruned, however old: the
-// decision is the only thing that makes the next sighting cheap, and the
-// audit trail would point at nothing. Neither is one that anything still
-// references -- a system row, an alias, a finding.
-func TestPruneTriggersNeverTouchesADecidedOrReferencedTrigger(t *testing.T) {
+// A class an operator decided on is never pruned, however old: the decision
+// must keep applying when the condition returns, and the audit trail would
+// point at nothing. Neither is one a retained finding still names. Only the
+// class that is neither decided nor referenced, and old enough, is a
+// candidate.
+func TestPruneClassesSparesDecidedAndReferencedClasses(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	for _, key := range []string{"t1:orphan", "t1:decided", "t1:system", "t1:aliased", "t1:finding", "t1:recent"} {
-		now := int64(1000)
-		if key == "t1:recent" {
-			now = 9000
-		}
-		if err := s.RecordTriggerSighting(ctx, TriggerSighting{SystemID: "sys1", Key: key, Called: true, Now: now}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := s.IgnoreTrigger(ctx, "t1:decided", 99999, "op", 1000); err != nil {
+	// referenced: its finding is still present.
+	seedClassFinding(t, s, "sys1", "fp-ref", "v3:referenced", "low", "t", false, 1000)
+	// decided: a decision was recorded, then its finding was removed.
+	seedClassFinding(t, s, "sys1", "fp-dec", "v3:decided", "low", "t", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:decided", VisibilityCustomer, "op", 1000))
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:decided"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO trigger_aliases (alias_key, canonical_key, created_at) VALUES ('t1:gone', 't1:aliased', 1000)`); err != nil {
+	// orphan: neither decided nor referenced, old -- the only candidate.
+	seedClassFinding(t, s, "sys1", "fp-orphan", "v3:orphan", "low", "t", false, 1000)
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:orphan"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpsertFinding(ctx, model.Finding{SystemID: "sys1", Fingerprint: "fp", Severity: "low",
-		Modules: []string{}, Evidence: []string{}, TriggerKey: "t1:finding"}, 1000); err != nil {
-		t.Fatal(err)
-	}
-	// Every per-system row is gone except the one this case keeps on purpose.
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM system_triggers WHERE trigger_key != 't1:system'`); err != nil {
+	// recent: neither decided nor referenced, but too recent to prune.
+	seedClassFinding(t, s, "sys1", "fp-recent", "v3:recent", "low", "t", false, 5000)
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:recent"); err != nil {
 		t.Fatal(err)
 	}
 
-	n, err := s.PruneTriggers(ctx, 5000)
+	n, err := s.PruneClasses(ctx, 2000)
 	if err != nil || n != 1 {
 		t.Fatalf("pruned %d, err %v; want exactly the orphan", n, err)
 	}
-	if _, ok, _ := s.GetTrigger(ctx, "t1:orphan"); ok {
-		t.Fatal("the unreferenced, undecided, old trigger survived")
+	if _, ok, _ := s.GetClass(ctx, "v3:orphan"); ok {
+		t.Fatal("the unreferenced, undecided, old class survived")
 	}
-	for _, key := range []string{"t1:decided", "t1:system", "t1:aliased", "t1:finding", "t1:recent"} {
-		if _, ok, _ := s.GetTrigger(ctx, key); !ok {
+	for _, key := range []string{"v3:referenced", "v3:decided", "v3:recent"} {
+		if _, ok, _ := s.GetClass(ctx, key); !ok {
 			t.Fatalf("%s was pruned", key)
 		}
 	}
