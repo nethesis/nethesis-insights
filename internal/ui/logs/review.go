@@ -163,6 +163,12 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 			return
 		}
 		err = s.writer.SetClassDocRef(ctx, key, docRef, actor, now)
+	default:
+		// Reachable only if a path is added to writableRoutes with no case
+		// here -- err would stay nil and fall through to the redirect below
+		// as if the (nonexistent) decision had succeeded.
+		http.NotFound(w, r)
+		return
 	}
 
 	switch {

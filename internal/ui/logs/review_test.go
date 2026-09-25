@@ -218,6 +218,23 @@ func TestReviewMapsStoreRefusals(t *testing.T) {
 	}
 }
 
+// A path added to writableRoutes with no case in handleDecision's switch
+// must not silently redirect as if it had done something -- it must 404.
+func TestUnhandledWritableRouteIsNotFound(t *testing.T) {
+	writableRoutes["/review/bogus"] = true
+	defer delete(writableRoutes, "/review/bogus")
+
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, seededReader(), w)
+	rec := do(h, writeReq("/review/bogus", url.Values{"key": {"v3:aaaa"}}))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", rec.Code)
+	}
+	if len(w.calls) != 0 {
+		t.Fatalf("an unhandled writable route reached the store: %v", w.calls)
+	}
+}
+
 // A stale tab posting to a removed route must reach no store method.
 func TestReviewHasNoIgnoreOrMergeRoute(t *testing.T) {
 	w := &fakeWriter{}
