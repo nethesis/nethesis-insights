@@ -123,7 +123,7 @@ func TestListSystemsAggregates(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if err := s.UpsertSystem(ctx, System{SystemID: "sys1", TenantID: "tenant1", CollectorVersion: "1.0", FirstSeen: 100, LastSeen: 500}); err != nil {
+	if err := s.UpsertSystem(ctx, System{SystemID: "sys1", CollectorVersion: "1.0", FirstSeen: 100, LastSeen: 500}); err != nil {
 		t.Fatalf("upsert system: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestListSystemsAggregates(t *testing.T) {
 		t.Fatalf("expected 1 system, got %d", len(systems))
 	}
 	r := systems[0]
-	if r.SystemID != "sys1" || r.TenantID != "tenant1" || r.CollectorVersion != "1.0" {
+	if r.SystemID != "sys1" || r.CollectorVersion != "1.0" {
 		t.Fatalf("unexpected identity fields: %+v", r)
 	}
 	if r.Templates != 1 {

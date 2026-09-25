@@ -13,7 +13,7 @@ reports for itself; a node shows as a bare number when no name has reached us ye
 <table class="striped">
 <thead>
 <tr>
-<th scope="col">System</th><th scope="col">Tenant</th><th scope="col">Nodes</th><th scope="col">Collector</th><th scope="col">First seen</th><th scope="col">Last seen</th>
+<th scope="col">System</th><th scope="col">Nodes</th><th scope="col">Collector</th><th scope="col">First seen</th><th scope="col">Last seen</th>
 <th scope="col" class="num">Templates</th><th scope="col" class="num">Open</th><th scope="col" class="num">Findings</th>
 <th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th><th scope="col" class="num">Cost</th>
 </tr>
@@ -22,7 +22,6 @@ reports for itself; a node shows as a bare number when no name has reached us ye
 {{range .Systems}}
 <tr>
 <td class="mono">{{.SystemID}}</td>
-<td>{{.TenantID}}</td>
 <td>{{range .Nodes}}<div class="mono">{{.NodeID}}{{if .FQDN}} &mdash; {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
 <td>{{.CollectorVersion}}</td>
 <td class="mono">{{fmtTime .FirstSeen}}</td>

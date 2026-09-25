@@ -155,7 +155,7 @@ func seededReader() *fakeReader {
 		counts: logsstore.Counts{Systems: 2, Templates: 5, Baselines: 3, Findings: 4, Analyses: 7},
 		systems: []logsstore.SystemRow{
 			{
-				SystemID: "sys-1", TenantID: "tenant-a", CollectorVersion: "1.2.3",
+				SystemID: "sys-1", CollectorVersion: "1.2.3",
 				FirstSeen: 1700000000000, LastSeen: 1700000100000,
 				Templates: 5, OpenFindings: 1, Findings: 2, Windows: 10, LLMCalls: 3, CostMicros: 4200,
 			},

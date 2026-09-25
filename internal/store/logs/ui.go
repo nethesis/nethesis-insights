@@ -51,11 +51,11 @@ type Counts struct {
 // SystemRow is one system plus the cross-table aggregates the operator UI's
 // /systems page needs.
 type SystemRow struct {
-	SystemID, TenantID, CollectorVersion string
-	FirstSeen, LastSeen                  int64
-	Templates, OpenFindings, Findings    int
-	Windows, LLMCalls                    int
-	CostMicros                           int64
+	SystemID, CollectorVersion        string
+	FirstSeen, LastSeen               int64
+	Templates, OpenFindings, Findings int
+	Windows, LLMCalls                 int
+	CostMicros                        int64
 	// Nodes is the cluster's roster, ordered by node id. A system_id names
 	// a cluster, so this is what turns it into a list of machines.
 	Nodes []model.NodeInfo
@@ -189,7 +189,7 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			s.system_id, s.tenant_id, s.collector_version, s.first_seen, s.last_seen,
+			s.system_id, s.collector_version, s.first_seen, s.last_seen,
 			(SELECT count(*) FROM system_templates st WHERE st.system_id = s.system_id) AS templates,
 			(SELECT count(*) FROM findings f WHERE f.system_id = s.system_id AND f.status = ?) AS open_findings,
 			(SELECT count(*) FROM findings f WHERE f.system_id = s.system_id) AS findings,
@@ -207,7 +207,7 @@ func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	result := []SystemRow{}
 	for rows.Next() {
 		var r SystemRow
-		if err := rows.Scan(&r.SystemID, &r.TenantID, &r.CollectorVersion, &r.FirstSeen, &r.LastSeen,
+		if err := rows.Scan(&r.SystemID, &r.CollectorVersion, &r.FirstSeen, &r.LastSeen,
 			&r.Templates, &r.OpenFindings, &r.Findings, &r.Windows, &r.LLMCalls, &r.CostMicros); err != nil {
 			return nil, fmt.Errorf("store: scan system row: %w", err)
 		}

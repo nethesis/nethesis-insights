@@ -13,7 +13,7 @@
 // discipline. What is specific here:
 //
 //   - Reads are unauthenticated and fleet-wide -- every GET shows every
-//     system's findings, templates, baselines and spend, across tenants.
+//     system's findings, templates, baselines and spend, for every customer.
 //     That is why most of the constraints below are not optional.
 //   - Zero JavaScript. Interactions are <meta refresh>, <form> and
 //     <details>, never a <script> tag.

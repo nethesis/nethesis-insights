@@ -33,7 +33,6 @@ const (
 
 type System struct {
 	SystemID         string
-	TenantID         string
 	CollectorVersion string
 	FirstSeen        int64
 	LastSeen         int64
@@ -102,7 +101,6 @@ func (s *Store) Init(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS systems (
 			system_id TEXT PRIMARY KEY,
-			tenant_id TEXT,
 			collector_version TEXT,
 			first_seen INTEGER,
 			last_seen INTEGER
@@ -282,13 +280,12 @@ func (s *Store) UpsertSystem(ctx context.Context, sys System) error {
 	defer s.db.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO systems (system_id, tenant_id, collector_version, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO systems (system_id, collector_version, first_seen, last_seen)
+		VALUES (?, ?, ?, ?)
 		ON CONFLICT(system_id) DO UPDATE SET
-			tenant_id = excluded.tenant_id,
 			collector_version = excluded.collector_version,
 			last_seen = excluded.last_seen
-	`, sys.SystemID, sys.TenantID, sys.CollectorVersion, sys.FirstSeen, sys.LastSeen)
+	`, sys.SystemID, sys.CollectorVersion, sys.FirstSeen, sys.LastSeen)
 	if err != nil {
 		return fmt.Errorf("store: upsert system: %w", err)
 	}
