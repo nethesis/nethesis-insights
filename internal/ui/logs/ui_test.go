@@ -766,7 +766,7 @@ func TestGateSummarySeparatesSuppressedWindows(t *testing.T) {
 }
 
 // Every body cell must sit under its own header. A row one cell short shifts
-// every later value one column left -- Occurrences shows the nodes, Nodes the
+// every later value one column left -- Count shows the nodes, Nodes the
 // title, Title the last-seen time -- so assert both the cell count and that
 // each column holds the value its header names.
 func TestFindingsRowCellsLineUpWithHeader(t *testing.T) {
@@ -780,10 +780,10 @@ func TestFindingsRowCellsLineUpWithHeader(t *testing.T) {
 		t.Fatalf("row has %d cells, header has %d (%q)", len(cells), len(header), header)
 	}
 	for name, want := range map[string]string{
-		"Occurrences": "42</td>",
-		"Nodes":       "rl1.example.org",
-		"Title":       "the finding title",
-		"Last seen":   " ago",
+		"Count":     "42</td>",
+		"Nodes":     "rl1.example.org",
+		"Title":     "the finding title",
+		"Last seen": " ago",
 	} {
 		if c := cells[column(t, header, name)]; !strings.Contains(c, want) {
 			t.Errorf("column %q cell = %q, want it to contain %q", name, c, want)

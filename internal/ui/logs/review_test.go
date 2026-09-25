@@ -264,14 +264,18 @@ func TestReviewOffersNoSilencingFormForASecurityTrigger(t *testing.T) {
 
 // Clicking a finding opens its detail in a modal <dialog> -- opened by an
 // invoker button, not a script -- rather than expanding the row in place,
-// which made a wide table wider.
+// which made a wide table wider. It closes from the header cross, a Close
+// button at the bottom, and a click anywhere outside the article (the
+// dialog-dismiss button behind it); Escape is native to a modal dialog.
 func TestFindingDetailOpensInADialog(t *testing.T) {
 	body := get(t, newTestServer(t, seededReader(), nil), "/").Body.String()
 	id := "finding-01FINDINGID0000000000000000"
 	for _, want := range []string{
 		`commandfor="` + id + `" command="show-modal"`,
 		`<dialog id="` + id + `"`,
-		`commandfor="` + id + `" command="close"`,
+		`rel="prev" commandfor="` + id + `" command="close"`,
+		`class="secondary" commandfor="` + id + `" command="close">Close</button>`,
+		`class="dialog-dismiss" tabindex="-1" aria-hidden="true" commandfor="` + id + `" command="close"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("findings page lacks %s", want)

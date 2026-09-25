@@ -19,6 +19,14 @@ figure.overflow-auto {
   max-height: 70vh;
 }
 
+/* Pico scales the root font up to 131% on wide screens (21px at 1920px),
+   which is right for prose and too large for a dense listing: the findings
+   table overflowed a 1920x1080 screen. Listing tables only -- the small
+   key/value tables keep Pico's size. */
+figure.overflow-auto table {
+  font-size: 0.875em;
+}
+
 .mono, td.mono, th.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -41,9 +49,45 @@ thead th {
 /* A <button> that opens a <dialog> (command/commandfor, no JavaScript) but
    reads as the row's link: the listing tables are wide, and a row that
    expanded in place pushed the page sideways on every click. */
+/* Dialogs: opened with command="show-modal", so Escape closes them natively.
+   Pico paints the overlay on the <dialog> itself, stretched over the whole
+   viewport, so a click beside the article lands on the dialog rather than
+   its ::backdrop and closedby="any" never fires. .dialog-dismiss is a
+   transparent close button filling the dialog behind the article: clicking
+   anywhere outside the article closes it, still without a script. */
+dialog > article {
+  position: relative;
+  z-index: 1;
+  max-width: min(60rem, 100%);
+}
+dialog dd {
+  overflow-wrap: anywhere;
+}
+dialog > button.dialog-dismiss {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+}
+
+/* A node line ("7 · n6.example.org") reads as one unit; wrapping it inside
+   itself made rows taller without making the table any narrower. */
+td.nodes div {
+  white-space: nowrap;
+}
+
 button.linklike {
   width: auto;
-  max-width: 40ch;
+  max-width: 28ch;
+  font-size: inherit;
+  line-height: inherit;
   margin: 0;
   padding: 0;
   border: none;

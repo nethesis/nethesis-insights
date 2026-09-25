@@ -332,7 +332,10 @@ func ClampLimit(v string, def, max int) int {
 // with the operator's automatically-replayed Basic credentials. Today that is
 // theoretical -- html/template escapes throughout and nothing here emits
 // template.HTML or a <script> tag -- but these headers make it enforced
-// rather than merely currently-true. Cache-Control matters on its own: these
+// rather than merely currently-true. img-src admits data: URIs because Pico
+// draws every icon -- the select and dropdown chevrons, the dialog's close
+// cross -- as an inline data: SVG; an image cannot run script, so this opens
+// nothing that script-src 'none' closes. Cache-Control matters on its own: these
 // pages now serve fleet-wide findings, attacker IP addresses and
 // per-customer commercial data over the internet into an operator's browser
 // cache.
@@ -344,7 +347,7 @@ func (b *Base) Render(w http.ResponseWriter, page string, data any) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; script-src 'none'; form-action 'self'")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = buf.WriteTo(w)
 }

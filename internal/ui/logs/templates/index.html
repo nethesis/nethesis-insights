@@ -15,8 +15,8 @@ cited log lines came from in the most recent occurrence &mdash; where it is happ
 everywhere it has ever happened.</small></p>
 <form method="get">
 <fieldset role="group">
-<input type="text" name="system" value="{{.System}}" placeholder="system id, partial ok, any if blank">
-<input type="text" name="id" value="{{.ID}}" placeholder="id / fingerprint / trigger, partial ok">
+<input type="text" name="system" value="{{.System}}" placeholder="system id (prefix)">
+<input type="text" name="id" value="{{.ID}}" placeholder="id, fingerprint or trigger">
 <select name="status">
 <option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
 <option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>
@@ -40,18 +40,18 @@ everywhere it has ever happened.</small></p>
 <thead>
 <tr>
 <th scope="col">ID</th><th scope="col">System</th><th scope="col">Severity</th><th scope="col">Status</th>
-<th scope="col" class="num">Occurrences</th><th scope="col">Nodes</th><th scope="col">Title</th><th scope="col">Last seen</th>
+<th scope="col" class="num" title="Occurrences">Count</th><th scope="col">Nodes</th><th scope="col">Title</th><th scope="col">Last seen</th>
 </tr>
 </thead>
 <tbody>
 {{range .Findings}}
 <tr>
 <td class="mono">{{short .ID 8}}</td>
-<td class="mono">{{.SystemID}}</td>
+<td class="mono" title="{{.SystemID}}">{{truncate .SystemID 8}}</td>
 <td><span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span></td>
 <td><span class="pill" data-status="{{.Status}}">{{.Status}}</span></td>
 <td class="num">{{.OccurrenceCount}}</td>
-<td class="mono">{{range .NodeRefs}}<div{{if not .FQDN}} title="no name reported"{{end}}>{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
+<td class="mono nodes">{{range .NodeRefs}}<div{{if not .FQDN}} title="no name reported"{{end}}>{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
 <td>
 <button type="button" class="linklike truncate" title="{{.Title}}" commandfor="finding-{{.ID}}" command="show-modal">{{truncate .Title 80}}</button>
 <dialog id="finding-{{.ID}}" closedby="any">
@@ -61,6 +61,7 @@ everywhere it has ever happened.</small></p>
 <p><strong>{{.Title}}</strong></p>
 </header>
 <dl>
+<dt>System</dt><dd class="mono">{{.SystemID}}</dd>
 <dt>Summary</dt><dd>{{.Summary}}</dd>
 <dt>Evidence</dt>
 <dd>{{range .Evidence}}<div class="mono">{{.}}</div>{{else}}&mdash;{{end}}</dd>
@@ -80,7 +81,11 @@ everywhere it has ever happened.</small></p>
 <dt>LLM model</dt><dd class="mono">{{.LLMModel}}</dd>
 <dt>Prompt version</dt><dd class="mono">{{.PromptVersion}}</dd>
 </dl>
+<footer>
+<button type="button" class="secondary" commandfor="finding-{{.ID}}" command="close">Close</button>
+</footer>
 </article>
+<button type="button" class="dialog-dismiss" tabindex="-1" aria-hidden="true" commandfor="finding-{{.ID}}" command="close"></button>
 </dialog>
 </td>
 <td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>

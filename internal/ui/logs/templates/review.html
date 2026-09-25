@@ -121,7 +121,11 @@ delivers them; security triggers skip the queue. Ranked by the number of systems
 {{else}}
 <p><small>Read-only: decisions need <code>ADMIN_API_KEY</code> set on insightsd.</small></p>
 {{end}}
+<footer>
+<button type="button" class="secondary" commandfor="trigger-{{.Key}}" command="close">Close</button>
+</footer>
 </article>
+<button type="button" class="dialog-dismiss" tabindex="-1" aria-hidden="true" commandfor="trigger-{{.Key}}" command="close"></button>
 </dialog>
 </td>
 <td><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></td>

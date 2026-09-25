@@ -99,7 +99,7 @@ func TestRenderSecurityHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
 	b.Render(w, "status.html", PageData{})
 
-	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'self'; script-src 'none'; form-action 'self'" {
+	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'self'; img-src 'self' data:; script-src 'none'; form-action 'self'" {
 		t.Errorf("Content-Security-Policy = %q", got)
 	}
 	if got := w.Header().Get("Cache-Control"); got != "no-store" {
