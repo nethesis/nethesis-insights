@@ -4,6 +4,7 @@
 package fingerprint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
@@ -76,5 +77,38 @@ func TestNodeAttributionDoesNotChangeIdentity(t *testing.T) {
 
 	if a != b {
 		t.Errorf("node set changed the fingerprint: %q != %q", a, b)
+	}
+}
+
+// A class is the fingerprint without the system: the same condition on two
+// systems is two findings and one class.
+func TestClassIgnoresSystem(t *testing.T) {
+	mods, ev := []string{"nethvoice"}, []string{"bucket:nethvoice/4"}
+	if Compute("sys1", mods, ev, "") == Compute("sys2", mods, ev, "") {
+		t.Fatal("fingerprints must differ across systems")
+	}
+	c := Class(mods, ev, "")
+	if c != Class(mods, ev, "") {
+		t.Fatal("class must be stable")
+	}
+	if !strings.HasPrefix(c, Version+":") {
+		t.Fatalf("class %q must carry the fingerprint version", c)
+	}
+}
+
+func TestClassIsStableUnderReorderingAndDistinctAcrossFields(t *testing.T) {
+	base := Class([]string{"a", "b"}, []string{"x", "y"}, "")
+	if base != Class([]string{"b", "a", "a"}, []string{"y", "x"}, "") {
+		t.Fatal("order and duplicates must not change the class")
+	}
+	for name, other := range map[string]string{
+		"modules":  Class([]string{"a"}, []string{"x", "y"}, ""),
+		"evidence": Class([]string{"a", "b"}, []string{"x"}, ""),
+		"category": Class([]string{"a", "b"}, []string{"x", "y"}, "security"),
+		"shifted":  Class([]string{"ab"}, []string{"x", "y"}, ""),
+	} {
+		if other == base {
+			t.Errorf("%s must change the class", name)
+		}
 	}
 }

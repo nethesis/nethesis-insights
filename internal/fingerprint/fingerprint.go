@@ -71,3 +71,18 @@ func Compute(systemID string, modules, evidence []string, category string) strin
 
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// Class names a finding fleet-wide: Compute without the system, over the
+// same derived fields, so the same condition on thirty systems is thirty
+// findings and one class. It is what an operator reviews -- once, for every
+// system that raises it now or later -- and, like the fingerprint, it is
+// derived from the cited templates only, never from model text. It carries
+// Version so a formula change renames classes visibly, as it does findings.
+func Class(modules, evidence []string, category string) string {
+	h := sha256.New()
+	writeField(h, Version)
+	writeField(h, category)
+	writeList(h, modules)
+	writeList(h, evidence)
+	return Version + ":" + hex.EncodeToString(h.Sum(nil))
+}
