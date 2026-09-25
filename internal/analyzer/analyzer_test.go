@@ -141,7 +141,7 @@ func TestFindingStoredWithValidFingerprint(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	findings, err := s.ListFindings(ctx, "sys1", 0, "")
+	findings, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/uptrace/bun"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
@@ -22,7 +23,7 @@ import (
 //
 // None of it reaches the prompt. The prompt is rendered from the bundle and
 // the open findings only, so an operator decision can change what is paid
-// for and (later) what is delivered, never what the model is told.
+// for and what is delivered, never what the model is told.
 
 const (
 	TriggerActive  = "active"
@@ -34,16 +35,29 @@ const (
 	VisibilityCustomer = "customer"
 	VisibilityOperator = "operator"
 
-	ActionIgnore = "ignore"
+	// The trigger_decisions actions, one per operator decision.
+	ActionDeliver  = "deliver"
+	ActionInternal = "internal"
+	ActionIgnore   = "ignore"
+	ActionMerge    = "merge"
+	ActionSeverity = "severity"
+	ActionDocRef   = "doc_ref"
 )
 
 var (
 	ErrUnknownTrigger = errors.New("store: unknown trigger")
-	// ErrSecurityTrigger refuses a decision that would silence a security
-	// trigger. The analyzer never lets an ignore suppress one either; this
-	// is the second lock, on the write side.
-	ErrSecurityTrigger = errors.New("store: security triggers cannot be ignored")
+	// ErrSecurityTrigger refuses a decision that could silence a security
+	// trigger: an ignore, a visibility change, or a merge on either side.
+	// The analyzer never lets an ignore suppress one either; this is the
+	// second lock, on the write side.
+	ErrSecurityTrigger = errors.New("store: security triggers cannot be ignored, hidden or merged")
 	ErrIgnoreExpiry    = errors.New("store: an ignore must expire in the future")
+	// ErrMergeCycle refuses a merge whose two keys already share a root --
+	// a key into itself, into its own alias, or into the root it was
+	// already merged into.
+	ErrMergeCycle        = errors.New("store: both keys already resolve to the same trigger")
+	ErrInvalidSeverity   = errors.New("store: unknown severity")
+	ErrInvalidVisibility = errors.New("store: visibility must be customer or operator")
 )
 
 // Trigger is one triggers row.
@@ -259,12 +273,14 @@ func (s *Store) RecordTriggerSighting(ctx context.Context, sg TriggerSighting) e
 	return tx.Commit()
 }
 
-// IgnoreTrigger stops paying for a trigger fleet-wide until `until`, and
-// appends the decision to the audit trail in the same transaction -- an
-// ignore with no record of who made it is the one outcome this must not
-// allow. A security trigger is refused, and so is an expiry that is not in
-// the future: an ignore always ends.
-func (s *Store) IgnoreTrigger(ctx context.Context, key string, until int64, actor string, now int64) error {
+// decision is the shape every operator decision shares: resolve key to its
+// root, refuse an unknown trigger, run apply against the root, and append the
+// decision to the audit trail -- all in one transaction, because a changed
+// trigger with no record of who changed it is the one outcome this must not
+// allow. apply sees the root's security bit and refuses there, before
+// anything is written.
+func (s *Store) decision(ctx context.Context, key, actor, action string, now int64,
+	apply func(tx bun.Tx, root string, security bool) (detail string, err error)) error {
 	s.db.Lock()
 	defer s.db.Unlock()
 
@@ -274,41 +290,164 @@ func (s *Store) IgnoreTrigger(ctx context.Context, key string, until int64, acto
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	root, err := resolveTrigger(ctx, tx, key)
+	root, security, promptVersion, err := readRoot(ctx, tx, key)
 	if err != nil {
 		return err
 	}
-	var security int
-	var promptVersion sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT security, first_prompt_version FROM triggers WHERE trigger_key = ?`, root).
-		Scan(&security, &promptVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrUnknownTrigger
-	}
+	detail, err := apply(tx, root, security)
 	if err != nil {
-		return fmt.Errorf("store: read trigger: %w", err)
-	}
-	if security != 0 {
-		return ErrSecurityTrigger
-	}
-	if until <= now {
-		return ErrIgnoreExpiry
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE triggers SET status = ?, ignore_until = ? WHERE trigger_key = ?`,
-		TriggerIgnored, until, root); err != nil {
-		return fmt.Errorf("store: ignore trigger: %w", err)
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO trigger_decisions (id, trigger_key, actor, action, detail, prompt_version, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ulid.Make().String(), root, actor, ActionIgnore, strconv.FormatInt(until, 10),
-		promptVersion.String, now); err != nil {
+	`, ulid.Make().String(), root, actor, action, nullIfEmpty(detail), promptVersion, now); err != nil {
 		return fmt.Errorf("store: record trigger decision: %w", err)
 	}
 	return tx.Commit()
+}
+
+// readRoot resolves key and reads the root's security bit and first prompt
+// version, or ErrUnknownTrigger.
+func readRoot(ctx context.Context, tx bun.Tx, key string) (root string, security bool, promptVersion string, err error) {
+	root, err = resolveTrigger(ctx, tx, key)
+	if err != nil {
+		return "", false, "", err
+	}
+	var sec int
+	var pv sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT security, first_prompt_version FROM triggers WHERE trigger_key = ?`, root).Scan(&sec, &pv)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, "", ErrUnknownTrigger
+	}
+	if err != nil {
+		return "", false, "", fmt.Errorf("store: read trigger: %w", err)
+	}
+	return root, sec != 0, pv.String, nil
+}
+
+// IgnoreTrigger stops paying for a trigger fleet-wide until `until`. A
+// security trigger is refused, and so is an expiry that is not in the
+// future: an ignore always ends.
+func (s *Store) IgnoreTrigger(ctx context.Context, key string, until int64, actor string, now int64) error {
+	return s.decision(ctx, key, actor, ActionIgnore, now, func(tx bun.Tx, root string, security bool) (string, error) {
+		if security {
+			return "", ErrSecurityTrigger
+		}
+		if until <= now {
+			return "", ErrIgnoreExpiry
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE triggers SET status = ?, ignore_until = ? WHERE trigger_key = ?`,
+			TriggerIgnored, until, root); err != nil {
+			return "", fmt.Errorf("store: ignore trigger: %w", err)
+		}
+		return strconv.FormatInt(until, 10), nil
+	})
+}
+
+// SetTriggerVisibility decides whether a trigger's findings reach the
+// customer (VisibilityCustomer, "deliver") or stay on the operator UI
+// (VisibilityOperator, "internal"). It is never set back to pending: a
+// decision can be changed, not taken back. A security trigger is delivered
+// without review and cannot be hidden, so it is refused outright.
+func (s *Store) SetTriggerVisibility(ctx context.Context, key, visibility, actor string, now int64) error {
+	var action string
+	switch visibility {
+	case VisibilityCustomer:
+		action = ActionDeliver
+	case VisibilityOperator:
+		action = ActionInternal
+	default:
+		return ErrInvalidVisibility
+	}
+	return s.decision(ctx, key, actor, action, now, func(tx bun.Tx, root string, security bool) (string, error) {
+		if security {
+			return "", ErrSecurityTrigger
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE triggers SET visibility = ? WHERE trigger_key = ?`, visibility, root); err != nil {
+			return "", fmt.Errorf("store: set trigger visibility: %w", err)
+		}
+		return "", nil
+	})
+}
+
+// MergeTrigger declares key to be the same condition as into: key's root
+// becomes an alias of into's root, and every alias that pointed at key's
+// root is rewritten to point at into's root too. Aliases therefore always
+// name a root, never another alias, which is what keeps resolving a key one
+// lookup and a cycle impossible to store -- the only way to ask for one is
+// to merge two keys that already share a root, which ErrMergeCycle refuses.
+//
+// A merge carries the new root's decisions (visibility, ignore, severity,
+// doc_ref) over to every finding raised under the merged key, since reads
+// resolve through the alias. It moves nothing else: system_triggers and the
+// counters stay on the key they were recorded under, so the next window
+// under the merged key pays once more on each system before reuse resumes
+// against the root.
+//
+// Neither side may be a security trigger. A merge into a trigger that is
+// hidden or ignored would silence a security condition exactly as an ignore
+// would, and one merged away from its own key would inherit the other
+// side's decisions -- so it is refused rather than reasoned about.
+func (s *Store) MergeTrigger(ctx context.Context, key, into, actor string, now int64) error {
+	return s.decision(ctx, key, actor, ActionMerge, now, func(tx bun.Tx, root string, security bool) (string, error) {
+		target, targetSecurity, _, err := readRoot(ctx, tx, into)
+		if err != nil {
+			return "", err
+		}
+		if security || targetSecurity {
+			return "", ErrSecurityTrigger
+		}
+		if target == root {
+			return "", ErrMergeCycle
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE trigger_aliases SET canonical_key = ? WHERE canonical_key = ?`, target, root); err != nil {
+			return "", fmt.Errorf("store: rewrite trigger aliases: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO trigger_aliases (alias_key, canonical_key, created_at) VALUES (?, ?, ?)
+			ON CONFLICT(alias_key) DO UPDATE SET canonical_key = excluded.canonical_key, created_at = excluded.created_at
+		`, root, target, now); err != nil {
+			return "", fmt.Errorf("store: insert trigger alias: %w", err)
+		}
+		return target, nil
+	})
+}
+
+// SetTriggerSeverity overrides the severity the customer reads for every
+// finding under the trigger; "" clears the override. It is applied when
+// findings are read for the customer (ListFindings) and never written into
+// findings.severity, which prompt.Render prints -- a decision must not
+// reach the model.
+func (s *Store) SetTriggerSeverity(ctx context.Context, key, severity, actor string, now int64) error {
+	if severity != "" && !model.ValidSeverity(severity) {
+		return ErrInvalidSeverity
+	}
+	return s.decision(ctx, key, actor, ActionSeverity, now, func(tx bun.Tx, root string, _ bool) (string, error) {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE triggers SET severity_override = ? WHERE trigger_key = ?`, nullIfEmpty(severity), root); err != nil {
+			return "", fmt.Errorf("store: set trigger severity: %w", err)
+		}
+		return severity, nil
+	})
+}
+
+// SetTriggerDocRef points every finding under the trigger at remediation
+// documentation; "" clears it. The caller validates the value (the operator
+// UI accepts only an http(s) URL) -- the store keeps whatever it is given,
+// like every other free-text column.
+func (s *Store) SetTriggerDocRef(ctx context.Context, key, docRef, actor string, now int64) error {
+	return s.decision(ctx, key, actor, ActionDocRef, now, func(tx bun.Tx, root string, _ bool) (string, error) {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE triggers SET doc_ref = ? WHERE trigger_key = ?`, nullIfEmpty(docRef), root); err != nil {
+			return "", fmt.Errorf("store: set trigger doc_ref: %w", err)
+		}
+		return docRef, nil
+	})
 }
 
 // GetTrigger reads one triggers row by its exact key (no alias resolution).
@@ -347,19 +486,7 @@ func (s *Store) TriggerDecisions(ctx context.Context, key string) ([]TriggerDeci
 		return nil, fmt.Errorf("store: trigger decisions: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []TriggerDecision
-	for rows.Next() {
-		var d TriggerDecision
-		var detail, promptVersion sql.NullString
-		if err := rows.Scan(&d.Key, &d.Actor, &d.Action, &detail, &promptVersion, &d.CreatedAt); err != nil {
-			return nil, fmt.Errorf("store: scan trigger decision: %w", err)
-		}
-		d.Detail = detail.String
-		d.PromptVersion = promptVersion.String
-		out = append(out, d)
-	}
-	return out, rows.Err()
+	return scanDecisions(rows)
 }
 
 // nullIfEmpty stores an empty string as NULL, so "no value" has one spelling.

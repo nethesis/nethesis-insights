@@ -1,0 +1,31 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Review audit</h1>
+<p><small>Every review decision, newest first. The actor is the username given with the admin
+key: a readable trail, not proof of identity &mdash; anyone holding the key can claim any name.</small></p>
+
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">When</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Trigger</th><th scope="col">Detail</th><th scope="col">Prompt version</th></tr>
+</thead>
+<tbody>
+{{range .Decisions}}
+<tr>
+<td class="mono" title="{{fmtTime .CreatedAt}}">{{fmtAgo .CreatedAt}}</td>
+<td>{{.Actor}}</td>
+<td>{{.Action}}</td>
+<td class="mono"><a href="{{$.Base}}/review?key={{.Key}}" title="{{.Key}}">{{short .Key 16}}</a></td>
+<td class="mono">{{if eq .Action "ignore"}}until {{fmtIgnoreUntil .Detail}}{{else if .Detail}}{{.Detail}}{{else}}&mdash;{{end}}</td>
+<td class="mono">{{.PromptVersion}}</td>
+</tr>
+{{else}}
+<tr><td colspan="6">no decisions yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+{{end}}

@@ -8,14 +8,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 server-computed fingerprint (never the AI's wording), so the same problem recurring bumps
 <strong>occurrences</strong> instead of adding a new row. <strong>open</strong> means it's
 active or recent; <strong>stale</strong> means it hasn't reoccurred in a while and is
-presumed resolved &mdash; it can later reopen. Expand a row (click the title) for the
-summary, evidence and suggested action. <strong>Nodes</strong> are the cluster machines the
+presumed resolved &mdash; it can later reopen. Click a title for the summary, evidence,
+suggested action and whether the customer sees it: a finding reaches the customer only once
+its trigger has been delivered on the <a href="{{.Base}}/review">review queue</a>. <strong>Nodes</strong> are the cluster machines the
 cited log lines came from in the most recent occurrence &mdash; where it is happening now, not
 everywhere it has ever happened.</small></p>
 <form method="get">
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id, partial ok, any if blank">
-<input type="text" name="id" value="{{.ID}}" placeholder="id / fingerprint, partial ok">
+<input type="text" name="id" value="{{.ID}}" placeholder="id / fingerprint / trigger, partial ok">
 <select name="status">
 <option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
 <option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>
@@ -52,8 +53,13 @@ everywhere it has ever happened.</small></p>
 <td class="num">{{.OccurrenceCount}}</td>
 <td class="mono">{{range .NodeRefs}}<div{{if not .FQDN}} title="no name reported"{{end}}>{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{end}}</div>{{else}}&mdash;{{end}}</td>
 <td>
-<details>
-<summary class="truncate" title="{{.Title}}">{{truncate .Title 80}}</summary>
+<button type="button" class="linklike truncate" title="{{.Title}}" commandfor="finding-{{.ID}}" command="show-modal">{{truncate .Title 80}}</button>
+<dialog id="finding-{{.ID}}" closedby="any">
+<article>
+<header>
+<button type="button" aria-label="Close" rel="prev" commandfor="finding-{{.ID}}" command="close"></button>
+<p><strong>{{.Title}}</strong></p>
+</header>
 <dl>
 <dt>Summary</dt><dd>{{.Summary}}</dd>
 <dt>Evidence</dt>
@@ -61,6 +67,11 @@ everywhere it has ever happened.</small></p>
 <dt>Nodes</dt>
 <dd>{{range .NodeRefs}}<div class="mono">{{.NodeID}}{{if .FQDN}} · {{.FQDN}}{{else}} (no name reported){{end}}</div>{{else}}&mdash;{{end}}</dd>
 <dt>Suggested action</dt><dd>{{.SuggestedAction}}</dd>
+<dt>Delivered to the customer</dt>
+<dd>{{if eq .Visibility "customer"}}yes{{else if eq .Visibility "operator"}}no &mdash; internal{{else if eq .Visibility "pending"}}not yet &mdash; pending review{{else}}no &mdash; no trigger{{end}}{{if .TriggerKey}} &middot; <a href="{{$.Base}}/review?key={{.TriggerKey}}">review trigger</a>{{end}}</dd>
+{{if .SeverityOverride}}<dt>Severity the customer sees</dt><dd><span class="chip" data-severity="{{.SeverityOverride}}">{{.SeverityOverride}}</span></dd>{{end}}
+{{if .DocRef}}<dt>Documentation</dt><dd class="mono">{{.DocRef}}</dd>{{end}}
+<dt>Trigger</dt><dd class="mono">{{if .TriggerKey}}{{.TriggerKey}}{{else}}&mdash;{{end}}</dd>
 <dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>
 <dt>Occurrence count</dt><dd>{{.OccurrenceCount}}</dd>
 <dt>First seen</dt><dd class="mono">{{fmtTime .FirstSeen}}</dd>
@@ -69,7 +80,8 @@ everywhere it has ever happened.</small></p>
 <dt>LLM model</dt><dd class="mono">{{.LLMModel}}</dd>
 <dt>Prompt version</dt><dd class="mono">{{.PromptVersion}}</dd>
 </dl>
-</details>
+</article>
+</dialog>
 </td>
 <td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
 </tr>

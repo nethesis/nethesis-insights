@@ -46,7 +46,7 @@ func TestFindingCarriesTheCitedTemplatesNodes(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	found, err := s.ListFindings(ctx, "sys1", 0, "")
+	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestRecurrenceReplacesTheNodeSetRatherThanAccumulating(t *testing.T) {
 		t.Fatalf("second process: %v", err)
 	}
 
-	found, err := s.ListFindings(ctx, "sys1", 0, "")
+	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestABundleWithoutNodeDataStillProducesAFinding(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	found, err := s.ListFindings(ctx, "sys1", 0, "")
+	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}

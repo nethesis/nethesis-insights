@@ -97,6 +97,16 @@ type Finding struct {
 	// memory's reuse check and review decisions go through, never part of
 	// the read API.
 	TriggerKey string `json:"-"`
+	// DocRef links remediation documentation an operator attached to the
+	// finding's trigger. Read-time only, like the severity override, and
+	// always an http(s) URL -- the operator UI accepts nothing else.
+	DocRef string `json:"doc_ref,omitempty"`
+	// Visibility and SeverityOverride are the finding's trigger's review
+	// state, joined at read time for the operator UI. Server-internal: the
+	// read API returns only delivered findings and applies the override to
+	// Severity itself.
+	Visibility       string `json:"-"`
+	SeverityOverride string `json:"-"`
 }
 
 var Severities = []string{"critical", "high", "medium", "low"}

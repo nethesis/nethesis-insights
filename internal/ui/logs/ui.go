@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package logs serves insightsd's operator dashboard: findings, systems, the
-// analyses cost ledger, the gate rollup, per-day spend and the stored
-// templates and baselines. It replaces the shell helper that used to need
+// analyses cost ledger, the gate rollup, per-day spend, the stored
+// templates and baselines, and the trigger review queue. It replaces the shell helper that used to need
 // sqlite3, root on the node and the podman volume path, and adds the live
 // process state a query over the database could never see: queue depth and
 // worker count, uptime, and the effective configuration.
@@ -15,13 +15,16 @@
 //   - Reads are unauthenticated and fleet-wide -- every GET shows every
 //     system's findings, templates, baselines and spend, for every customer.
 //     That is why most of the constraints below are not optional.
-//   - Zero JavaScript. Interactions are <meta refresh>, <form> and
-//     <details>, never a <script> tag.
+//   - Zero JavaScript. Interactions are <meta refresh>, <form>, <details>
+//     and <dialog> opened by a command/commandfor invoker button, never a
+//     <script> tag.
 //   - Every list is bounded server-side.
 //   - Secrets never render: cfg.Info.Config arrives already redacted by the
 //     caller, and this package never reads the environment.
-//   - insightsd has no write routes: the log pipeline has nothing to
-//     approve or reject, unlike Threat Shield's allowlist (internal/ui/threat).
+//   - The only writes are the trigger review decisions (writableRoutes),
+//     reachable only when ADMIN_API_KEY is set, with the same discipline as
+//     Threat Shield's allowlist routes (internal/ui/threat): POST only, the
+//     admin key, a cross-site refusal, and an audit row per decision.
 //   - insightsd's queue is the analysis pipeline's bundle queue (see
 //     internal/queue), not the generic internal/platform/ingestq threatd
 //     uses for its ingest bound -- the two are unrelated types that happen
@@ -32,6 +35,7 @@ package logs
 import (
 	"context"
 	"embed"
+	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -62,6 +66,23 @@ type Reader interface {
 	ResolveNodesFleet(ctx context.Context, findings []model.Finding) error
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
 	ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error)
+	ListTriggers(ctx context.Context, f logsstore.TriggerFilter) ([]logsstore.TriggerRow, error)
+	TriggerStats(ctx context.Context) ([]logsstore.TriggerStatsRow, error)
+	ListTriggerDecisions(ctx context.Context, limit int) ([]logsstore.TriggerDecision, error)
+}
+
+// Writer is the slice of logsstore.Store the review routes need, one method
+// per decision. Each is a single transaction that also appends the
+// decision's trigger_decisions row, so a trigger never changes without the
+// record of who changed it. It is wired in, and its routes are reachable,
+// only when ADMIN_API_KEY is set -- see NewServer and writableRoutes.
+// *logsstore.Store satisfies it.
+type Writer interface {
+	SetTriggerVisibility(ctx context.Context, key, visibility, actor string, now int64) error
+	IgnoreTrigger(ctx context.Context, key string, until int64, actor string, now int64) error
+	MergeTrigger(ctx context.Context, key, into, actor string, now int64) error
+	SetTriggerSeverity(ctx context.Context, key, severity, actor string, now int64) error
+	SetTriggerDocRef(ctx context.Context, key, docRef, actor string, now int64) error
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -82,7 +103,36 @@ const (
 	templatesLimit     = 200
 	analysesDefaultLim = 50
 	analysesMaxLimit   = 500
+	reviewLimit        = 200
+	reviewAuditLimit   = 500
 )
+
+// Review input bounds. A trigger key is "t1:" plus 64 hex characters; the
+// cap only has to refuse garbage, not describe the format. An ignore is
+// between a day and a year: it always ends (IgnoreTrigger refuses the past),
+// and a year is long enough that a longer one is a decision nobody will
+// remember making.
+const (
+	maxTriggerKeyLen = 128
+	maxDocRefLen     = 512
+	maxIgnoreDays    = 365
+	maxReviewForm    = 16 << 10 // 16 KiB; see internal/ui/threat's maxAllowlistFormSize
+)
+
+// writableRoutes is the small, explicit, enumerated set of paths that also
+// answer POST -- and POST alone; see route(). Every one authenticates
+// against ADMIN_API_KEY and refuses a cross-site request first, exactly like
+// internal/ui/threat's: Traefik's BasicAuth in front of this subtree is
+// still Basic auth, which a browser replays on a forged cross-site POST.
+// The trigger key is always a form field, never part of the path.
+var writableRoutes = map[string]bool{
+	"/review/deliver":  true,
+	"/review/internal": true,
+	"/review/ignore":   true,
+	"/review/merge":    true,
+	"/review/severity": true,
+	"/review/doc-ref":  true,
+}
 
 // nav is this dashboard's nav bar structure. A single group with no label
 // renders as a flat row, the same shape threatd's and sizingd's dashboards
@@ -90,6 +140,13 @@ const (
 var nav = []chrome.NavGroup{
 	{Pages: []chrome.NavPage{
 		{Key: "index", Path: "/", Label: "Findings"},
+	}},
+	{Label: "Review", Pages: []chrome.NavPage{
+		{Key: "review", Path: "/review", Label: "Queue"},
+		{Key: "review-stats", Path: "/review/stats", Label: "Stats"},
+		{Key: "review-audit", Path: "/review/audit", Label: "Audit"},
+	}},
+	{Pages: []chrome.NavPage{
 		{Key: "systems", Path: "/systems", Label: "Systems"},
 		{Key: "analyses", Path: "/analyses", Label: "Analyses"},
 		{Key: "gate", Path: "/gate", Label: "Gate"},
@@ -105,20 +162,23 @@ var nav = []chrome.NavGroup{
 var pages = []string{
 	"index.html", "systems.html", "analyses.html",
 	"gate.html", "cost.html", "templates.html", "baselines.html", "status.html",
+	"review.html", "review-stats.html", "review-audit.html",
 }
 
 type server struct {
 	chrome *chrome.Base
 	reader Reader
+	writer Writer
 	rt     Runtime
 	config []chrome.ConfigItem
+	now    func() int64
 }
 
-// NewServer builds insightsd's operator UI handler. rt may be nil.
-//
-// insightsd has no write routes: the log pipeline has nothing to approve or
-// reject.
-func NewServer(r Reader, rt Runtime, cfg chrome.Config) (http.Handler, error) {
+// NewServer builds insightsd's operator UI handler. w and rt may be nil: a
+// nil writer (equivalently, cfg.AdminKey == "") leaves every review route
+// unreachable and renders no decision form, and a nil rt renders the status
+// page's queue section as "n/a".
+func NewServer(r Reader, w Writer, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -131,6 +191,7 @@ func NewServer(r Reader, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	cfg.Nav = nav
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
+	cfg.Funcs = template.FuncMap{"fmtIgnoreUntil": fmtIgnoreUntil}
 
 	base, err := chrome.New(cfg)
 	if err != nil {
@@ -140,8 +201,10 @@ func NewServer(r Reader, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	srv := &server{
 		chrome: base,
 		reader: r,
+		writer: w,
 		rt:     rt,
 		config: cfg.Info.Config,
+		now:    func() int64 { return time.Now().UnixMilli() },
 	}
 
 	mux := http.NewServeMux()
@@ -153,11 +216,28 @@ func NewServer(r Reader, rt Runtime, cfg chrome.Config) (http.Handler, error) {
 	return httpx.Logging(mux, nil), nil
 }
 
+// canWrite reports whether the decision forms render and the review routes
+// are reachable at all: never without ADMIN_API_KEY.
+func (s *server) canWrite() bool {
+	return s.writer != nil && s.chrome.CanWrite()
+}
+
+// route is the central method gate as well as the dispatcher: GET reaches the
+// read pages, POST reaches an enumerated write route, and every other method
+// is refused before any handler runs. The write branch tests for POST, not
+// for "not GET" -- see internal/ui/threat's route() for why a HEAD must
+// never reach a write handler.
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		// Every route here answers GET only: the log pipeline has no write
-		// routes (see the package doc comment).
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if r.Method != http.MethodPost || !s.canWrite() || !writableRoutes[r.URL.Path] {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		actor, ok := s.chrome.AuthenticateWrite(w, r)
+		if !ok {
+			return
+		}
+		s.handleDecision(w, r, actor)
 		return
 	}
 
@@ -182,6 +262,12 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleBaselines(w, r)
 	case "/status":
 		s.handleStatus(w, r)
+	case "/review":
+		s.handleReview(w, r)
+	case "/review/stats":
+		s.handleReviewStats(w, r)
+	case "/review/audit":
+		s.handleReviewAudit(w, r)
 	default:
 		// net/http's ServeMux treats "/" as a subtree covering every
 		// unmatched path; because we only ever register "/" itself here and

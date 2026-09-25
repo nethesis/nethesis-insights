@@ -264,6 +264,9 @@ func (s *Store) Init(ctx context.Context) error {
 		// system, and PruneTriggers asks whether any finding still names a
 		// trigger; trigger_key leads so the one index serves both.
 		`CREATE INDEX IF NOT EXISTS idx_findings_trigger ON findings(trigger_key, system_id)`,
+		// The review queue shows each trigger's most recent gate reasons,
+		// one seek per trigger rather than a scan of the cost ledger.
+		`CREATE INDEX IF NOT EXISTS idx_analyses_trigger ON analyses(trigger_key, created_at)`,
 	}
 
 	for _, stmt := range stmts {
@@ -522,8 +525,26 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 	return n, nil
 }
 
+// findingColumns is what queryFindings scans: the findings row, then the
+// review state of its trigger. The last three are NULL wherever the query
+// does not join triggers.
+const findingColumns = `f.id, f.system_id, f.fingerprint, f.severity, f.title, f.summary, f.suggested_action,
+	f.modules, f.evidence, f.status, f.occurrence_count, f.first_seen, f.last_seen, f.reopened_at,
+	f.llm_model, f.prompt_version, f.nodes, f.trigger_key`
+
+// findingTriggerJoin reaches a finding's root trigger in one join: aliases
+// always name a root, so a finding under a merged key reads its root's
+// decisions. It is a LEFT JOIN; ListFindings makes it an inner one by
+// requiring a visibility.
+const findingTriggerJoin = `
+	LEFT JOIN trigger_aliases a ON a.alias_key = f.trigger_key
+	LEFT JOIN triggers t ON t.trigger_key = coalesce(a.canonical_key, f.trigger_key)`
+
+// OpenFindings feeds prompt.Render, so it deliberately does not join the
+// triggers: no operator decision -- visibility, severity override, doc_ref
+// -- can reach the model through it.
 func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
-	return s.queryFindings(ctx, `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key FROM findings WHERE system_id = ? AND status = ?`, systemID, model.StatusOpen)
+	return s.queryFindings(ctx, `SELECT `+findingColumns+`, NULL, NULL, NULL FROM findings f WHERE f.system_id = ? AND f.status = ?`, systemID, model.StatusOpen)
 }
 
 func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
@@ -622,17 +643,31 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 	return int(n), nil
 }
 
+// ListFindings is the customer read API's query: one system's findings whose
+// root trigger has been delivered (visibility = customer). A pending or
+// internal trigger's findings are withheld, and so is a finding with no
+// trigger at all -- only a reviewed trigger, or a security one, which is
+// delivered on first sight, reaches the customer. The trigger's severity
+// override replaces the stored severity here, and only here: the stored
+// value is what prompt.Render prints.
 func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
-	query := `SELECT id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key FROM findings WHERE system_id = ? AND last_seen >= ?`
-	args := []any{systemID, since}
+	query := `SELECT ` + findingColumns + `, t.visibility, t.severity_override, t.doc_ref
+		FROM findings f` + findingTriggerJoin + `
+		WHERE f.system_id = ? AND f.last_seen >= ? AND t.visibility = ?`
+	args := []any{systemID, since, VisibilityCustomer}
 	if status != "" {
-		query += ` AND status = ?`
+		query += ` AND f.status = ?`
 		args = append(args, status)
 	}
 
 	findings, err := s.queryFindings(ctx, query, args...)
 	if err != nil {
 		return nil, err
+	}
+	for i := range findings {
+		if o := findings[i].SeverityOverride; o != "" {
+			findings[i].Severity = o
+		}
 	}
 	model.SortFindings(findings)
 	return findings, nil
@@ -649,14 +684,18 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
-		var nodesJSON, triggerKey sql.NullString
+		var nodesJSON, triggerKey, visibility, severityOverride, docRef sql.NullString
 		var reopenedAt sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
-			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey); err != nil {
+			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey,
+			&visibility, &severityOverride, &docRef); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
 		}
 		f.TriggerKey = triggerKey.String
+		f.Visibility = visibility.String
+		f.SeverityOverride = severityOverride.String
+		f.DocRef = docRef.String
 		if nodesJSON.Valid && nodesJSON.String != "" {
 			if err := json.Unmarshal([]byte(nodesJSON.String), &f.Nodes); err != nil {
 				return nil, fmt.Errorf("store: unmarshal nodes: %w", err)

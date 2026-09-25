@@ -13,13 +13,13 @@ import (
 // UI_LISTEN_ADDR is set" is a security property, not a convenience. Assert it
 // directly rather than by inspection of main().
 func TestNewUIServerIsNilWhenTheAddressIsEmpty(t *testing.T) {
-	if got := newUIServer("", "", nil, nil, chrome.Info{}); got != nil {
+	if got := newUIServer("", "", nil, nil, nil, "", chrome.Info{}); got != nil {
 		t.Fatalf("newUIServer(\"\") returned %v, want nil -- the UI must be off by default", got)
 	}
 }
 
 func TestNewUIServerBindsTheConfiguredAddress(t *testing.T) {
-	srv := newUIServer("127.0.0.1:9596", "", nil, nil, chrome.Info{})
+	srv := newUIServer("127.0.0.1:9596", "", nil, nil, nil, "", chrome.Info{})
 	if srv == nil {
 		t.Fatal("newUIServer returned nil for a configured address")
 	}

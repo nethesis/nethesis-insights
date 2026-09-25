@@ -220,8 +220,8 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
-| `internal/ui/logs` | insightsd's operator dashboard: findings, systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines. Read-only — no write routes. |
-| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes anywhere in the deployment. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
+| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its trigger's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines, and the trigger review pages (`/review`, `/review/stats`, `/review/audit`). Its six review routes (`writableRoutes`: deliver, internal, ignore, merge, severity, doc-ref) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
+| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
@@ -393,8 +393,13 @@ In order:
 ### Read: `GET /v1/findings` (public path `/logs/v1/findings`)
 
 Authenticates the same way as ingest, then `store.ListFindings` returns that
-system's findings (optionally filtered by `since`/`status`), sorted by
-`model.SortFindings` — severity descending, then most-recently-seen first.
+system's **delivered** findings (optionally filtered by `since`/`status`),
+sorted by `model.SortFindings` — severity descending, then most-recently-seen
+first. Delivered means the finding's root trigger has `visibility = customer`,
+reached in one join through `trigger_aliases`; a pending or internal trigger's
+findings, and a finding with no trigger, are withheld. The trigger's
+`severity_override` replaces `severity` and its `doc_ref` is returned, both
+here and nowhere else — see "Cost control: trigger memory".
 
 ### Maintenance pass: `maint.Runner.Run`
 
@@ -830,9 +835,9 @@ In front of all three sits Traefik, serving them at `/logs`, `/blocklist` and
 htpasswd password. That layer is **additive, not a replacement**: each app's
 own `GET` remains unauthenticated at the app layer (so a direct connection —
 bypassing Traefik — still reaches it, which is why the pod publishes no port
-for these listeners in the deployed shape), and threatd's write routes still
-authenticate against `ADMIN_API_KEY` and refuse cross-site requests inside the
-app, because Traefik BasicAuth is still Basic auth and a browser replays it on
+for these listeners in the deployed shape), and threatd's and insightsd's
+write routes still authenticate against `ADMIN_API_KEY` and refuse cross-site
+requests inside the app, because Traefik BasicAuth is still Basic auth and a browser replays it on
 a forged cross-site POST exactly as it would replay credentials cached against
 the app directly. `docs/admin-guide.md` lists every route and the exposure
 rules, and explains what a finding, template and baseline are.
@@ -993,7 +998,7 @@ without a goroutine to leak.
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `trigger_key` names the trigger of the LLM call that last raised it: the join the reuse check goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `triggers` | Fleet-wide, one row per trigger key: `security`, `status` (`active`/`ignored`) with `ignore_until`, `visibility` (`pending`/`customer`/`operator` — a security trigger starts `customer`), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen, `distinct_systems`, `count`. Holds the current effect of every operator decision. Pruned only when undecided and unreferenced. |
 | `system_triggers` | Per `(system_id, trigger_key)`: first/last seen, `count`, and `last_called_at` — the last *paid* call, which the reuse window is measured from. Pruned past `FINDING_RETENTION`. |
-| `trigger_aliases` | `alias_key → canonical_key`, always pointing straight at a root, so resolving is one lookup and the read API's filter can be one join. Written by merges (Phase 2); already read by every lookup. Never pruned. |
+| `trigger_aliases` | `alias_key → canonical_key`, always pointing straight at a root, so resolving is one lookup and the read API's filter can be one join. Written by `MergeTrigger`, which also rewrites every alias of the merged root; read by every lookup and by the findings reads. Never pruned. |
 | `trigger_decisions` | Append-only audit trail of operator actions on triggers: actor, action, detail, the trigger's `first_prompt_version`, time. Exists because the `UPDATE` on `triggers` destroys the value that would say who changed it. Never pruned. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
@@ -1285,7 +1290,7 @@ those — because a client-fed table must never be read whole.
 **The separate admin plane is gone.** `internal/admin`, `ADMIN_LISTEN_ADDR` and
 the `X-Admin-Actor` header no longer exist. `internal/ui/threat`'s four write
 routes (`writableRoutes` — add/update an entry, delete one, approve a request,
-reject one) are now the only writer anywhere in the deployment, gated behind
+reject one) are now threatd's only writer, gated behind
 `ADMIN_API_KEY` and HTTP Basic (`chrome.AuthenticateWrite`); the Basic username
 becomes the actor recorded on every write, exactly as `X-Admin-Actor` used to
 be. With `ADMIN_API_KEY` unset `s.canWrite()` is false and every one of those
@@ -1777,21 +1782,71 @@ one `analyses` row.
 
 **Operator decisions never reach the prompt.** The prompt is rendered from
 the bundle and `OpenFindings` only, whatever a finding's trigger or its
-visibility. `TestDecisionsNeverReachThePrompt` renders the same window with
-and without an ignore on the trigger behind an open finding and requires
-byte-identical prompts. A future `severity_override` must be applied when
-findings are read for the customer, never written into `findings.severity`,
-which `Render` prints.
+visibility. `OpenFindings` deliberately does not join `triggers`, so no
+decision can ride along on the findings it returns.
+`TestDecisionsNeverReachThePrompt` renders the same window with and without
+an ignore, an internal visibility, a severity override and a `doc_ref` on the
+trigger behind an open finding and requires byte-identical prompts.
 
 `TRIGGER_REUSE_WINDOW=0` disables reuse; ignores still apply. The counter is
 `insightsd_trigger_suppressions_total{reason}`, labelled only with the two
 `suppressed_by` values — never a trigger key.
 
-**Not built yet.** `visibility`, `severity_override` and `doc_ref` are stored
-but not applied: the read API still returns every finding, and there is no
-route that writes a decision other than `IgnoreTrigger` itself (tests only).
-The review routes on `ui/logs`, merging, the per-`prompt.Version` statistics
-and the `ListFindings` visibility filter are the next step.
+### Review
+
+A trigger is also the unit an operator reviews, once, fleet-wide, on
+`ui/logs`' `/review`. Every decision is one `logsstore.Store` method, one
+transaction that resolves the key to its root, applies the change and
+appends a `trigger_decisions` row (`Store.decision`), so a trigger never
+changes without the record of who changed it. **A decision applies to the
+whole trigger** — every finding raised under the root or any key merged into
+it, on every system, including recurrences — because decisions live on
+`triggers` and are joined at read time; nothing is copied onto `findings`.
+
+| Route | Store method | Effect |
+|---|---|---|
+| `/review/deliver`, `/review/internal` | `SetTriggerVisibility` | `visibility = customer`/`operator`. Never back to `pending` (`ErrInvalidVisibility`) |
+| `/review/ignore` | `IgnoreTrigger` | 1–365 days; see the lookup above |
+| `/review/merge` | `MergeTrigger` | the key's root becomes an alias of the target's root |
+| `/review/severity` | `SetTriggerSeverity` | `severity_override`, `""` clears |
+| `/review/doc-ref` | `SetTriggerDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
+
+The routes follow `internal/ui/threat`'s discipline exactly — enumerated in
+`writableRoutes`, `POST` only, `chrome.AuthenticateWrite` (admin key, then the
+cross-site refusal), parameters from the body only, registered only with
+`ADMIN_API_KEY` — and `/review/audit` reads the trail back.
+
+Rules that are not visible from the code:
+
+- **Pending is withheld.** New non-security triggers start `pending` and
+  `ListFindings` requires `customer`, so every new non-security finding waits
+  for review, and a finding with no trigger key (older than Phase 1) is never
+  delivered. With no `ADMIN_API_KEY` nothing can be delivered at all. This was
+  chosen over "deliver unless hidden": review is the point, and an unreviewed
+  AI finding reaching a customer is the failure it exists to prevent.
+- **Security triggers skip review and cannot be silenced.** They are born
+  `customer`; `SetTriggerVisibility`, `IgnoreTrigger` and `MergeTrigger` (on
+  either side) refuse one with `ErrSecurityTrigger`. The merge refusal is not
+  limited to mismatched security bits: a security key merged into another
+  would inherit that root's decisions, so any merge touching one is refused
+  rather than reasoned about. A severity override and a `doc_ref` are allowed
+  — they change how it reads, not whether it arrives.
+- **Aliases always name a root.** `MergeTrigger` inserts `root → target` and
+  rewrites every alias of `root` to `target` in the same transaction, so
+  resolution stays one lookup (the analyzer's and the read API's) and a cycle
+  cannot be stored: asking for one means merging two keys that already share
+  a root, which `ErrMergeCycle` refuses.
+- **A merge moves decisions, not memory.** `system_triggers`,
+  `distinct_systems` and `count` stay on the key they were recorded under, so
+  after a merge the next window under the merged key pays once more per
+  system before reuse resumes against the root. Rewriting the per-system
+  memory would buy one call per system and cost a second, harder
+  transaction.
+- **`/review/stats` partitions by `first_prompt_version`**: pending,
+  delivered, internal and merged, with security counted apart because it
+  reflects no judgement; "ignored" (ever ignored, from the trail) overlaps.
+  It counts retained triggers only, and undecided ones are pruned with the
+  templates, so an old version's pending count shrinks.
 
 ## Degradation and failure modes
 

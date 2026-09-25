@@ -70,6 +70,19 @@ with the collector on; the server receives its windows.
 Nodes shown as `id · fqdn`; the row was one cell short of the header since
 the Nodes column was added, which shifted every column after Occurrences.
 
+### Phase 2 — visibility, review, merge, stats
+
+- `ListFindings` returns only findings whose root trigger is delivered;
+  **pending is withheld** (decided 2026-09-25), so every new non-security
+  finding waits for review. Severity override and `doc_ref` applied there
+  only; `doc_ref` added to the read API.
+- `ui/logs` review routes (deliver, internal, ignore, merge, severity,
+  doc-ref) behind `ADMIN_API_KEY`, one `trigger_decisions` row each;
+  `/review`, `/review/stats`, `/review/audit`. A decision applies to the
+  whole trigger, never one finding.
+- Merge flattens aliases to the root, refuses cycles and any security key.
+- Findings detail opens in a `<dialog>` (invoker buttons, no JavaScript).
+
 ## Next
 
 ### Now: let v5 settle, then re-measure
@@ -79,30 +92,12 @@ After a few days of v5 data from rl1 (and any other cluster moved to the
 the one-time v5 burst in the first windows. Decide from the numbers whether
 `TRIGGER_REUSE_WINDOW` stays at 24h.
 
-### Phase 2 — visibility, review, merge, stats
+### Deploy Phase 2
 
-- **Visibility in the read API.** `ListFindings` filters on the root trigger's
-  `visibility = 'customer'` in SQL, one join through the flattened
-  `trigger_aliases`. New non-security triggers start `pending`, so this
-  withholds every new non-security finding until reviewed — confirm that is
-  wanted before shipping. Open findings keep reaching `prompt.Render`
-  whatever their visibility. `TestOperatorOnlyFindingsNeverReachTheReadAPI`.
-- **Review routes on `ui/logs`**, copying `internal/ui/threat`: enumerated
-  `writableRoutes`, POST only, `chrome.AuthenticateWrite`, `sameOriginWrite`,
-  registered only with `ADMIN_API_KEY`, one `trigger_decisions` row per
-  action in the same transaction as the change.
-  - `/review`: pending triggers ranked by `distinct_systems` then `count`,
-    bounded queries like `PendingAllowlistRequests`. Actions: deliver,
-    internal, ignore (with expiry), merge into, set severity, set `doc_ref`.
-  - `/review/stats`: per `prompt.Version`, new triggers and the share
-    delivered, internal, ignored, merged.
-- **Merge.** Rewrite every alias of the merged key to the new root; reject
-  cycles and merges across different security bits.
-  `TestMergeResolvesToRootAndRejectsCycles`, and the merge half of
-  `TestSecurityTriggersAreNeverQueuedIgnoredOrMerged`.
-- **Severity override and `doc_ref`** applied when findings are read for the
-  customer, never written into `findings.severity` (which `Render` prints).
-  Remediation text lives in `docs/`, referenced by `doc_ref`.
+`insightsd.env` on the dev host needs `ADMIN_API_KEY` (same value as
+`threatd.env`), or nothing can be delivered and customers see no new
+non-security finding. Then work the pending queue down once and watch
+`/review/stats`.
 
 ### Smaller follow-ups
 

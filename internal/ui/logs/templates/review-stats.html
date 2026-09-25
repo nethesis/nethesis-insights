@@ -1,0 +1,40 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Review stats</h1>
+<p><small>What each prompt version raised and what operators decided about it. A prompt
+change that works shows up as a larger delivered share and fewer internal, ignored and merged
+triggers. Security triggers skip review, so they are counted apart; <strong>ignored</strong>
+counts triggers ever ignored and overlaps the other columns.</small></p>
+
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr>
+<th scope="col">Prompt version</th><th scope="col" class="num">Triggers</th><th scope="col" class="num">Security</th>
+<th scope="col" class="num">Pending</th><th scope="col" class="num">Delivered</th><th scope="col" class="num">Internal</th>
+<th scope="col" class="num">Merged</th><th scope="col" class="num">Ignored</th>
+</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr>
+<td class="mono">{{if .PromptVersion}}{{.PromptVersion}}{{else}}&mdash;{{end}}</td>
+<td class="num">{{.Triggers}}</td>
+<td class="num">{{.Security}}</td>
+<td class="num">{{.Pending}}</td>
+<td class="num">{{.Delivered}}</td>
+<td class="num">{{.Internal}}</td>
+<td class="num">{{.Merged}}</td>
+<td class="num">{{.Ignored}}</td>
+</tr>
+{{else}}
+<tr><td colspan="8">no triggers yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+<p><small>Undecided triggers are pruned with the templates, so an old version's pending count shrinks over time.</small></p>
+{{end}}

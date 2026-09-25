@@ -89,7 +89,7 @@ func TestReusableTriggerDoesNotCallTheLLM(t *testing.T) {
 	c.t = 2000
 	process(t, a, deviating("sys1", 1000))
 	calls := stub.Calls
-	before, err := s.ListFindings(context.Background(), "sys1", 0, "")
+	before, err := s.ListAllFindings(context.Background(), "sys1", "", "", "", "", 0)
 	if err != nil || len(before) != 1 {
 		t.Fatalf("findings: %v %v", before, err)
 	}
@@ -111,7 +111,7 @@ func TestReusableTriggerDoesNotCallTheLLM(t *testing.T) {
 		t.Fatalf("the two windows did not share a trigger key: %q vs %q", first.TriggerKey, row.TriggerKey)
 	}
 
-	findings, err := s.ListFindings(context.Background(), "sys1", 0, "")
+	findings, err := s.ListAllFindings(context.Background(), "sys1", "", "", "", "", 0)
 	if err != nil || len(findings) != 1 {
 		t.Fatalf("findings: %v %v", findings, err)
 	}
@@ -317,9 +317,8 @@ func (s ignoringStore) LookupTrigger(ctx context.Context, systemID, key string) 
 }
 
 // The analyzer half (the store half is in store/logs): a security trigger is
-// delivered without review, the store refuses to ignore it, and even an
-// ignore that somehow reached the store would not stop the call.
-// Merge refusal joins this test in Phase 2, with the merge route.
+// delivered without review, the store refuses to ignore, hide or merge it,
+// and even an ignore that somehow reached the store would not stop the call.
 func TestSecurityTriggersAreNeverQueuedIgnoredOrMerged(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -343,11 +342,29 @@ func TestSecurityTriggersAreNeverQueuedIgnoredOrMerged(t *testing.T) {
 	if err := s.IgnoreTrigger(ctx, key, 1<<50, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
 		t.Fatalf("the store accepted an ignore of a security trigger: %v", err)
 	}
+	if err := s.SetTriggerVisibility(ctx, key, logsstore.VisibilityOperator, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
+		t.Fatalf("the store hid a security trigger: %v", err)
+	}
+
+	// A second, non-security trigger to merge with, in both directions.
+	process(t, a, deviating("sys2", 100))
+	other := analysisAt(t, s, "sys2", 100).TriggerKey
+	if other == "" || other == key {
+		t.Fatalf("expected a distinct non-security trigger, got %q", other)
+	}
+	if err := s.MergeTrigger(ctx, key, other, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
+		t.Fatalf("the store merged a security trigger away: %v", err)
+	}
+	if err := s.MergeTrigger(ctx, other, key, "op", 1000); !errors.Is(err, logsstore.ErrSecurityTrigger) {
+		t.Fatalf("the store merged a trigger into a security one: %v", err)
+	}
 }
 
-// Decisions change what is paid for, never what the model is told. Two
-// deployments that differ only by an ignore on the trigger behind an open
-// finding must render byte-identical prompts for the next window.
+// Decisions change what is paid for and what is delivered, never what the
+// model is told. Two deployments that differ only by decisions on the
+// trigger behind an open finding -- an ignore, hiding it, a severity
+// override, a doc reference -- must render byte-identical prompts for the
+// next window.
 func TestDecisionsNeverReachThePrompt(t *testing.T) {
 	render := func(decide bool) string {
 		s := newTestStore(t)
@@ -359,7 +376,17 @@ func TestDecisionsNeverReachThePrompt(t *testing.T) {
 		c.t = 2000
 		process(t, a, deviating("sys1", 1000)) // raises the open finding
 		if decide {
-			ignoreKeyOf(t, s, "sys1", 1000, 100*hour, 2000)
+			key := ignoreKeyOf(t, s, "sys1", 1000, 100*hour, 2000)
+			ctx := context.Background()
+			if err := s.SetTriggerVisibility(ctx, key, logsstore.VisibilityOperator, "op", 2000); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetTriggerSeverity(ctx, key, "critical", "op", 2000); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetTriggerDocRef(ctx, key, "https://docs.example.org/x", "op", 2000); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		c.t = 3000

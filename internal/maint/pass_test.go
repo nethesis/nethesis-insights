@@ -254,7 +254,7 @@ func TestPassPrunesEachTableIndependently(t *testing.T) {
 		t.Error("recent template was pruned")
 	}
 
-	remaining, err := s.ListFindings(ctx, "sys1", 0, "")
+	remaining, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}

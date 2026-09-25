@@ -87,7 +87,7 @@ func TestPruneFindingsSparesOpenOnes(t *testing.T) {
 		t.Fatalf("expected 1 row pruned, got %d", n)
 	}
 
-	remaining, err := s.ListFindings(ctx, "sys1", 0, "")
+	remaining, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

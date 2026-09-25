@@ -34,6 +34,10 @@ type fakeReader struct {
 	templates []logsstore.TemplateRow
 	baselines []logsstore.BaselineRow
 	roster    map[string]map[int]string
+	triggers  []logsstore.TriggerRow
+	trigStats []logsstore.TriggerStatsRow
+	decisions []logsstore.TriggerDecision
+	trigSeen  logsstore.TriggerFilter // the last filter ListTriggers was called with
 
 	err error // when set, every method returns this error instead
 }
@@ -141,6 +145,32 @@ func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]logs
 	return out, nil
 }
 
+func (f *fakeReader) ListTriggers(_ context.Context, filter logsstore.TriggerFilter) ([]logsstore.TriggerRow, error) {
+	f.trigSeen = filter
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []logsstore.TriggerRow
+	for _, tr := range f.triggers {
+		if filter.Visibility != "" && tr.Visibility != filter.Visibility {
+			continue
+		}
+		if filter.Key != "" && !strings.HasPrefix(tr.Key, filter.Key) {
+			continue
+		}
+		out = append(out, tr)
+	}
+	return out, nil
+}
+
+func (f *fakeReader) TriggerStats(context.Context) ([]logsstore.TriggerStatsRow, error) {
+	return f.trigStats, f.err
+}
+
+func (f *fakeReader) ListTriggerDecisions(context.Context, int) ([]logsstore.TriggerDecision, error) {
+	return f.decisions, f.err
+}
+
 type fakeRuntime struct {
 	depth, cap, workers int
 }
@@ -200,6 +230,27 @@ func seededReader() *fakeReader {
 		baselines: []logsstore.BaselineRow{
 			{SystemID: "sys-1", ModuleID: "sshd", Priority: 5, EWMARate: 3.14159, UpdatedAt: 1700000100000},
 		},
+		triggers: []logsstore.TriggerRow{
+			{
+				Trigger: logsstore.Trigger{Key: "t1:aaaa", Status: logsstore.TriggerActive,
+					Visibility: logsstore.VisibilityPending, FirstPromptVersion: "v1",
+					FirstSeen: 1700000000000, LastSeen: 1700000100000, DistinctSystems: 3, Count: 9},
+				Findings: 2, Titles: []string{"disk filling on mail"}, GateReasons: []string{"deviation:mail/4"},
+			},
+			{
+				Trigger: logsstore.Trigger{Key: "t1:bbbb", Security: true, Status: logsstore.TriggerActive,
+					Visibility: logsstore.VisibilityCustomer, FirstPromptVersion: "v1",
+					FirstSeen: 1700000000000, LastSeen: 1700000100000, DistinctSystems: 1, Count: 1},
+				Findings: 1, Titles: []string{"sshd failing repeatedly"}, GateReasons: []string{"security_new"},
+			},
+		},
+		trigStats: []logsstore.TriggerStatsRow{
+			{PromptVersion: "v1", Triggers: 2, Security: 1, Pending: 1},
+		},
+		decisions: []logsstore.TriggerDecision{
+			{Key: "t1:aaaa", Actor: "alice", Action: logsstore.ActionIgnore, Detail: "1700000900000",
+				PromptVersion: "v1", CreatedAt: 1700000100000},
+		},
 	}
 }
 
@@ -215,12 +266,11 @@ func testInfo() chrome.Info {
 	}
 }
 
-// newTestServer builds the read-only server. The log pipeline has no write
-// routes, so there is no writer/admin-key variant to build here (contrast
-// internal/ui/threat's newWriteTestServer).
+// newTestServer builds the read-only server: no writer, no admin key. See
+// newWriteTestServer in review_test.go for the other one.
 func newTestServer(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, rt, chrome.Config{Info: testInfo()})
+	h, err := NewServer(r, nil, rt, chrome.Config{Info: testInfo()})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -247,6 +297,9 @@ var routes = []struct {
 	{"/templates", "<h1>Templates</h1>"},
 	{"/baselines", "<h1>Baselines</h1>"},
 	{"/status", "<h1>Status</h1>"},
+	{"/review", "<h1>Review</h1>"},
+	{"/review/stats", "<h1>Review stats</h1>"},
+	{"/review/audit", "<h1>Review audit</h1>"},
 }
 
 func TestRoutesOK(t *testing.T) {
@@ -481,7 +534,7 @@ func TestNoJavaScript(t *testing.T) {
 func TestSecretRedaction(t *testing.T) {
 	const decoySecret = "sk-live-do-not-leak-1234567890"
 
-	h, err := NewServer(seededReader(), fakeRuntime{}, chrome.Config{Info: chrome.Info{
+	h, err := NewServer(seededReader(), nil, fakeRuntime{}, chrome.Config{Info: chrome.Info{
 		StartedAt: 1700000000000,
 		Build:     "test-build",
 		Config: []chrome.ConfigItem{
@@ -610,7 +663,7 @@ func TestEmptyStoreRendersEveryPage(t *testing.T) {
 
 // findingsTable returns the findings table's header labels and the inner
 // markup of each top-level cell of its first body row. A cell's own markup
-// (the expanded <details>) holds no <td>, so splitting on "<td" is exact.
+// (the finding's <dialog>) holds no <td>, so splitting on "<td" is exact.
 func findingsTable(t *testing.T, body string) (header, cells []string) {
 	t.Helper()
 	hs, he := strings.Index(body, "<thead>"), strings.Index(body, "</thead>")

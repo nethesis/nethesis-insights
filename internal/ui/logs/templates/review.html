@@ -1,0 +1,141 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Review</h1>
+<p><small>A <strong>trigger</strong> is the reason the gate paid for an AI call, named without the
+machine, so the same condition on many clusters is one row. A decision applies to the whole
+trigger: every finding raised under it, on every system, now and when it recurs &mdash; never to one
+finding. New triggers wait here and their findings are withheld from customers until someone
+delivers them; security triggers skip the queue. Ranked by the number of systems, then sightings.</small></p>
+
+<form method="get">
+<fieldset role="group">
+<select name="view">
+{{$view := .View}}
+{{range .Views}}<option value="{{.Key}}"{{if eq $view .Key}} selected{{end}}>{{.Label}}</option>{{end}}
+</select>
+<input type="text" name="key" value="{{.Key}}" placeholder="trigger key, partial ok">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+<datalist id="trigger-keys">
+{{range .Rows}}{{if not .Security}}<option value="{{.Key}}">{{if .Titles}}{{truncate (index .Titles 0) 60}}{{end}}</option>{{end}}{{end}}
+</datalist>
+
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr>
+<th scope="col">Trigger</th><th scope="col">Visibility</th><th scope="col" class="num">Systems</th>
+<th scope="col" class="num">Sightings</th><th scope="col" class="num">Findings</th><th scope="col">Why the gate fired</th>
+<th scope="col">Last seen</th>
+</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr>
+<td>
+<button type="button" class="linklike" title="{{.Key}}" commandfor="trigger-{{.Key}}" command="show-modal">{{if .Titles}}{{truncate (index .Titles 0) 60}}{{else}}{{short .Key 16}}{{end}}</button>
+{{if .Security}} <span class="chip" data-severity="critical">security</span>{{end}}
+{{if eq .Status "ignored"}}{{if gt .IgnoreUntil $.Now}} <span class="pill" data-status="stale" title="until {{fmtTime .IgnoreUntil}}">ignored</span>{{end}}{{end}}
+<dialog id="trigger-{{.Key}}" closedby="any">
+<article>
+<header>
+<button type="button" aria-label="Close" rel="prev" commandfor="trigger-{{.Key}}" command="close"></button>
+<p><strong>Trigger <span class="mono">{{short .Key 16}}</span></strong></p>
+</header>
+<dl>
+<dt>Findings</dt>
+<dd>{{range .Titles}}<div>{{.}}</div>{{else}}&mdash;{{end}}
+{{if .Findings}}<div><small>{{.Findings}} finding(s) fleet-wide &middot; <a href="{{$.Base}}/?id={{.Key}}">show them</a></small></div>{{end}}</dd>
+<dt>Why the gate fired (latest)</dt><dd class="mono">{{reasonsOrNone .GateReasons}}</dd>
+<dt>Visibility</dt><dd><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></dd>
+<dt>Ignored</dt><dd class="mono">{{if and (eq .Status "ignored") (gt .IgnoreUntil $.Now)}}until {{fmtTime .IgnoreUntil}}{{else}}no{{end}}</dd>
+<dt>Severity override</dt><dd>{{if .SeverityOverride}}<span class="chip" data-severity="{{.SeverityOverride}}">{{.SeverityOverride}}</span>{{else}}none &mdash; the AI's severity{{end}}</dd>
+<dt>Documentation</dt><dd class="mono">{{if .DocRef}}{{.DocRef}}{{else}}&mdash;{{end}}</dd>
+<dt>Keys merged into it</dt><dd>{{.Aliases}}</dd>
+<dt>First raised by prompt</dt><dd class="mono">{{.FirstPromptVersion}}</dd>
+<dt>First / last seen</dt><dd class="mono">{{fmtTime .FirstSeen}} &middot; {{fmtTime .LastSeen}}</dd>
+<dt>Key</dt><dd class="mono">{{.Key}}</dd>
+</dl>
+{{if $.CanWrite}}
+{{if .Security}}
+<p><small>Security triggers are delivered without review and cannot be hidden, ignored or merged.</small></p>
+{{else}}
+<p><small>Every decision below applies to all findings under this trigger, on every system.</small></p>
+<form method="post" action="{{$.Base}}/review/deliver">
+<input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="filter" value="{{$.Key}}">
+<fieldset role="group">
+<button type="submit">Deliver to customers</button>
+<button type="submit" class="secondary" formaction="{{$.Base}}/review/internal">Keep internal</button>
+</fieldset>
+</form>
+<form method="post" action="{{$.Base}}/review/ignore">
+<input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="filter" value="{{$.Key}}">
+<fieldset role="group">
+<select name="days" aria-label="ignore for">
+{{range $.IgnoreChoices}}<option value="{{.}}">stop paying for {{.}} days</option>{{end}}
+</select>
+<button type="submit" class="secondary">Ignore</button>
+</fieldset>
+</form>
+<form method="post" action="{{$.Base}}/review/merge">
+<input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="filter" value="{{$.Key}}">
+<fieldset role="group">
+<input type="text" name="into" list="trigger-keys" placeholder="merge into trigger key" required>
+<button type="submit" class="secondary">Merge</button>
+</fieldset>
+</form>
+{{end}}
+<form method="post" action="{{$.Base}}/review/severity">
+<input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="filter" value="{{$.Key}}">
+<fieldset role="group">
+<select name="severity" aria-label="severity the customer sees">
+<option value="">the AI's severity</option>
+{{$override := .SeverityOverride}}
+{{range $.Severities}}<option value="{{.}}"{{if eq $override .}} selected{{end}}>{{.}}</option>{{end}}
+</select>
+<button type="submit" class="secondary">Set severity</button>
+</fieldset>
+</form>
+<form method="post" action="{{$.Base}}/review/doc-ref">
+<input type="hidden" name="key" value="{{.Key}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="filter" value="{{$.Key}}">
+<fieldset role="group">
+<input type="url" name="doc_ref" value="{{.DocRef}}" placeholder="https://… remediation docs (blank clears)">
+<button type="submit" class="secondary">Set docs</button>
+</fieldset>
+</form>
+{{else}}
+<p><small>Read-only: decisions need <code>ADMIN_API_KEY</code> set on insightsd.</small></p>
+{{end}}
+</article>
+</dialog>
+</td>
+<td><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></td>
+<td class="num">{{.DistinctSystems}}</td>
+<td class="num">{{.Count}}</td>
+<td class="num">{{.Findings}}</td>
+<td class="mono">{{reasonsOrNone .GateReasons}}</td>
+<td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7">no triggers match this filter</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+<p><small>Showing up to {{len .Rows}} triggers (capped server-side). A merged key is not listed: its findings count towards the trigger it was merged into.</small></p>
+{{end}}

@@ -53,7 +53,7 @@ func TestRecurrenceBumpsNotInserts(t *testing.T) {
 		t.Fatalf("expected bumped, got %s", outcome)
 	}
 
-	findings, err := s.ListFindings(ctx, "sys1", 0, "")
+	findings, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestStaleThenRecurrenceReopens(t *testing.T) {
 		t.Fatalf("expected reopened, got %s", outcome)
 	}
 
-	findings, err := s.ListFindings(ctx, "sys1", 0, "")
+	findings, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestFirstSeenNeverMoves(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 
-	findings, err := s.ListFindings(ctx, "sys1", 0, "")
+	findings, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

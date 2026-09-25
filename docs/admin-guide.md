@@ -164,17 +164,23 @@ the end of this step.
     install -d -m 755 /etc/insights
     umask 077
     printf 'AUTH_PEPPER=%s\n'   "$(openssl rand -hex 32)" > /etc/insights/authd.env
-    printf 'LLM_API_KEY=%s\n'   "<your model API key>"    > /etc/insights/insightsd.env
-    printf 'ADMIN_API_KEY=%s\n' "$(openssl rand -hex 24)" > /etc/insights/threatd.env
+    ADMIN_API_KEY=$(openssl rand -hex 24)
+    printf 'LLM_API_KEY=%s\nADMIN_API_KEY=%s\n' "<your model API key>" "$ADMIN_API_KEY" \
+                                                          > /etc/insights/insightsd.env
+    printf 'ADMIN_API_KEY=%s\n' "$ADMIN_API_KEY"          > /etc/insights/threatd.env
     : > /etc/insights/sizingd.env
     chmod 600 /etc/insights/*.env
+
+`ADMIN_API_KEY` goes into two files with the same value: `threatd` checks it on
+the blocklist dashboard's allowlist changes and `insightsd` on the logs
+dashboard's review decisions, and one operator password covers both.
 
 `sizingd` has no secret of its own. Create the empty file anyway: its unit
 names that file unconditionally and will fail to start without it.
 
 Then the operator password file for the proxy. Every operator gets a line, and
 they all share one password — the `ADMIN_API_KEY` value. The **username** is
-what gets recorded as the actor on any change made from the blocklist
+what gets recorded as the actor on any change made from the blocklist or logs
 dashboard, which is why each operator gets their own line:
 
     install -d -m 755 /etc/traefik
@@ -339,6 +345,7 @@ depth. It never logs a credential: the model API key appears only as
 | `PIPELINE_EXCLUDE_MODULES` | modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline). Matches a module **family** or an exact instance id — configure the family, since NS8 numbers instances per cluster and `crowdsec1` excludes nothing on a node running `crowdsec3` |
 | `PIPELINE_EXCLUDE_SERVICES` | syslog identifiers dropped the same way, matched against the `[tag]` on each masked log line (default `insights,alert-proxy`). `insights` stops a co-located server from analysing its own logs; `alert-proxy` stops the fleet re-reporting alerts your monitoring stack has already raised and already sent you. The tag is matched on every line, not only host ones — which is how `alert-proxy` is excluded without excluding the `metrics` module it runs inside. Note `PIPELINE_EXCLUDE_MODULES=alert-proxy` would match nothing: it is not a module |
 | `STALE_AFTER` | how long without a recurrence before a finding is presumed resolved (default `24h`) |
+| `ADMIN_API_KEY` | password for the logs dashboard's review decisions — secret, the same value `threatd` reads. Unset means the review queue is read-only and its routes answer `405` |
 | `TRIGGER_REUSE_WINDOW` | how long after the AI was asked about a trigger on a machine that the same trigger on the same machine is answered from memory instead of asked again, counted from that paid call (default `24h`; `0` turns reuse off — ignores still apply). See "Trigger memory" below |
 | `EWMA_ALPHA` | baseline smoothing weight, must be in `(0, 1]` (default `0.3`). Not validated — a value outside that range silently produces a nonsensical baseline |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
@@ -360,7 +367,7 @@ in `systemctl status threatd`.
 
 | Variable | Purpose |
 |---|---|
-| `ADMIN_API_KEY` | password for the blocklist dashboard's write routes — secret. Unset means those routes answer `405`, never a default credential. Only `threatd` reads this |
+| `ADMIN_API_KEY` | password for the blocklist dashboard's write routes — secret. Unset means those routes answer `405`, never a default credential. `insightsd` reads the same variable for its review decisions |
 | `BLOCKLIST_CONSENSUS_INTERVAL` | how often consensus runs and the feed is regenerated (default `5m`). Must be positive, and must not exceed `BLOCKLIST_WINDOW` — a longer interval leaves sightings that land and age out between two passes uncounted by either |
 | `BLOCKLIST_WINDOW` | rolling observation window for promotion (default `1h`). Must be positive |
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
@@ -464,12 +471,13 @@ provisioned in `/etc/traefik/operators.htpasswd`; the password for every
 provisioned username is the `ADMIN_API_KEY` value. One login covers all three
 dashboards.
 
-The blocklist dashboard's write routes authenticate against `ADMIN_API_KEY` a
-second time, inside the application, and refuse cross-site requests. That is
-not redundant. The proxy's layer is still Basic auth, and a browser replays a
-cached Basic credential automatically on a form POST from any other page the
-operator later visits — without the in-application check, any site could
-silently add an attacker's address to the fleet allowlist.
+The blocklist and logs dashboards' write routes authenticate against
+`ADMIN_API_KEY` a second time, inside the application, and refuse cross-site
+requests. That is not redundant. The proxy's layer is still Basic auth, and a
+browser replays a cached Basic credential automatically on a form POST from any
+other page the operator later visits — without the in-application check, any
+site could silently add an attacker's address to the fleet allowlist, or hide a
+finding from every customer.
 
 ## Connecting nodes
 
@@ -782,9 +790,10 @@ dashboard port at all: the only way to reach one is through the proxy.
 Everything else about a dashboard is built to match that exposure:
 
 - **`GET` is read-only.** Every page answers `GET` with no credential.
-- **Only the blocklist dashboard can write**, only when `ADMIN_API_KEY` is
-  set, and only on a short enumerated list of routes that each authenticate
-  first. Those routes answer `POST` and nothing else; every other method,
+- **Only the blocklist and logs dashboards can write**, only when
+  `ADMIN_API_KEY` is set, and only on a short enumerated list of routes that
+  each authenticate first — allowlist changes on one, trigger review decisions
+  on the other. Those routes answer `POST` and nothing else; every other method,
   `HEAD` and `DELETE` included, is `405`. With no key they answer `405` too —
   not "reachable but unauthorized".
 - **Cross-site writes are refused**, because a browser replays a cached Basic
@@ -795,7 +804,9 @@ Everything else about a dashboard is built to match that exposure:
 - **Nothing unmasked.** Raw log samples are never stored, so there is nothing
   unmasked to render.
 - **No JavaScript, and no outside network requests.** Auto-refresh is a meta
-  tag, filters are plain forms, row detail is a native disclosure element. An
+  tag, filters are plain forms, and a row's detail opens in a native dialog
+  (an HTML invoker button, not a script), which needs a browser released
+  since late 2025. An
   offline management network is a supported deployment.
 - **No arbitrary SQL.** Every page is a fixed query with a server-side limit.
 
@@ -820,7 +831,10 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet; click a row for the full summary, suggested action, evidence and fingerprint. |
+| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, trigger, and whether the customer sees it. **The operator sees every finding here; a customer sees one only once its trigger has been delivered on `/logs/review`.** |
+| `/logs/review` | The trigger review queue — see "Trigger memory" below. New triggers wait here, ranked by how many machines raised them; click one to see its findings and why the gate fired, and to decide. Switch the view to see triggers already delivered, kept internal, or all of them. |
+| `/logs/review/stats` | Per prompt version: how many triggers it raised and what operators decided about them. The number to watch when the prompt changes. |
+| `/logs/review/audit` | Every review decision, who made it and when. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, the window's **trigger**, and whether a spending limit or the trigger memory suppressed it. This answers "what did we spend, and on what." |
 | `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI except the ones counted under **Suppressed** — answered from trigger memory or ignored by an operator; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
@@ -1070,18 +1084,39 @@ it:
 - Otherwise the AI is asked as before.
 
 Security triggers are the exception to review: they are never held back and
-can never be ignored, though an unchanged one can be answered from memory like
-any other.
+can never be ignored, hidden or merged, though an unchanged one can be
+answered from memory like any other.
 
 A suppressed window is recorded like a gated-out one — its lines are learnt
 and its volumes counted — and shows up in `/analyses` with `trigger_hit` or
 `trigger_ignored` in the *Suppressed* column. Nothing an operator decides here
 is ever shown to the AI.
 
-What is **not** built yet: the review pages where an operator decides whether a
-trigger's findings go to the customer, stay internal, are ignored or are merged
-into another trigger. Today an ignore can only be set by the server's own
-tests, so in practice the saving comes from the "already answered" rule.
+**Reviewing.** A trigger is also the unit an operator reviews, on the logs
+dashboard's `/review` page. **A new, non-security trigger's findings are
+withheld from customers until someone delivers it** — the operator dashboard
+shows them straight away, the customer's findings API does not. Each decision
+applies to the whole trigger: every finding raised under it, on every
+machine, now and whenever it recurs — never just the one finding you happened
+to be looking at. The decisions are:
+
+- **Deliver** — its findings go to customers.
+- **Keep internal** — they stay on the operator dashboard only. Either can be
+  changed later; neither can be taken back to "pending".
+- **Ignore** for 7 to 365 days — stop paying for it at all, fleet-wide (see
+  above).
+- **Merge** into another trigger — they are the same condition described
+  twice. The merged trigger takes on every decision of the one it was merged
+  into, and its findings count towards it in the queue.
+- **Set severity** — what customers are shown instead of the AI's severity.
+  The stored severity, and what the AI is told, do not change.
+- **Set docs** — a link to remediation documentation, returned to customers
+  with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
+
+Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
+every decision is written to `/review/audit` with who made it. Without the
+key the queue is read-only — and, since nothing can be delivered, new
+non-security findings never reach customers.
 
 ### 4. Baselines: "what's normal" for a module
 

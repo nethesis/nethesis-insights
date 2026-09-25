@@ -71,12 +71,16 @@ func sortedKeys(set map[string]bool) []string {
 // It gets its own http.Server, deliberately: the public ingest socket must
 // never serve an unauthenticated fleet-wide page, so a reverse-proxy or
 // firewall mistake on :9595 cannot expose it.
-func newUIServer(addr, basePath string, r logsui.Reader, rt logsui.Runtime, info chrome.Info) *http.Server {
+//
+// w and adminKey enable the trigger review routes; with adminKey empty the
+// dashboard is read-only and renders no decision form.
+func newUIServer(addr, basePath string, r logsui.Reader, w logsui.Writer, rt logsui.Runtime, adminKey string, info chrome.Info) *http.Server {
 	if addr == "" {
 		return nil
 	}
-	handler, err := logsui.NewServer(r, rt, chrome.Config{
+	handler, err := logsui.NewServer(r, w, rt, chrome.Config{
 		BasePath: basePath,
+		AdminKey: adminKey,
 		Info:     info,
 	})
 	if err != nil {
@@ -101,6 +105,9 @@ func main() {
 	// enabling it is one explicit operator act, never a default.
 	uiListenAddr := svc.Getenv("UI_LISTEN_ADDR", "")
 	uiBasePath := svc.Getenv("UI_BASE_PATH", "")
+	// Off by default: the trigger review routes decide what customers are
+	// shown, so they stay unreachable until an operator sets the key.
+	adminAPIKey := svc.Getenv("ADMIN_API_KEY", "")
 	dbPath := svc.Getenv("DB_PATH", "/var/lib/insights/insights.db")
 	trustedProxyCIDRs := svc.Getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
 	llmBaseURL := svc.Getenv("LLM_BASE_URL", "")
@@ -315,6 +322,7 @@ func main() {
 		{Name: "LLM_BASE_URL", Value: llmBaseURL},
 		{Name: "LLM_MODEL", Value: llmModel},
 		{Name: "LLM_API_KEY", Value: svc.SecretState(llmAPIKey != "")},
+		{Name: "ADMIN_API_KEY", Value: svc.SecretState(adminAPIKey != "")},
 		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
 		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
 		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
@@ -343,7 +351,7 @@ func main() {
 	// BuildInfo reads runtime/debug once here, not per request. q satisfies
 	// logsui.Runtime (Depth/Cap/Workers): insightsd is the only one of the
 	// three binaries with a queue, so it is the only one that wires one in.
-	uiServer := newUIServer(uiListenAddr, uiBasePath, s, q, chrome.Info{
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, s, q, adminAPIKey, chrome.Info{
 		StartedAt: startedAt,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
@@ -359,6 +367,7 @@ func main() {
 		"llm_timeout", llmTimeout.String(),
 		"analysis_timeout", analysisTimeout.String(),
 		"llm_api_key_set", llmAPIKey != "",
+		"admin_api_key_set", adminAPIKey != "",
 		"gate_tolerance", gateTolerance,
 		"gate_min_expected", gateMinExpected,
 		"gate_min_observed", gateMinObserved,

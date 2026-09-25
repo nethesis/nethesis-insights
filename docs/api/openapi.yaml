@@ -199,8 +199,12 @@ paths:
       description: |
         Returns findings for the system named by the authenticated
         credential only -- there is no cross-system read on this surface.
-        Findings are ordered severity-descending (`critical > high > medium
-        > low`), then `last_seen` descending.
+        Only delivered findings are returned: a new non-security finding is
+        withheld until an operator delivers its trigger, and one an operator
+        keeps internal never appears. Security findings are delivered
+        without review. `severity` is the operator's override when one is
+        set. Findings are ordered severity-descending (`critical > high >
+        medium > low`), then `last_seen` descending.
       security:
         - basicAuth: []
       parameters:
@@ -1130,7 +1134,12 @@ components:
         id: { type: string, description: ULID. }
         system_id: { type: string }
         fingerprint: { type: string, description: "sha256, `v1:`-prefixed." }
-        severity: { type: string, enum: [critical, high, medium, low] }
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: >-
+            The operator's severity override for this kind of finding when
+            one is set, otherwise the AI's.
         title: { type: string }
         summary: { type: string }
         suggested_action: { type: string }
@@ -1170,6 +1179,12 @@ components:
             stored on the finding, so one machine has exactly one name in the
             database and a rename shows up everywhere at once. An id with no
             roster entry still appears here, with no `fqdn`.
+        doc_ref:
+          type: string
+          format: uri
+          description: >-
+            An absolute http(s) URL to remediation documentation an operator
+            attached to this kind of finding. Absent when none is set.
 
     Decision:
       type: object

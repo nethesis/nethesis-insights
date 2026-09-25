@@ -84,8 +84,8 @@ func TestLookupOfAnUnknownKey(t *testing.T) {
 	}
 }
 
-// Merging is Phase 2, but the lookup already resolves through the alias
-// table, so the analyzer never has to learn about aliases later.
+// The lookup resolves through the alias table, so the analyzer never has to
+// know a merge happened.
 func TestLookupResolvesAnAliasToItsRoot(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -158,7 +158,7 @@ func TestAReusedSightingBumpsTheLinkedOpenFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.ListFindings(ctx, "sys1", 0, "")
+	got, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("list: %v %v", got, err)
 	}

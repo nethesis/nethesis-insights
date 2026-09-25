@@ -38,6 +38,23 @@ thead th {
   text-overflow: ellipsis;
 }
 
+/* A <button> that opens a <dialog> (command/commandfor, no JavaScript) but
+   reads as the row's link: the listing tables are wide, and a row that
+   expanded in place pushed the page sideways on every click. */
+button.linklike {
+  width: auto;
+  max-width: 40ch;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--pico-primary);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-decoration: underline;
+}
+
 nav a.active,
 nav details.dropdown > summary.active {
   text-decoration: underline;
