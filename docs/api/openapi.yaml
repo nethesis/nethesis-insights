@@ -233,7 +233,7 @@ paths:
                 findings:
                   - id: 01J8Z1K2M3N4P5Q6R7S8T9V0W1
                     system_id: abc123
-                    fingerprint: v1:9f2b7e1c4a...
+                    fingerprint: 9f2b7e1c4a...
                     severity: high
                     title: Repeated connection refused on traefik1
                     summary: traefik1 logged 37 connection-refused events in 15 minutes, far above baseline.
@@ -247,6 +247,7 @@ paths:
                     last_seen: 1754381690000
                     llm_model: nvidia/nemotron-3-ultra-550b-a55b:free
                     prompt_version: v1
+                    security: false
         "400":
           description: Invalid `since` (not an integer).
           content:
@@ -1133,7 +1134,7 @@ components:
       properties:
         id: { type: string, description: ULID. }
         system_id: { type: string }
-        fingerprint: { type: string, description: "sha256, `v1:`-prefixed." }
+        fingerprint: { type: string, description: "Server-computed sha256, hex-encoded; never derived from model text." }
         severity:
           type: string
           enum: [critical, high, medium, low]

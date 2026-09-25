@@ -45,9 +45,11 @@ see `docs/api/openapi.yaml`.
   - [2. Templates: the shape of a log line, not the line itself](#2-templates-the-shape-of-a-log-line-not-the-line-itself)
   - [3. The gate: deciding if it's worth asking the AI](#3-the-gate-deciding-if-its-worth-asking-the-ai)
   - [3a. The spending ceiling](#3a-the-spending-ceiling)
+  - [3b. Trigger memory: not paying twice for the same thing](#3b-trigger-memory-not-paying-twice-for-the-same-thing)
   - [4. Baselines: "what's normal" for a module](#4-baselines-whats-normal-for-a-module)
   - [5. The analysis: when the AI actually looks](#5-the-analysis-when-the-ai-actually-looks)
   - [6. Findings: the actual output](#6-findings-the-actual-output)
+  - [7. Review: deciding what customers see](#7-review-deciding-what-customers-see)
 - [Threat Shield](#threat-shield)
   - [How it works, in four steps](#how-it-works-in-four-steps)
   - [The safety net](#the-safety-net)
@@ -346,7 +348,7 @@ depth. It never logs a credential: the model API key appears only as
 | `PIPELINE_EXCLUDE_SERVICES` | syslog identifiers dropped the same way, matched against the `[tag]` on each masked log line (default `insights,alert-proxy`). `insights` stops a co-located server from analysing its own logs; `alert-proxy` stops the fleet re-reporting alerts your monitoring stack has already raised and already sent you. The tag is matched on every line, not only host ones — which is how `alert-proxy` is excluded without excluding the `metrics` module it runs inside. Note `PIPELINE_EXCLUDE_MODULES=alert-proxy` would match nothing: it is not a module |
 | `STALE_AFTER` | how long without a recurrence before a finding is presumed resolved (default `24h`) |
 | `ADMIN_API_KEY` | password for the logs dashboard's review decisions — secret, the same value `threatd` reads. Unset means the review queue is read-only and its routes answer `405` |
-| `TRIGGER_REUSE_WINDOW` | how long after the AI was asked about a trigger on a machine that the same trigger on the same machine is answered from memory instead of asked again, counted from that paid call (default `24h`; `0` turns reuse off — ignores still apply). See "Trigger memory" below |
+| `TRIGGER_REUSE_WINDOW` | how long after the AI was asked about a trigger on a machine that the same trigger on the same machine is answered from memory instead of asked again, counted from that paid call (default `24h`; `0` turns reuse off). The only setting the trigger memory has. See "Trigger memory" below |
 | `EWMA_ALPHA` | baseline smoothing weight, must be in `(0, 1]` (default `0.3`). Not validated — a value outside that range silently produces a nonsensical baseline |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
@@ -632,7 +634,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_events"`) | the bundle/ingest queue's live state |
 | `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
-| `insightsd_trigger_suppressions_total{reason}` | `insightsd` | windows the gate fired on that were answered without calling the AI: `trigger_hit` (already asked, answer still current) or `trigger_ignored` (an operator ignored that trigger) |
+| `insightsd_trigger_suppressions_total{reason}` | `insightsd` | windows the gate fired on that were answered without calling the AI: `trigger_hit` (already asked on that machine, answer still current) — the only reason |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -645,8 +647,8 @@ gate reasons and findings.
 
 **Counters start at 0, not missing.** Every counter above whose labels are a
 known list — the four `insightsd_llm_calls_total` outcomes, the
-`insightsd_budget_rejections_total` reason, both
-`insightsd_trigger_suppressions_total` reasons, both `authd_*` families,
+`insightsd_budget_rejections_total` reason, the
+`insightsd_trigger_suppressions_total` reason, both `authd_*` families,
 `threatd_ingestq_full_total`, and both `<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
 counts has ever happened. That is what lets an alert like
@@ -792,7 +794,7 @@ Everything else about a dashboard is built to match that exposure:
 - **`GET` is read-only.** Every page answers `GET` with no credential.
 - **Only the blocklist and logs dashboards can write**, only when
   `ADMIN_API_KEY` is set, and only on a short enumerated list of routes that
-  each authenticate first — allowlist changes on one, trigger review decisions
+  each authenticate first — allowlist changes on one, finding review decisions
   on the other. Those routes answer `POST` and nothing else; every other method,
   `HEAD` and `DELETE` included, is `405`. With no key they answer `405` too —
   not "reachable but unauthorized".
@@ -831,13 +833,13 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here; a customer sees one only once its trigger has been delivered on `/logs/review`.** |
-| `/logs/review` | The trigger review queue — see "Trigger memory" below. New triggers wait here, ranked by how many machines raised them; click one to see its findings and why the gate fired, and to decide. Switch the view to see triggers already delivered, kept internal, or all of them. |
-| `/logs/review/stats` | Per prompt version: how many triggers it raised and what operators decided about them. The number to watch when the prompt changes. |
+| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
+| `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal, or all of them. |
+| `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. |
 | `/logs/review/audit` | Every review decision, who made it and when. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, the window's **trigger**, and whether a spending limit or the trigger memory suppressed it. This answers "what did we spend, and on what." |
-| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI except the ones counted under **Suppressed** — answered from trigger memory or ignored by an operator; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
+| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI except the ones counted under **Suppressed** — answered from trigger memory; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
 | `/logs/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/logs/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
 | `/logs/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
@@ -1067,56 +1069,30 @@ answer was still open.
 So every window the gate fires on gets a **trigger**: a name for *why* the
 gate fired — which new log lines (only when the new lines are what fired it),
 which modules were unusually loud and at what priority, and whether a security
-line was involved. It does not include the machine, so the same condition on
-two customers' clusters is one trigger. Before asking the AI, the server checks
-it:
+line was involved. Before asking the AI, the server checks whether **this
+machine** already asked about this exact trigger within
+`TRIGGER_REUSE_WINDOW` (a day, by default) of the last time it actually paid,
+and whether every finding that answer produced is still open — or it
+produced none. If so, the window bumps those findings the way a recurrence
+would, and costs nothing. Otherwise the AI is asked as before.
 
-- **Ignored.** An operator has marked the trigger as not worth asking about,
-  for everyone, until a date. The window is recorded but the AI is not called.
-  An ignore always has an end date, and it is written to an audit trail with
-  who set it.
-- **Already answered.** This machine asked about this exact trigger within
-  `TRIGGER_REUSE_WINDOW` (a day, by default) of the last time it actually
-  paid, and every finding that answer produced is still open — or it produced
-  none. The window bumps those findings the way a recurrence would, and costs
-  nothing. The day counts from the last *paid* answer, so a condition that
-  never goes away is still looked at again at least once a day.
-- Otherwise the AI is asked as before.
+In short: **the server does not pay twice for the same thing within a day on
+the same machine.** Three details:
 
-Security triggers are the exception to review: they are never held back and
-can never be ignored, hidden or merged, though an unchanged one can be
-answered from memory like any other.
+- The day counts from the last *paid* answer, so a condition that never goes
+  away is still looked at again at least once a day.
+- It is per machine. The same trigger on another customer's cluster is asked
+  about there too, because the answer may be specific to that cluster.
+- If a finding from the last answer has gone stale, the condition has
+  changed, and the AI is asked again.
 
-A suppressed window is recorded like a gated-out one — its lines are learnt
-and its volumes counted — and shows up in `/analyses` with `trigger_hit` or
-`trigger_ignored` in the *Suppressed* column. Nothing an operator decides here
-is ever shown to the AI.
+There is nothing to configure or decide here beyond `TRIGGER_REUSE_WINDOW`
+(`0` turns it off). No operator action reaches it, and it has no effect on
+what customers see — that is review, in section 7.
 
-**Reviewing.** A trigger is also the unit an operator reviews, on the logs
-dashboard's `/review` page. **A new, non-security trigger's findings are
-withheld from customers until someone delivers it** — the operator dashboard
-shows them straight away, the customer's findings API does not. Each decision
-applies to the whole trigger: every finding raised under it, on every
-machine, now and whenever it recurs — never just the one finding you happened
-to be looking at. The decisions are:
-
-- **Deliver** — its findings go to customers.
-- **Keep internal** — they stay on the operator dashboard only. Either can be
-  changed later; neither can be taken back to "pending".
-- **Ignore** for 7 to 365 days — stop paying for it at all, fleet-wide (see
-  above).
-- **Merge** into another trigger — they are the same condition described
-  twice. The merged trigger takes on every decision of the one it was merged
-  into, and its findings count towards it in the queue.
-- **Set severity** — what customers are shown instead of the AI's severity.
-  The stored severity, and what the AI is told, do not change.
-- **Set docs** — a link to remediation documentation, returned to customers
-  with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
-
-Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
-every decision is written to `/review/audit` with who made it. Without the
-key the queue is read-only — and, since nothing can be delivered, new
-non-security findings never reach customers.
+A window answered this way is recorded like a gated-out one — its lines are
+learnt and its volumes counted — and shows up in `/analyses` with
+`trigger_hit` in the *Suppressed* column.
 
 ### 4. Baselines: "what's normal" for a module
 
@@ -1217,6 +1193,60 @@ A finding is:
 
 This is why the same misconfigured service doesn't flood you with a new
 alert every 15 minutes forever — it's the *same* finding, just bumped.
+
+The same identity with the machine left out is the finding's **class**: what
+an operator reviews before any customer sees the finding. That is the next
+section.
+
+### 7. Review: deciding what customers see
+
+The AI's findings do not go straight to customers. An operator reviews them
+first, on the logs dashboard's `/review` page, and **every new kind of
+finding is withheld from customers until someone delivers it** — the
+operator dashboard shows it straight away, the customer's findings API does
+not. That includes security findings: they wait for review like everything
+else.
+
+What an operator reviews is a **finding class**: one kind of problem, across
+every machine. Two machines reporting the same database timeout have two
+findings (one each, with their own counts and dates) but one class, so the
+decision is made once. The class is worked out by the server from the log
+lines the finding is based on, the same way a finding's identity is (section
+6) but leaving the machine out — never from the AI's wording. The review
+queue shows the pending classes by default, the ones seen on the most
+machines at the top, each with the titles and summaries the AI wrote for it
+and the evidence it is based on.
+
+A decision applies to the whole class: every finding in it, on every machine,
+now and whenever it recurs — including machines that report it for the first
+time next month, which get it delivered with no new review. It never applies
+to just the one finding you happened to be looking at. The decisions are:
+
+- **Deliver** — the class's findings go to customers.
+- **Keep internal** — they stay on the operator dashboard only. Either can be
+  changed later; neither can be taken back to "pending".
+- **Security on/off** — whether customers see the class tagged as a security
+  problem. The node's own classification sets it the first time the class is
+  seen; after that it is the operator's, and a recurrence never resets it.
+- **Set severity** — what customers are shown instead of the AI's severity.
+  The stored severity, and what the AI is told, do not change.
+- **Set docs** — a link to remediation documentation, returned to customers
+  with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
+
+None of this changes what the AI is shown or when the server pays for a
+call: those are the gate's and the trigger memory's business, and nothing an
+operator decides here reaches either.
+
+Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
+every decision is written to `/review/audit` with who made it. Without the
+key the queue is read-only — and, since nothing can be delivered, no new
+finding reaches customers. `/review/stats` shows, per prompt version, how
+many classes it raised and what operators decided about them; it is the page
+to watch when the prompt changes.
+
+A class nobody has decided on is forgotten once all its findings have been
+pruned (`FINDING_RETENTION`); a class with a decision is kept, so the
+decision still applies if the problem comes back.
 
 ## Threat Shield
 

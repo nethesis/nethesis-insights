@@ -44,6 +44,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
   - [What the prompt carries](#what-the-prompt-carries)
 - [Cost control: the ceiling](#cost-control-the-ceiling)
 - [Cost control: trigger memory](#cost-control-trigger-memory)
+- [Review: per finding class](#review-per-finding-class)
 - [Degradation and failure modes](#degradation-and-failure-modes)
 - [Determinism](#determinism)
 - [LLM integration](#llm-integration)
@@ -201,14 +202,14 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `<svc>_http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
 | `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `<svc>_pass_runs_total`/`_pass_duration_seconds`/`_pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
-| `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding. Pure, sha256-based. |
-| `internal/trigger` | `trigger.Key` — the fleet-wide name of the condition that made the gate fire, derived from `gate.Decision` alone; `trigger.IsSecurity`. Pure, sha256-based, prefixed by `trigger.Version`. See "Cost control: trigger memory". |
+| `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding — and `fingerprint.Class`, the same identity without the system, which is what an operator reviews. Pure, sha256-based. |
+| `internal/trigger` | `trigger.Key` — the fleet-wide name of the condition that made the gate fire, derived from `gate.Decision` alone, and the key of the per-system reuse memory; `trigger.IsSecurity`. Pure, sha256-based, prefixed by `trigger.Version`. See "Cost control: trigger memory". |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
-| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`) and the trigger memory (`triggers.go`). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneAnalyses`/`PruneSystemTriggers`/`PruneTriggers`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
+| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`), the trigger memory (`triggers.go`) and the finding-class review state (`classes.go` for the decisions, `review.go` for the queue's reads). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneClasses`/`PruneAnalyses`/`PruneSystemTriggers`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, trigger, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `TriggerSuppressed`, `LLMCall`) reports one call per budget-suppressed window, one per window the trigger memory answered, and one per LLM attempt, classed `success`/`transient`/`permanent`/`parse` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.Trigger`/`metrics.LLM`. |
-| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `analyses`, `system_nodes`, `system_triggers` and `triggers` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its three steps — see "Maintenance pass" below. |
+| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses`, `system_nodes` and `system_triggers` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
@@ -220,7 +221,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
-| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its trigger's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines, and the trigger review pages (`/review`, `/review/stats`, `/review/audit`). Its six review routes (`writableRoutes`: deliver, internal, ignore, merge, severity, doc-ref) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
+| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, baselines, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its five review routes (`writableRoutes`: deliver, internal, security, severity, doc-ref) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
@@ -354,14 +355,13 @@ In order:
 6. If the gate declines: **record** bookkeeping (templates, baselines, stale
    sweep, the `analyses` ledger row) and return. No LLM call, no cost.
 7. If the gate fires: **consult the trigger memory.** `trigger.Key` names the
-   condition from the gate's decision alone; `LookupTrigger` resolves it
-   through `trigger_aliases` and reads its fleet-wide and per-system state.
-   An unexpired ignore (never for a security trigger) or a reuse — this
-   system paid for the same trigger within `TRIGGER_REUSE_WINDOW` of the last
-   paid call, and every finding that call raised is still open — records a
-   sighting (`RecordTriggerSighting`, which bumps those findings on a reuse)
-   and then **records** the window like a gated-out one, but with
-   `suppressed_by = trigger_ignored|trigger_hit`, the gate reasons kept,
+   condition from the gate's decision alone; `LookupTrigger` reads this
+   system's `system_triggers` row for it. A reuse — this system paid for the
+   same trigger within `TRIGGER_REUSE_WINDOW` of the last paid call, and
+   every finding that call raised is still open — records a sighting
+   (`RecordTriggerSighting`, which bumps those findings) and then
+   **records** the window like a gated-out one, but with
+   `suppressed_by = trigger_hit`, the gate reasons kept,
    `trigger_key` set and `llm_called = 0`. No prompt is rendered, no cost.
    See "Cost control: trigger memory".
 8. Otherwise build one `prompt.Selection` from what the gate found,
@@ -378,10 +378,13 @@ In order:
    the **same** `Selection` used to render) — this is the *only* path from
    model output to stored data, and it is what keeps model-authored prose out
    of the fingerprint.
-10. Compute the fingerprint (`fingerprint.Compute`) and `UpsertFinding` —
-   insert, bump the occurrence count, or reopen a stale finding. Each finding
+10. Compute the fingerprint (`fingerprint.Compute`) and the class
+   (`fingerprint.Class`, over the same derived fields) and `UpsertFinding` —
+   insert, bump the occurrence count, or reopen a stale finding, and in the
+   same transaction create or touch its `finding_classes` row. Each finding
    carries the window's trigger key, which is how the next window's reuse
-   check finds the findings this call raised.
+   check finds the findings this call raised, and its class key, which is
+   what review decisions reach it through.
 11. **Remember the trigger** (`RecordTriggerSighting` with `Called`) now that
    its call succeeded. A failed call answered nothing and is never recorded
    as one, so it can never be reused.
@@ -395,11 +398,12 @@ In order:
 Authenticates the same way as ingest, then `store.ListFindings` returns that
 system's **delivered** findings (optionally filtered by `since`/`status`),
 sorted by `model.SortFindings` — severity descending, then most-recently-seen
-first. Delivered means the finding's root trigger has `visibility = customer`,
-reached in one join through `trigger_aliases`; a pending or internal trigger's
-findings, and a finding with no trigger, are withheld. The trigger's
-`severity_override` replaces `severity` and its `doc_ref` is returned, both
-here and nowhere else — see "Cost control: trigger memory".
+first. Delivered means the finding's class has `visibility = customer`,
+reached in one join on `findings.class_key`; a pending or internal class's
+findings, and a finding with no class key, are withheld. The class's
+`severity_override` replaces `severity`, and its `doc_ref` and `security`
+tag are returned, all here and nowhere else — see "Review: per finding
+class".
 
 ### Maintenance pass: `maint.Runner.Run`
 
@@ -429,22 +433,24 @@ way baseline's rollup-then-prune steps are.
 ```
 1. PruneTemplates(now - TEMPLATE_RETENTION)
 2. PruneFindings(now - FINDING_RETENTION)        -- open findings are never candidates
-3. PruneAnalyses(now - ANALYSIS_RETENTION)
-4. PruneNodes(now - TEMPLATE_RETENTION)
-5. PruneSystemTriggers(now - FINDING_RETENTION)
-6. PruneTriggers(now - TEMPLATE_RETENTION)      -- never one with an operator decision
+3. PruneClasses(now - FINDING_RETENTION)         -- never one with an operator decision
+4. PruneAnalyses(now - ANALYSIS_RETENTION)
+5. PruneNodes(now - TEMPLATE_RETENTION)
+6. PruneSystemTriggers(now - FINDING_RETENTION)
 ```
 
-The trigger memory has no retention knobs of its own. `system_triggers`
-links a trigger to the findings its last call raised, so it lives as long as
-they do; `triggers` describes what the gate saw, the way `system_templates`
-does, so it shares that retention — and `PruneTriggers` spares any trigger
-with a row in `trigger_decisions`, an alias on either side, a remaining
-`system_triggers` row or a finding still naming it. A decided trigger is
-never pruned however old: the decision is what makes its next sighting
-cheap, and the append-only audit trail would otherwise name nothing. Step 5
-runs before step 6 only so a trigger it frees is collected in the same pass;
-there is still no ordering constraint for correctness.
+Neither the review state nor the trigger memory has retention knobs of its
+own; both share `FINDING_RETENTION`. `PruneClasses` deletes a
+`finding_classes` row not seen since the cutoff only when no
+`class_decisions` row names it and no retained finding carries its key — an
+undecided class with nothing left to review. A decided class is never pruned
+however old: the decision must keep applying when the condition returns, on
+any system, and the append-only audit trail would otherwise name nothing.
+Step 3 runs right after step 2 only so a class that step 2 just orphaned is
+collected in the same pass; there is still no ordering constraint for
+correctness. `system_triggers` links a trigger to the findings its last call
+raised, so it lives as long as they do; dropping a row only means the next
+window on that system with that trigger pays once before reuse resumes.
 
 Each call is itself internally batched (`logsstore.pruneBatchSize`, 5000 rows
 per `DELETE`, looped with the write lock released between batches) rather
@@ -994,12 +1000,11 @@ without a goroutine to leak.
 | `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. Pruned past `TEMPLATE_RETENTION` by `maint.Runner`; see "Maintenance pass" for why that default is 400 days and not shorter. |
 | `system_nodes` | The reporting cluster's node roster: `(system_id, node_id)` plus the `fqdn` that node reports for itself, and first/last-seen. A `system_id` is an NS8 *cluster*, so this is the dimension that lets a finding name a machine. It is the **only** table in this pipeline holding a customer-identifying string — see "Node attribution" below and "Data protection". Names live here and nowhere else: `findings` stores node ids and joins this table at read time. Pruned on the `TEMPLATE_RETENTION` cutoff by `maint.Runner`, which it shares rather than having a knob of its own. |
 | `module_baselines` | Per-`(system_id, module_id, priority)` EWMA rate — the gate's deviation fallback when a bundle carries no `expected`. Keyed on the module **instance**, deliberately: one instance flooding is signal about that instance, and this is where per-instance attribution survives the family collapse elsewhere. Deliberately **not** pruned by `maint.Runner` — it does not grow per event the way `system_templates` and `analyses` do, only with the number of distinct buckets a system has, so it has no comparable backlog problem. |
-| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, `suppressed_by` when a budget limit refused the window (`system_call_cap`, no reasons) or the trigger memory answered it (`trigger_ignored`/`trigger_hit`, reasons kept), and `trigger_key` for every window the gate fired on. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
-| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `trigger_key` names the trigger of the LLM call that last raised it: the join the reuse check goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
-| `triggers` | Fleet-wide, one row per trigger key: `security`, `status` (`active`/`ignored`) with `ignore_until`, `visibility` (`pending`/`customer`/`operator` — a security trigger starts `customer`), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen, `distinct_systems`, `count`. Holds the current effect of every operator decision. Pruned only when undecided and unreferenced. |
+| `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, `suppressed_by` when a budget limit refused the window (`system_call_cap`, no reasons) or the trigger memory answered it (`trigger_hit`, reasons kept), and `trigger_key` for every window the gate fired on. Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
+| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `trigger_key` names the trigger of the LLM call that last raised it: the join the reuse check goes through, never part of the read API. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, also never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `system_triggers` | Per `(system_id, trigger_key)`: first/last seen, `count`, and `last_called_at` — the last *paid* call, which the reuse window is measured from. Pruned past `FINDING_RETENTION`. |
-| `trigger_aliases` | `alias_key → canonical_key`, always pointing straight at a root, so resolving is one lookup and the read API's filter can be one join. Written by `MergeTrigger`, which also rewrites every alias of the merged root; read by every lookup and by the findings reads. Never pruned. |
-| `trigger_decisions` | Append-only audit trail of operator actions on triggers: actor, action, detail, the trigger's `first_prompt_version`, time. Exists because the `UPDATE` on `triggers` destroys the value that would say who changed it. Never pruned. |
+| `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every operator decision. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
+| `class_decisions` | Append-only audit trail of operator actions on classes: actor, action, detail, the class's `first_prompt_version`, time. Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
@@ -1572,6 +1577,18 @@ Changing the fingerprint formula changes every existing finding's identity
 fleet-wide — that must be a deliberate versioned migration (bump the
 `fingerprint.Version` prefix), never a silent behavior change.
 
+**The class is the fingerprint minus the system.**
+`fingerprint.Class(modules, evidence, category)` hashes the same fields the
+same way, with the same `Version`, but no `system_id`, and returns
+`Version + ":" + hex`. The analyzer computes `EvidenceKey` once per finding
+and passes it to both, so the two cannot drift. Module ids are already
+families on that path, so "database connection timeout" on thirty NethVoice
+clusters is thirty findings and **one** class. A class inherits every
+property above: derived from cited templates only, never from model text,
+and renamed visibly by a `Version` bump. A finding's class never changes —
+unlike its `trigger_key`, which follows the latest call. It is what an
+operator reviews; see "Review: per finding class".
+
 ## Cost control: the gate
 
 `gate.Evaluate` is the only thing standing between this design and the ~$16k/
@@ -1723,28 +1740,30 @@ deduplicated like the fingerprint:
   because an error surge and an info surge are not one condition;
 - one security bit, `security_new || security_surge`.
 
-It carries **no `system_id`**: a trigger is a fleet-wide name, reviewed once.
-It is not a finding's identity and does not replace one —
+It carries **no `system_id`**: a trigger is a fleet-wide name for a
+condition. It is not a finding's identity and does not replace one —
 `fingerprint.Compute` still names what the model concluded, per system, and
 is unchanged. `trigger.Version` prefixes every key; changing what the key
-hashes renames every trigger and orphans every decision recorded against the
-old names, so, like `fingerprint.Version`, it is bumped deliberately.
+hashes renames every trigger, so every system's reuse memory misses once and
+every remembered condition is paid for again — like `fingerprint.Version`, it
+is bumped deliberately.
+
+The security bit is cost, not visibility. It keeps a security window and a
+non-security window over the same lines on distinct keys, so a reuse never
+answers one with the other's call. It decides nothing about who sees what a
+call raised: that is the finding class's review, below.
 
 **The lookup** runs in `analyzer.Process` after the gate fires and before
 `OpenFindings`/`Render` (step 7 above), and nowhere else — `gate`, `trigger`,
 `fingerprint` and `prompt` stay pure. In order:
 
-1. Resolve the key through `trigger_aliases` to its root. Aliases always point
-   at a root, so this is one lookup.
-2. **Ignored**, and `ignore_until` in the future → no call,
-   `suppressed_by = trigger_ignored`. An ignore is fleet-wide, always expires
-   (`IgnoreTrigger` refuses a past expiry), and is recorded in
-   `trigger_decisions` in the same transaction.
-3. **Reuse** → no call, `suppressed_by = trigger_hit`, when this system paid
-   for the same root within `TRIGGER_REUSE_WINDOW` (default 24h) of
+1. Read this system's `system_triggers` row for the key (`LookupTrigger`) and
+   count its findings the last paid call raised.
+2. **Reuse** → no call, `suppressed_by = trigger_hit`, when this system paid
+   for the same key within `TRIGGER_REUSE_WINDOW` (default 24h) of
    `system_triggers.last_called_at` **and** every finding that call raised is
    still open. The findings are bumped as a recurrence would bump them.
-4. Otherwise call. Only a successful call writes `last_called_at` and links its
+3. Otherwise call. Only a successful call writes `last_called_at` and links its
    findings (`findings.trigger_key`).
 
 Four rules in that sequence are load-bearing:
@@ -1762,91 +1781,97 @@ Four rules in that sequence are load-bearing:
   trigger and reported nothing; 42% of paid calls on the dev fleet touched no
   finding at all, and under an "open finding required" rule none of them could
   ever have been reused.
-- **Reuse is per system; an ignore is fleet-wide.** A trigger paid for on one
-  cluster is still analysed on the next — the answer may be specific to it —
-  while an operator's "this is noise" is a statement about the condition.
-
-**Security triggers** (the key's security bit) are delivered without review
-(`visibility = customer` on first sight) and can never be ignored:
-`IgnoreTrigger` refuses one with `ErrSecurityTrigger`, and the analyzer does
-not honour an ignore on one even if the store held it — two locks, the same
-arrangement as Threat Shield's allowlist normalisation. They can be reused.
+- **Reuse is per system.** A trigger paid for on one cluster is still
+  analysed on the next — the answer may be specific to it. The system alone
+  decides when to pay: no operator decision reaches this lookup.
 
 **A suppressed window is recorded like a gated-out one.** `record()` writes
 its templates and baselines, for the reason the budget's suppressed windows
 do: a system that never learns what it saw sees it as novel again next
-window. After an ignore, those templates are known on that system, so
-`ignore_until` expiring matters for other systems and for deviation keys,
-not for the same novelty on the same system. Every window still has exactly
-one `analyses` row.
+window. Every window still has exactly one `analyses` row.
 
 **Operator decisions never reach the prompt.** The prompt is rendered from
-the bundle and `OpenFindings` only, whatever a finding's trigger or its
-visibility. `OpenFindings` deliberately does not join `triggers`, so no
-decision can ride along on the findings it returns.
+the bundle and `OpenFindings` only, whatever a finding's class or its
+visibility. `OpenFindings` deliberately does not join `finding_classes`, so
+no decision can ride along on the findings it returns.
 `TestDecisionsNeverReachThePrompt` renders the same window with and without
-an ignore, an internal visibility, a severity override and a `doc_ref` on the
-trigger behind an open finding and requires byte-identical prompts.
+an internal visibility, a security tag, a severity override and a `doc_ref`
+on the class behind an open finding and requires byte-identical prompts.
 
-`TRIGGER_REUSE_WINDOW=0` disables reuse; ignores still apply. The counter is
-`insightsd_trigger_suppressions_total{reason}`, labelled only with the two
-`suppressed_by` values — never a trigger key.
+`TRIGGER_REUSE_WINDOW=0` disables reuse. The counter is
+`insightsd_trigger_suppressions_total{reason}`, labelled only with the
+`suppressed_by` value (`trigger_hit`) — never a trigger key.
 
-### Review
+## Review: per finding class
 
-A trigger is also the unit an operator reviews, once, fleet-wide, on
-`ui/logs`' `/review`. Every decision is one `logsstore.Store` method, one
-transaction that resolves the key to its root, applies the change and
-appends a `trigger_decisions` row (`Store.decision`), so a trigger never
-changes without the record of who changed it. **A decision applies to the
-whole trigger** — every finding raised under the root or any key merged into
-it, on every system, including recurrences — because decisions live on
-`triggers` and are joined at read time; nothing is copied onto `findings`.
+The operator reviews **finding classes**, once each, fleet-wide, on
+`ui/logs`' `/review`. A class is a finding's fingerprint without its system
+(`fingerprint.Class`, see "Finding identity"), so the same conclusion on
+every cluster that reaches it is one row to decide.
+
+It is the class and not the trigger because a trigger names *why the LLM was
+called*, not *what it found*. On the dev fleet one nethvoice deviation
+trigger (`nethvoice/3` and `nethvoice/4` surging) carried "High Log Volume
+Detected", "Template Not Found Detected" and "Database Connection Timeout
+Warning" — three unrelated conclusions under one decision, which an operator
+cannot judge. The split is therefore: **the system alone decides when to
+pay** (the gate and the trigger memory above), **the operator decides what
+the customer sees**, per class.
+
+Every decision is one `logsstore.Store` method, one transaction that refuses
+an unknown class (`ErrUnknownClass`, a `404` on the route, no audit row),
+applies the change and appends a `class_decisions` row (`Store.classDecision`),
+so a class never changes without the record of who changed it. **A decision
+applies to the whole class** — every finding in it, on every system,
+including recurrences and systems that raise it for the first time later —
+because decisions live on `finding_classes` and are joined at read time;
+nothing is copied onto `findings`.
 
 | Route | Store method | Effect |
 |---|---|---|
-| `/review/deliver`, `/review/internal` | `SetTriggerVisibility` | `visibility = customer`/`operator`. Never back to `pending` (`ErrInvalidVisibility`) |
-| `/review/ignore` | `IgnoreTrigger` | 1–365 days; see the lookup above |
-| `/review/merge` | `MergeTrigger` | the key's root becomes an alias of the target's root |
-| `/review/severity` | `SetTriggerSeverity` | `severity_override`, `""` clears |
-| `/review/doc-ref` | `SetTriggerDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
+| `/review/deliver`, `/review/internal` | `SetClassVisibility` | `visibility = customer`/`operator`. Never back to `pending` (`ErrInvalidVisibility`) |
+| `/review/security` | `SetClassSecurity` | the `security` tag, `on`/`off` — nothing else is accepted |
+| `/review/severity` | `SetClassSeverity` | `severity_override`, `""` clears |
+| `/review/doc-ref` | `SetClassDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
 
 The routes follow `internal/ui/threat`'s discipline exactly — enumerated in
 `writableRoutes`, `POST` only, `chrome.AuthenticateWrite` (admin key, then the
 cross-site refusal), parameters from the body only, registered only with
-`ADMIN_API_KEY` — and `/review/audit` reads the trail back.
+`ADMIN_API_KEY` — and `/review/audit` reads the trail back. There is no
+ignore and no merge: a class has no cost to silence (paying is the gate's
+business) and no second name to fold into (it is derived, not chosen).
 
 Rules that are not visible from the code:
 
-- **Pending is withheld.** New non-security triggers start `pending` and
-  `ListFindings` requires `customer`, so every new non-security finding waits
-  for review, and a finding with no trigger key (older than Phase 1) is never
-  delivered. With no `ADMIN_API_KEY` nothing can be delivered at all. This was
-  chosen over "deliver unless hidden": review is the point, and an unreviewed
-  AI finding reaching a customer is the failure it exists to prevent.
-- **Security triggers skip review and cannot be silenced.** They are born
-  `customer`; `SetTriggerVisibility`, `IgnoreTrigger` and `MergeTrigger` (on
-  either side) refuse one with `ErrSecurityTrigger`. The merge refusal is not
-  limited to mismatched security bits: a security key merged into another
-  would inherit that root's decisions, so any merge touching one is refused
-  rather than reasoned about. A severity override and a `doc_ref` are allowed
-  — they change how it reads, not whether it arrives.
-- **Aliases always name a root.** `MergeTrigger` inserts `root → target` and
-  rewrites every alias of `root` to `target` in the same transaction, so
-  resolution stays one lookup (the analyzer's and the read API's) and a cycle
-  cannot be stored: asking for one means merging two keys that already share
-  a root, which `ErrMergeCycle` refuses.
-- **A merge moves decisions, not memory.** `system_triggers`,
-  `distinct_systems` and `count` stay on the key they were recorded under, so
-  after a merge the next window under the merged key pays once more per
-  system before reuse resumes against the root. Rewriting the per-system
-  memory would buy one call per system and cost a second, harder
-  transaction.
+- **Pending is withheld, security included.** `UpsertFinding` creates a
+  class `pending` on first sight, in the same transaction as the finding,
+  and `ListFindings` requires `customer`, so every new class waits for
+  review. A finding with no class key is never delivered, and never mints a
+  `finding_classes` row with an empty key. With no `ADMIN_API_KEY` nothing
+  can be delivered at all. This was chosen over "deliver unless hidden":
+  review is the point, and an unreviewed AI finding reaching a customer is
+  the failure it exists to prevent.
+- **Security is a tag, not a bypass.** A security class waits in `pending`
+  like any other and can be kept internal. The gate's security conditions
+  (`security_new`, `security_surge`) are untouched — they decide *cost*,
+  which is not the same question as *visibility*: a security finding is as
+  much an unreviewed AI conclusion as any other, and delivering it unread
+  would be the failure review exists to prevent.
+- **The tag is the edge's on first sight and the operator's after.** The
+  upsert seeds `security` from the edge's category and never resets it on
+  conflict, so an operator's `off` survives the next recurrence. It is
+  returned to the customer as `Finding.security`; the fingerprint and class
+  still hash the edge's category, so the tag never changes identity.
+- **A decision changes what the customer reads, never the finding row.**
+  The severity override replaces `severity` in `ListFindings` only; the
+  stored severity is what `prompt.Render` prints, and `OpenFindings` joins
+  nothing.
 - **`/review/stats` partitions by `first_prompt_version`**: pending,
-  delivered, internal and merged, with security counted apart because it
-  reflects no judgement; "ignored" (ever ignored, from the trail) overlaps.
-  It counts retained triggers only, and undecided ones are pruned with the
-  templates, so an old version's pending count shrinks.
+  delivered and internal partition a version's classes, and "security"
+  overlaps them, counting tagged classes whatever their visibility. It is the
+  number to watch when the prompt changes. It counts retained classes only,
+  and an undecided class is pruned once its findings are (see "Maintenance
+  pass"), so an old version's pending count shrinks.
 
 ## Degradation and failure modes
 
@@ -1863,7 +1888,7 @@ run.
 | LLM provider returns a permanent error | the window is finalized and closed — retrying would hit the same wall forever |
 | spend cap reached | the gate narrows to security-only. Genuinely cheap, because the security condition is novelty-scoped |
 | per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates and baselines are still recorded |
-| trigger already paid for, or ignored | the window is recorded `gated = 1`, `suppressed_by = trigger_hit` or `trigger_ignored`, reasons kept, no cost — templates and baselines recorded; a hit bumps the findings the last call raised |
+| trigger already paid for on this system | the window is recorded `gated = 1`, `suppressed_by = trigger_hit`, reasons kept, no cost — templates and baselines recorded, and the findings the last call raised bumped |
 | consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
 | threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
 | process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |
