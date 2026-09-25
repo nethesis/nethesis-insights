@@ -715,11 +715,12 @@ successful no-op, not an error.
   `TestFindingClassIgnoresSystem`, `TestSecurityFindingsWaitForReview`,
   `TestSecurityTagReachesTheReadAPI`, `TestSecurityTagSurvivesRecurrence`,
   `TestDecisionsNeverReachThePrompt`,
-  `TestOperatorOnlyFindingsNeverReachTheReadAPI` and
-  `TestSeverityOverrideIsAppliedOnlyWhenReadForTheCustomer` are named so
-  deleting one is visible. The reuse window counts from the last paid call
-  (`TestReuseWindowCountsFromTheLastPaidCall`), and a call that raised nothing
-  is reusable (`TestAnEmptyVerdictIsReused`).
+  `TestOperatorOnlyFindingsNeverReachTheReadAPI`,
+  `TestSeverityOverrideIsAppliedOnlyWhenReadForTheCustomer`,
+  `TestClassDecisionIsAudited` and `TestVisibilityNeverReturnsToPending` are
+  named so deleting one is visible. The reuse window counts from the last
+  paid call (`TestReuseWindowCountsFromTheLastPaidCall`), and a call that
+  raised nothing is reusable (`TestAnEmptyVerdictIsReused`).
 - `sizing`: table-driven, no fixtures. `TestSanitizeAcceptsEveryMetricKey` and
   `TestSanitizeRejectsEveryNonNumericValue` are the executable form of the
   open-vocabulary and privacy rules, following the
