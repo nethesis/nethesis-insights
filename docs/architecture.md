@@ -1841,6 +1841,19 @@ cross-site refusal), parameters from the body only, registered only with
 ignore and no merge: a class has no cost to silence (paying is the gate's
 business) and no second name to fold into (it is derived, not chosen).
 
+`ListClasses` (`internal/store/logs/review.go`) orders the queue **pending
+first** — a bound parameter compared against `VisibilityPending`, not a
+literal, so it can never drift from the constant — then by systems, then
+findings, then `last_seen`: an operator switching to the "all" view must not
+have to scroll past already-decided classes to find the one still waiting.
+Each row's `Severity` is the *most severe stored severity across the whole
+class*, not the latest finding's own — computed by a SQL `CASE` built from
+`model.Severities` (`severityRankSQL`) so the SQL ranking can never disagree
+with `model.SeverityRank`. `attachClassDetails` fills `Titles` and `Severity`
+in two bounded, aggregated queries (one row per distinct title, one row per
+class via a window function) rather than one row per finding — at fleet
+scale that was ~100k rows for 200 classes.
+
 Rules that are not visible from the code:
 
 - **Pending is withheld, security included.** `UpsertFinding` creates a

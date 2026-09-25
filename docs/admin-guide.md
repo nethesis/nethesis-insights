@@ -1214,8 +1214,11 @@ decision is made once. The class is worked out by the server from the log
 lines the finding is based on, the same way a finding's identity is (section
 6) but leaving the machine out — never from the AI's wording. The review
 queue shows the pending classes by default, the ones seen on the most
-machines at the top, each with the titles and summaries the AI wrote for it
-and the evidence it is based on.
+machines at the top, each with the titles and summaries the AI wrote for it,
+the evidence it is based on, and the most severe severity the AI gave any of
+its findings. Switching to "all" still lists whatever is still pending
+first, ahead of classes already delivered or kept internal, so there is
+never a decided class to scroll past to find one still waiting.
 
 A decision applies to the whole class: every finding in it, on every machine,
 now and whenever it recurs — including machines that report it for the first

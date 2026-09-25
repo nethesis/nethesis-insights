@@ -164,6 +164,53 @@ func TestVisibilityNeverReturnsToPending(t *testing.T) {
 	if err := s.SetClassVisibility(ctx, "v3:a", VisibilityPending, "op", 2000); !errors.Is(err, ErrInvalidVisibility) {
 		t.Fatalf("want ErrInvalidVisibility, got %v", err)
 	}
+
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityCustomer, "op", 2000))
+	// A recurrence of the delivered finding, and a new system raising the
+	// same class for the first time, must not reset it back to pending --
+	// UpsertFinding's ON CONFLICT for finding_classes only ever bumps
+	// last_seen.
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 3000)
+	seedClassFinding(t, s, "sys2", "fp-a-2", "v3:a", "low", "a", false, 3000)
+
+	c, ok, err := s.GetClass(ctx, "v3:a")
+	mustDo(t, err)
+	if !ok || c.Visibility != VisibilityCustomer {
+		t.Fatalf("visibility reverted to pending on recurrence: %+v", c)
+	}
+}
+
+// The queue lists pending classes first, whatever their systems/findings
+// counts -- an operator reviewing "all" must not have to scroll past
+// already-decided classes to find the one still waiting.
+func TestListClassesRanksPendingFirst(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-many-1", "v3:many", "low", "m", false, 1000)
+	seedClassFinding(t, s, "sys2", "fp-many-2", "v3:many", "low", "m", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-few", "v3:few", "low", "f", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:many", VisibilityCustomer, "op", 2000))
+
+	rows, err := s.ListClasses(ctx, ClassFilter{})
+	mustDo(t, err)
+	if len(rows) != 2 || rows[0].Key != "v3:few" || rows[1].Key != "v3:many" {
+		t.Fatalf("pending class did not rank first: %+v", rows)
+	}
+}
+
+// The queue's Severity column is the most severe stored severity across the
+// class's findings, not the latest finding's own severity.
+func TestListClassesCarriesTheMostSevereFinding(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-lo", "v3:mixed", "low", "lo", false, 1000)
+	seedClassFinding(t, s, "sys2", "fp-hi", "v3:mixed", "high", "hi", false, 2000)
+
+	rows, err := s.ListClasses(ctx, ClassFilter{})
+	mustDo(t, err)
+	if len(rows) != 1 || rows[0].Severity != "high" {
+		t.Fatalf("want Severity=high, got %+v", rows)
+	}
 }
 
 func TestDecisionOnAnUnknownClassIsRefused(t *testing.T) {

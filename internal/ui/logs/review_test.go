@@ -233,6 +233,22 @@ func TestReviewHasNoIgnoreOrMergeRoute(t *testing.T) {
 	}
 }
 
+// The queue table and the class dialog must both show what the AI's own
+// severity was -- not just an override, which most classes never get.
+func TestReviewShowsTheAIsSeverity(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:aaaa", Visibility: logsstore.VisibilityPending}, Severity: "high"},
+	}
+	body := get(t, newTestServer(t, r, nil), "/review?view=all").Body.String()
+	if !strings.Contains(body, `data-severity="high"`) {
+		t.Fatalf("review queue did not show the AI's severity: %s", body)
+	}
+	if !strings.Contains(body, "AI severity") {
+		t.Fatalf("class dialog is missing the AI severity label: %s", body)
+	}
+}
+
 // The queue opens on pending classes; a link to one class (from a finding or
 // the audit trail) finds it whatever it was decided.
 func TestReviewQueueDefaultsToPending(t *testing.T) {

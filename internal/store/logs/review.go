@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
 // The operator review reads: the class queue behind ui/logs' /review, the
@@ -21,6 +23,22 @@ import (
 // of one problem.
 const reviewTitles = 3
 
+// severityRankSQL is a SQL CASE ranking findings.severity the same way
+// model.SeverityRank does -- critical first -- built from model.Severities
+// rather than spelled out a second time, so the SQL ranking and the Go one
+// cannot drift apart. A severity outside model.Severities ranks last.
+var severityRankSQL = buildSeverityRankSQL()
+
+func buildSeverityRankSQL() string {
+	var b strings.Builder
+	b.WriteString("CASE severity")
+	for i, sev := range model.Severities {
+		fmt.Fprintf(&b, " WHEN '%s' THEN %d", sev, i)
+	}
+	fmt.Fprintf(&b, " ELSE %d END", len(model.Severities))
+	return b.String()
+}
+
 // ClassFilter selects ListClasses' rows. Visibility "" means every
 // visibility; Key is a LIKE prefix, as on the findings page.
 type ClassFilter struct {
@@ -31,13 +49,16 @@ type ClassFilter struct {
 
 // ClassRow is one class as the review queue shows it. The key is a hash, so
 // what an operator recognises it by is what the model wrote: up to
-// reviewTitles distinct titles across systems, and the latest finding's
+// reviewTitles distinct titles across systems, the most severe stored
+// severity across the class's findings (never the model's wording -- the
+// class carries no free-text severity of its own), and the latest finding's
 // summary, suggested action, modules and evidence.
 type ClassRow struct {
 	Class
 	Systems         int
 	Findings        int
 	Titles          []string
+	Severity        string
 	Summary         string
 	SuggestedAction string
 	Modules         []string
@@ -45,9 +66,11 @@ type ClassRow struct {
 }
 
 // ListClasses returns classes ranked the way the review queue wants them:
-// the class raised on the most systems first, then the one with the most
-// findings. Counts are derived from findings rather than stored, so they
-// cannot drift from what is actually retained.
+// pending classes first -- an operator reviewing "all" must not have to
+// scroll past already-decided classes to find the one still waiting -- then
+// the class raised on the most systems, then the one with the most findings.
+// Counts are derived from findings rather than stored, so they cannot drift
+// from what is actually retained.
 func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.class_key, c.visibility, c.security, c.severity_override, c.doc_ref,
@@ -57,9 +80,9 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		FROM finding_classes c
 		WHERE (? = '' OR c.visibility = ?)
 		  AND (? = '' OR c.class_key LIKE ?)
-		ORDER BY systems DESC, findings DESC, c.last_seen DESC, c.class_key
+		ORDER BY (c.visibility = ?) DESC, systems DESC, findings DESC, c.last_seen DESC, c.class_key
 		LIMIT ?
-	`, f.Visibility, f.Visibility, f.Key, likePattern(f.Key), clampLimit(f.Limit))
+	`, f.Visibility, f.Visibility, f.Key, likePattern(f.Key), VisibilityPending, clampLimit(f.Limit))
 	if err != nil {
 		return nil, fmt.Errorf("store: list classes: %w", err)
 	}
@@ -89,10 +112,17 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 	return out, nil
 }
 
-// attachClassDetails fills Titles, Summary, SuggestedAction, Modules and
-// Evidence for rows in one query: up to reviewTitles distinct titles across
-// systems, most recently seen first, and the rest from the most recently
-// seen finding in the class.
+// attachClassDetails fills Titles, Severity, Summary, SuggestedAction,
+// Modules and Evidence for rows in two bounded queries -- never one row per
+// finding, which at fleet scale is ~100k rows for 200 classes:
+//
+//   - titles: one row per distinct (class_key, title), aggregated in SQL,
+//     most recently seen first.
+//   - detail: one row per class_key (a window function partitioned on it),
+//     carrying the latest finding's summary/suggested_action/modules/evidence
+//     and the whole class's most severe stored severity -- a window
+//     aggregate sees every partitioned row, not just the one ROW_NUMBER
+//     keeps, so both come out of a single pass.
 func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -106,48 +136,70 @@ func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 	in := strings.TrimSuffix(strings.Repeat("?,", len(rows)), ",")
 
 	// The IN list is built from placeholders only, never from values.
-	res, err := s.db.QueryContext(ctx, `
-		SELECT class_key, title, summary, suggested_action, modules, evidence
-		FROM findings WHERE class_key IN (`+in+`) ORDER BY class_key, last_seen DESC, id
+	titleRows, err := s.db.QueryContext(ctx, `
+		SELECT class_key, title, max(last_seen) AS ls
+		FROM findings WHERE class_key IN (`+in+`)
+		GROUP BY class_key, title
+		ORDER BY class_key, ls DESC, title
+	`, args...) // #nosec G202 -- only "?" placeholders are concatenated
+	if err != nil {
+		return fmt.Errorf("store: class titles: %w", err)
+	}
+	defer func() { _ = titleRows.Close() }()
+
+	for titleRows.Next() {
+		var key, title string
+		var lastSeen int64
+		if err := titleRows.Scan(&key, &title, &lastSeen); err != nil {
+			return fmt.Errorf("store: scan class title: %w", err)
+		}
+		r := index[key]
+		if r == nil || len(r.Titles) >= reviewTitles {
+			continue
+		}
+		r.Titles = append(r.Titles, title)
+	}
+	if err := titleRows.Err(); err != nil {
+		return fmt.Errorf("store: class titles: %w", err)
+	}
+
+	detailRows, err := s.db.QueryContext(ctx, `
+		SELECT class_key, summary, suggested_action, modules, evidence, best_rank
+		FROM (
+			SELECT class_key, summary, suggested_action, modules, evidence,
+			       ROW_NUMBER() OVER (PARTITION BY class_key ORDER BY last_seen DESC, id) AS rn,
+			       MIN(`+severityRankSQL+`) OVER (PARTITION BY class_key) AS best_rank
+			FROM findings WHERE class_key IN (`+in+`)
+		) WHERE rn = 1
 	`, args...) // #nosec G202 -- only "?" placeholders are concatenated
 	if err != nil {
 		return fmt.Errorf("store: class details: %w", err)
 	}
-	defer func() { _ = res.Close() }()
+	defer func() { _ = detailRows.Close() }()
 
-	filled := map[string]bool{}
-	for res.Next() {
-		var key, title, summary, suggestedAction, modulesJSON, evidenceJSON string
-		if err := res.Scan(&key, &title, &summary, &suggestedAction, &modulesJSON, &evidenceJSON); err != nil {
+	for detailRows.Next() {
+		var key, summary, suggestedAction, modulesJSON, evidenceJSON string
+		var bestRank int
+		if err := detailRows.Scan(&key, &summary, &suggestedAction, &modulesJSON, &evidenceJSON, &bestRank); err != nil {
 			return fmt.Errorf("store: scan class detail: %w", err)
 		}
 		r := index[key]
 		if r == nil {
 			continue
 		}
-		if !filled[key] {
-			r.Summary = summary
-			r.SuggestedAction = suggestedAction
-			if err := json.Unmarshal([]byte(modulesJSON), &r.Modules); err != nil {
-				return fmt.Errorf("store: unmarshal class modules: %w", err)
-			}
-			if err := json.Unmarshal([]byte(evidenceJSON), &r.Evidence); err != nil {
-				return fmt.Errorf("store: unmarshal class evidence: %w", err)
-			}
-			filled[key] = true
+		r.Summary = summary
+		r.SuggestedAction = suggestedAction
+		if bestRank >= 0 && bestRank < len(model.Severities) {
+			r.Severity = model.Severities[bestRank]
 		}
-		found := false
-		for _, t := range r.Titles {
-			if t == title {
-				found = true
-				break
-			}
+		if err := json.Unmarshal([]byte(modulesJSON), &r.Modules); err != nil {
+			return fmt.Errorf("store: unmarshal class modules: %w", err)
 		}
-		if !found && len(r.Titles) < reviewTitles {
-			r.Titles = append(r.Titles, title)
+		if err := json.Unmarshal([]byte(evidenceJSON), &r.Evidence); err != nil {
+			return fmt.Errorf("store: unmarshal class evidence: %w", err)
 		}
 	}
-	return res.Err()
+	return detailRows.Err()
 }
 
 // ClassStatsRow is /review/stats' row: what one prompt.Version raised and

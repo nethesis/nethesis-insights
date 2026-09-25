@@ -23,7 +23,7 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <table class="striped">
 <thead>
 <tr>
-<th scope="col">Class</th><th scope="col">Visibility</th><th scope="col" class="num">Systems</th>
+<th scope="col">Class</th><th scope="col">Severity</th><th scope="col">Visibility</th><th scope="col" class="num">Systems</th>
 <th scope="col" class="num">Findings</th><th scope="col">Last seen</th>
 </tr>
 </thead>
@@ -49,6 +49,7 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <dt>Evidence</dt><dd>{{range .Evidence}}<div class="mono">{{.}}</div>{{else}}&mdash;{{end}}</dd>
 <dt>Visibility</dt><dd><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></dd>
 <dt>Security</dt><dd>{{if .Security}}tagged{{else}}no{{end}}</dd>
+<dt>AI severity</dt><dd>{{if .Severity}}<span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span>{{else}}&mdash;{{end}}</dd>
 <dt>Severity override</dt><dd>{{if .SeverityOverride}}<span class="chip" data-severity="{{.SeverityOverride}}">{{.SeverityOverride}}</span>{{else}}none &mdash; the AI's severity{{end}}</dd>
 <dt>Documentation</dt><dd class="mono">{{if .DocRef}}{{.DocRef}}{{else}}&mdash;{{end}}</dd>
 <dt>First raised by prompt</dt><dd class="mono">{{.FirstPromptVersion}}</dd>
@@ -110,13 +111,14 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <button type="button" class="dialog-dismiss" tabindex="-1" aria-hidden="true" commandfor="class-{{.Key}}" command="close"></button>
 </dialog>
 </td>
+<td>{{if .Severity}}<span class="chip" data-severity="{{.Severity}}">{{.Severity}}</span>{{else}}&mdash;{{end}}</td>
 <td><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></td>
 <td class="num">{{.Systems}}</td>
 <td class="num">{{.Findings}}</td>
 <td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
 </tr>
 {{else}}
-<tr><td colspan="5">no classes match this filter</td></tr>
+<tr><td colspan="6">no classes match this filter</td></tr>
 {{end}}
 </tbody>
 </table>
