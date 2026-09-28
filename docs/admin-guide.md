@@ -39,6 +39,8 @@ see `docs/api/openapi.yaml`.
 - [Metrics](#metrics)
   - [What to scrape](#what-to-scrape)
   - [How the endpoints work](#how-the-endpoints-work)
+  - [The labels are not cosmetic](#the-labels-are-not-cosmetic)
+  - [The dashboard](#the-dashboard)
 - [The operator UI](#the-operator-ui)
   - [Before exposing a dashboard](#before-exposing-a-dashboard)
   - [Signing in](#signing-in)
@@ -643,16 +645,16 @@ removing the server does not unblock anything.
 ### What to scrape
 
 Six endpoints per server. Point Prometheus at every one of them; a sample
-config with these exact job names is further down.
+config with the labels the dashboard needs is further down.
 
-| Job name | URL | What it measures | Access |
+| `service` label | URL | What it measures | Access |
 |---|---|---|---|
-| `nethesis-insights-logs` | `https://<host>/metrics/logs` | the log pipeline (`insightsd`): queue, AI calls and spend | only from the metrics server |
-| `nethesis-insights-threat` | `https://<host>/metrics/threat` | Threat Shield (`threatd`): ingest queue, blocklist pass | only from the metrics server |
-| `nethesis-insights-sizing` | `https://<host>/metrics/sizing` | fleet sizing (`sizingd`): cohort pass | only from the metrics server |
-| `nethesis-insights-authd` | `https://<host>/metrics/authd` | node login checks (`authd`): cache hits, upstream answers | only from the metrics server |
-| `nethesis-insights-traefik` | `https://<host>/metrics/traefik` | the proxy: every request, by route and status | only from the metrics server |
-| `nethesis-insights-node` | `http://<host>:9100/metrics` | the host: CPU, memory, disk, network | only from the metrics server |
+| `logs` | `https://<host>/metrics/logs` | the log pipeline (`insightsd`): queue, AI calls and spend | only from the metrics server |
+| `threat` | `https://<host>/metrics/threat` | Threat Shield (`threatd`): ingest queue, blocklist pass | only from the metrics server |
+| `sizing` | `https://<host>/metrics/sizing` | fleet sizing (`sizingd`): cohort pass | only from the metrics server |
+| `authd` | `https://<host>/metrics/authd` | node login checks (`authd`): cache hits, upstream answers | only from the metrics server |
+| `traefik` | `https://<host>/metrics/traefik` | the proxy: every request, by route and status | only from the metrics server |
+| — | `http://<host>:9100/metrics` | the host: CPU, memory, disk, network | only from the metrics server |
 
 None of them has a password, the same as every other host
 `metrics.nethesis.it` scrapes. What protects them is the source address:
@@ -695,10 +697,10 @@ label alone. Traefik does the same for itself (`traefik_*`) out of the box.
 
 The one deliberate exception is the standard Go runtime and process
 collectors, which keep their conventional unprefixed `go_*` and `process_*`
-names on all four binaries (plus `promhttp_*`): every off-the-shelf Go
-dashboard and every `go_*`-based alert rule queries those exact
+names on all four binaries (plus `promhttp_*`): every off-the-shelf Go or
+Grafana dashboard and every `go_*`-based alert rule queries those exact
 names, and prefixing them would break all of it for the sake of tidiness.
-Tell the two apart by the `job` label your scrape config sets.
+Tell the two apart by the `service` label your scrape config sets.
 
 So, per binary, in addition to `go_*`/`process_*`:
 
@@ -738,34 +740,29 @@ that pass has genuinely succeeded — a `0` there would mean "last succeeded in
 1970" and would trip every staleness alert on every restart
 (`time() - threatd_pass_last_success_timestamp_seconds > 3600`).
 
-A sample Prometheus scrape config, one job per endpoint:
+A sample Prometheus scrape config. It is the shape `metrics.nethesis.it`
+already uses: one job for the five `/metrics/` endpoints, one for the host,
+and two labels on every target.
 
 ```yaml
 scrape_configs:
-  - job_name: nethesis-insights-logs
+  - job_name: nethesis-insights
     scheme: https
     static_configs:
-      - targets: ["insights.example.com"]
-    metrics_path: /metrics/logs
-  - job_name: nethesis-insights-threat
-    scheme: https
-    static_configs: [{targets: ["insights.example.com"]}]
-    metrics_path: /metrics/threat
-  - job_name: nethesis-insights-sizing
-    scheme: https
-    static_configs: [{targets: ["insights.example.com"]}]
-    metrics_path: /metrics/sizing
-  - job_name: nethesis-insights-authd
-    scheme: https
-    static_configs: [{targets: ["insights.example.com"]}]
-    metrics_path: /metrics/authd
-  - job_name: nethesis-insights-traefik
-    scheme: https
-    static_configs: [{targets: ["insights.example.com"]}]
-    metrics_path: /metrics/traefik
-  - job_name: nethesis-insights-node
+      - targets: ["insights.example.com:443"]
+        labels: {system: insights, service: logs, __metrics_path__: /metrics/logs}
+      - targets: ["insights.example.com:443"]
+        labels: {system: insights, service: threat, __metrics_path__: /metrics/threat}
+      - targets: ["insights.example.com:443"]
+        labels: {system: insights, service: sizing, __metrics_path__: /metrics/sizing}
+      - targets: ["insights.example.com:443"]
+        labels: {system: insights, service: authd, __metrics_path__: /metrics/authd}
+      - targets: ["insights.example.com:443"]
+        labels: {system: insights, service: traefik, __metrics_path__: /metrics/traefik}
+  - job_name: node
     static_configs:
       - targets: ["insights.example.com:9100"]
+        labels: {system: insights}
 ```
 
 The last job is the host itself: `node_exporter`'s standard `node_*` metrics,
@@ -773,12 +770,76 @@ straight from port 9100 rather than through the proxy. Like the other five it
 has no password, and unlike them no TLS either; the firewall, which lets in
 only the metrics server, is its only protection (install step 1).
 
-The five `/metrics/` jobs all scrape the same host on the same port, differing only in
-`metrics_path`, so the `job` label is what separates them. That label is what
-you need for the `go_*` and `process_*` metrics, which are identically named
-on all four binaries — `go_goroutines{job="nethesis-insights-authd"}`. Every
-other metric already carries its service in the name, so
-`insightsd_queue_depth` is unambiguous with or without the job label.
+The five `/metrics/` targets all scrape the same host on the same port,
+differing only in the path, and Prometheus keeps no label for the path. So the
+`service` label is what separates them. You need it for the `go_*` and
+`process_*` metrics, which are identically named on all four binaries —
+`go_goroutines{system="insights", service="authd"}`. Every other metric
+already carries its service in the name, so `insightsd_queue_depth` is
+unambiguous with or without the label.
+
+### The labels are not cosmetic
+
+The dashboard in the next section selects on labels, never on the job name,
+so the job can be called anything your Prometheus already uses — on
+`metrics.nethesis.it` the five endpoints sit in its shared `traefik` job, next
+to every other Traefik it scrapes. What it needs on each of the five targets:
+
+- **`system="insights"`**, which keeps every other host out of every panel.
+- **`service`**, set to `logs`, `threat`, `sizing`, `authd` or `traefik`
+  exactly. It names each service on the per-service panels and picks its
+  fixed colour, and `service="traefik"` picks the proxy out of the rest.
+- **`instance`**, which Prometheus sets from the target address by itself.
+  It is what the dashboard's **Server** picker lists, so one dashboard shows
+  one server at a time — the production and development servers never add
+  up into one line. The list is read from the `authd` target, since every
+  server runs `authd`.
+
+Leave one out and the panels that need it go blank — the metrics are still
+collected and every other panel still draws, which is what makes it
+confusing rather than obvious.
+
+One side effect of the `service` label: Traefik exports a `service` label of
+its own, naming its backend. Prometheus keeps the target's and renames
+Traefik's to `exported_service`; the dashboard's per-backend panel reads that
+name.
+
+### The dashboard
+
+`deploy/grafana/nethesis-insights.json` is written to be imported into the
+Grafana you already run. It carries no deployment-specific value: every panel
+queries through a **datasource variable** rather than a fixed datasource id,
+so it resolves to your default Prometheus on first open instead of pointing at
+one that does not exist.
+
+To install it:
+
+1. Copy `deploy/grafana/nethesis-insights.json` to the machine running
+   Grafana, or open it in the repository and copy its contents.
+2. In Grafana, **Dashboards → New → Import**, paste the JSON, **Load**.
+3. Choose a folder if you want one, then **Import**.
+
+There is no datasource field to fill in on that screen — the variable is
+resolved when the dashboard opens, not when it is imported. It appears as
+**Nethesis Insights** (uid `nethesis-insights`) already pointing at your
+default Prometheus, and the **Data source** picker at its top left switches
+it to another one if you have more than one. The **Server** picker next to it
+chooses which Nethesis Insights server the panels show. Twenty-five panels
+in eight rows: overview, HTTP, the log pipeline, Threat Shield, forward auth,
+background passes, the proxy, and the Go runtime. Nothing in it writes anywhere or needs
+a plugin. The host's own `node_*` metrics are not on it; any standard
+node_exporter dashboard shows them from the host's port-9100 target.
+
+Two things it assumes, both satisfied by the scrape config above:
+
+- **The labels**, as the previous subsection describes.
+- **Every one of the five `/metrics/` targets.** A missing target costs you the
+  panels that query it and nothing else — the dashboard does not fail as a
+  whole. On a server running Threat Shield alone, the log pipeline and sizing
+  panels stay empty.
+
+Imported this way the dashboard is an ordinary editable dashboard: Grafana
+owns it, and re-importing a later version of this file overwrites your edits.
 
 ## The operator UI
 

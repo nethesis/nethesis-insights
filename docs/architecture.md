@@ -901,7 +901,7 @@ unprefixed half by accident.
 
 The standard collectors are the deliberate exception: `go_*`, `process_*` and
 promhttp's own `promhttp_*` are registered on the **raw** registry and keep
-their conventional names, because every off-the-shelf Go runtime dashboard
+their conventional names, because every off-the-shelf Go/Grafana dashboard
 and every `go_*`-based alert rule queries those exact strings -- prefixing
 them would buy internal consistency at the cost of breaking all of it. The
 scrape is served from the raw registry, so one response carries both halves.

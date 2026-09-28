@@ -113,7 +113,7 @@ type Registry struct {
 //
 // The standard Go runtime and process collectors are deliberately registered
 // on the RAW registry, so they keep their conventional `go_*` and `process_*`
-// names. Every off-the-shelf Go runtime dashboard and every `go_*`-based
+// names. Every off-the-shelf Go/Grafana dashboard and every `go_*`-based
 // alert rule queries those exact names; prefixing them would buy consistency
 // with this package's own metrics at the cost of breaking all of it.
 // promhttp's own handler-error counter (`promhttp_*`, registered by Handler)
