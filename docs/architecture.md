@@ -1883,6 +1883,22 @@ first** — a bound parameter compared against `VisibilityPending`, not a
 literal, so it can never drift from the constant — then by systems, then
 findings, then `last_seen`: an operator switching to the "all" view must not
 have to scroll past already-decided classes to find the one still waiting.
+That is the *default* order only. A column header on `/review` asks for
+`ClassFilter.Sort`/`Dir`, and then the order is that one column alone, with
+`class_key` breaking ties — pending-first included, since the operator asked
+for that column. The sort is SQL, before the `LIMIT`: the page is capped at
+200 rows, and sorting in Go would only reorder the default top 200. Each key
+maps to a fixed expression in `classSortSQL`, the whole whitelist — nothing
+from the request reaches the SQL, and an unknown key or direction leaves the
+default order. Every expression grows in its column's "more" direction, so
+descending is always "most first"; severity is therefore a *weight*
+(critical highest) rather than the rank `severityRankSQL` returns. Title and
+module sort on the latest finding (the module on its stored JSON text, whose
+first element is the module the row shows), severity on the whole class's
+most severe finding — each a correlated subquery over `idx_findings_class`,
+evaluated only when that column is chosen. A decided class whose findings were all
+pruned has no title and no module; `NULLS LAST` keeps it at the bottom in
+both directions instead of heading an A-to-Z sort.
 Each row's `Severity` is the *most severe stored severity across the whole
 class*, not the latest finding's own — computed by a SQL `CASE` built from
 `model.Severities` (`severityRankSQL`) so the SQL ranking can never disagree

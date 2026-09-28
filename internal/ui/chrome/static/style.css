@@ -108,7 +108,18 @@ button.linklike {
   text-align: left;
   overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
   text-decoration: underline;
+}
+
+/* Chromium lays a button out around an inner box that text-overflow does
+   not reach, so it clips the label without the ellipsis; a block span inside
+   carries the ellipsis itself. */
+button.linklike > span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 nav a.active,

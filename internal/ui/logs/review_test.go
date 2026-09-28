@@ -356,3 +356,145 @@ func TestReviewHasADismissedView(t *testing.T) {
 		t.Fatalf("dismissed view filtered on %q", r.classSeen.Visibility)
 	}
 }
+
+// Every column header is a plain link that sorts the queue, carrying the
+// current view and key; the active column flips direction and says which
+// way it is sorted, the others sort in their own default direction.
+func TestReviewHeadersSortTheQueue(t *testing.T) {
+	r := seededReader()
+	h := newTestServer(t, r, nil)
+	body := get(t, h, "/review?view=all&key=v3:a&sort=systems&dir=desc").Body.String()
+	if r.classSeen.Sort != logsstore.ClassSortSystems || r.classSeen.Dir != logsstore.SortDesc {
+		t.Fatalf("the store was asked for %+v, want systems desc", r.classSeen)
+	}
+	for _, want := range []string{
+		// The active column flips, and is marked.
+		`<th scope="col" class="num" aria-sort="descending"><a href="/review?dir=asc&amp;key=v3%3Aa&amp;sort=systems&amp;view=all">Systems</a> <span aria-hidden="true">▼</span></th>`,
+		// Text sorts A to Z first; numbers, dates and severity most first.
+		`<th scope="col"><a href="/review?dir=asc&amp;key=v3%3Aa&amp;sort=class&amp;view=all">Class</a></th>`,
+		`<a href="/review?dir=asc&amp;key=v3%3Aa&amp;sort=module&amp;view=all">Module</a>`,
+		`<a href="/review?dir=desc&amp;key=v3%3Aa&amp;sort=severity&amp;view=all">Severity</a>`,
+		`<a href="/review?dir=asc&amp;key=v3%3Aa&amp;sort=visibility&amp;view=all">Visibility</a>`,
+		`<a href="/review?dir=desc&amp;key=v3%3Aa&amp;sort=findings&amp;view=all">Findings</a>`,
+		`<a href="/review?dir=desc&amp;key=v3%3Aa&amp;sort=last_seen&amp;view=all">Last seen</a>`,
+		// The filter form keeps the sort.
+		`<input type="hidden" name="sort" value="systems"><input type="hidden" name="dir" value="desc">`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review page lacks %s", want)
+		}
+	}
+	if n := strings.Count(body, "aria-sort="); n != 1 {
+		t.Errorf("%d columns marked sorted, want 1", n)
+	}
+
+	body = get(t, h, "/review?sort=systems&dir=asc").Body.String()
+	if !strings.Contains(body, `aria-sort="ascending"><a href="/review?dir=desc&amp;sort=systems&amp;view=pending">Systems</a> <span aria-hidden="true">▲</span>`) {
+		t.Error("an ascending column does not flip to descending")
+	}
+}
+
+func TestReviewSanitizesTheSort(t *testing.T) {
+	for _, tc := range []struct {
+		query, sort, dir string
+	}{
+		{"", "", ""},
+		{"sort=bogus&dir=asc", "", ""},
+		{"sort=title;DROP&dir=desc", "", ""},
+		{"sort=severity", logsstore.ClassSortSeverity, logsstore.SortDesc},
+		{"sort=class&dir=sideways", logsstore.ClassSortTitle, logsstore.SortAsc},
+		{"sort=last_seen&dir=asc", logsstore.ClassSortLastSeen, logsstore.SortAsc},
+	} {
+		r := seededReader()
+		body := get(t, newTestServer(t, r, nil), "/review?"+tc.query).Body.String()
+		if r.classSeen.Sort != tc.sort || r.classSeen.Dir != tc.dir {
+			t.Errorf("%q: store asked for %q %q, want %q %q", tc.query, r.classSeen.Sort, r.classSeen.Dir, tc.sort, tc.dir)
+		}
+		if tc.sort == "" && strings.Contains(body, "aria-sort=") {
+			t.Errorf("%q: a column is marked sorted in the default order", tc.query)
+		}
+	}
+}
+
+// The Module column shows the latest finding's first module, the host
+// bucket by name, and how many more the dialog lists.
+func TestReviewShowsTheModuleColumn(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:host", Visibility: logsstore.VisibilityPending}, Modules: []string{""}},
+		{Class: logsstore.Class{Key: "v3:many", Visibility: logsstore.VisibilityPending}, Modules: []string{"mail1", "sshd", "web"}},
+		{Class: logsstore.Class{Key: "v3:none", Visibility: logsstore.VisibilityPending}},
+	}
+	body := get(t, newTestServer(t, r, nil), "/review").Body.String()
+	for _, want := range []string{
+		`<td class="mono">(host)</td>`,
+		`<td class="mono">mail1 +2</td>`,
+		`<td class="mono">&mdash;</td>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review page lacks %s", want)
+		}
+	}
+	r.classes = nil
+	if body := get(t, newTestServer(t, r, nil), "/review").Body.String(); !strings.Contains(body, `<td colspan="7">`) {
+		t.Error("the empty row does not span the Module column")
+	}
+}
+
+// The class name is left to CSS to cut, so the whole title is in the button
+// and in its tooltip; with no title the tooltip is the key.
+func TestReviewClassNameIsNotPreTruncated(t *testing.T) {
+	long := strings.Repeat("disk filling ", 10)
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:long", Visibility: logsstore.VisibilityPending}, Titles: []string{long}},
+		{Class: logsstore.Class{Key: "v3:untitled", Visibility: logsstore.VisibilityPending}},
+	}
+	body := get(t, newTestServer(t, r, nil), "/review").Body.String()
+	if !strings.Contains(body, `class="linklike" title="`+long+`" commandfor="class-v3:long" command="show-modal"><span>`+long+`</span></button>`) {
+		t.Error("the class title was cut before CSS could ellipsize it")
+	}
+	if !strings.Contains(body, `class="linklike" title="v3:untitled"`) {
+		t.Error("an untitled class does not fall back to its key")
+	}
+}
+
+// A decision returns to the sort order it was taken from, re-validated.
+func TestReviewDecisionKeepsTheSort(t *testing.T) {
+	for _, tc := range []struct {
+		sort, dir, want string
+	}{
+		{"severity", "asc", "/review?dir=asc&key=v3%3Aaa&sort=severity&view=all"},
+		{"findings", "sideways", "/review?dir=desc&key=v3%3Aaa&sort=findings&view=all"},
+		{"bogus", "asc", "/review?key=v3%3Aaa&view=all"},
+		{"", "", "/review?key=v3%3Aaa&view=all"},
+	} {
+		h := newWriteTestServer(t, seededReader(), &fakeWriter{})
+		form := url.Values{"key": {"v3:aaaa"}, "view": {"all"}, "filter": {"v3:aa"}, "sort": {tc.sort}, "dir": {tc.dir}}
+		rec := do(h, writeReq("/review/deliver", form))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("got %d, want 303", rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != tc.want {
+			t.Errorf("sort %q %q redirected to %q, want %q", tc.sort, tc.dir, loc, tc.want)
+		}
+	}
+}
+
+// Every decision form carries the sort back, or the redirect could not --
+// and so does the filter form.
+func TestReviewDecisionFormsCarryTheSort(t *testing.T) {
+	body := get(t, newWriteTestServer(t, seededReader(), &fakeWriter{}), "/review?sort=module&dir=desc").Body.String()
+	forms := strings.Count(body, `method="post"`) + strings.Count(body, `method="get"`)
+	if forms < 2 {
+		t.Fatal("no decision forms rendered")
+	}
+	for _, want := range []string{
+		`<input type="hidden" name="sort" value="module">`,
+		`<input type="hidden" name="dir" value="desc">`,
+	} {
+		if n := strings.Count(body, want); n != forms {
+			t.Errorf("%d of %d forms carry %s", n, forms, want)
+		}
+	}
+}

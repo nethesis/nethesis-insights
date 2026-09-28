@@ -41,20 +41,96 @@ func lookupReviewView(key string) reviewView {
 	return reviewViews[0]
 }
 
+// reviewColumn is one sortable column of the review queue's table.
+type reviewColumn struct {
+	Sort       string // the ?sort= value, a logsstore.ClassSort* key
+	Label      string
+	DefaultDir string // the direction a first click sorts in
+	Num        bool   // right-aligned, like every count column
+}
+
+// reviewColumns is the queue table's header, in display order. A first click
+// sorts numbers, dates and severity "most first" and text A to Z.
+var reviewColumns = []reviewColumn{
+	{Sort: logsstore.ClassSortTitle, Label: "Class", DefaultDir: logsstore.SortAsc},
+	{Sort: logsstore.ClassSortModule, Label: "Module", DefaultDir: logsstore.SortAsc},
+	{Sort: logsstore.ClassSortSeverity, Label: "Severity", DefaultDir: logsstore.SortDesc},
+	{Sort: logsstore.ClassSortVisibility, Label: "Visibility", DefaultDir: logsstore.SortAsc},
+	{Sort: logsstore.ClassSortSystems, Label: "Systems", DefaultDir: logsstore.SortDesc, Num: true},
+	{Sort: logsstore.ClassSortFindings, Label: "Findings", DefaultDir: logsstore.SortDesc, Num: true},
+	{Sort: logsstore.ClassSortLastSeen, Label: "Last seen", DefaultDir: logsstore.SortDesc},
+}
+
+// sanitizeClassSort accepts only a reviewColumns sort key, returning ("", "")
+// -- the queue's default order -- for anything else. A known key with a
+// direction that is neither asc nor desc sorts in that column's default
+// direction.
+func sanitizeClassSort(sort, dir string) (string, string) {
+	for _, c := range reviewColumns {
+		if c.Sort != sort {
+			continue
+		}
+		if dir != logsstore.SortAsc && dir != logsstore.SortDesc {
+			dir = c.DefaultDir
+		}
+		return sort, dir
+	}
+	return "", ""
+}
+
+// reviewHeader is one rendered column header: a plain link that sorts the
+// queue by that column, flipping the direction when it is already the one
+// sorted on.
+type reviewHeader struct {
+	Label    string
+	Href     string
+	Num      bool
+	AriaSort string // "ascending"/"descending" on the active column, else ""
+	Arrow    string // the visible direction marker on the active column
+}
+
+// reviewHeaders builds the header links in Go, so the template only prints
+// them. Each carries the current view and key filter, so sorting never
+// drops the filter the operator is looking at.
+func (s *server) reviewHeaders(view, key, sort, dir string) []reviewHeader {
+	out := make([]reviewHeader, 0, len(reviewColumns))
+	for _, c := range reviewColumns {
+		h := reviewHeader{Label: c.Label, Num: c.Num}
+		next := c.DefaultDir
+		if c.Sort == sort {
+			if dir == logsstore.SortAsc {
+				h.AriaSort, h.Arrow, next = "ascending", "▲", logsstore.SortDesc
+			} else {
+				h.AriaSort, h.Arrow, next = "descending", "▼", logsstore.SortAsc
+			}
+		}
+		q := url.Values{"view": {view}, "sort": {c.Sort}, "dir": {next}}
+		if key != "" {
+			q.Set("key", key)
+		}
+		h.Href = s.chrome.Link("/review") + "?" + q.Encode()
+		out = append(out, h)
+	}
+	return out
+}
+
 type reviewPageData struct {
 	chrome.PageData
 	Rows       []logsstore.ClassRow
 	View       string
 	Views      []reviewView
 	Key        string
+	Sort       string
+	Dir        string
+	Headers    []reviewHeader
 	CanWrite   bool
 	Severities []string
 }
 
 // handleReview shows the class queue: finding classes ranked by how many
-// systems raised them, then how many findings they cover. A GET,
-// unauthenticated like every page here; only acting on a class needs the
-// admin key.
+// systems raised them, then how many findings they cover, unless a column
+// header asked for another order. A GET, unauthenticated like every page
+// here; only acting on a class needs the admin key.
 func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	view := lookupReviewView(q.Get("view"))
@@ -64,8 +140,9 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		// decided, not only while it is pending.
 		view = lookupReviewView("all")
 	}
+	sort, dir := sanitizeClassSort(q.Get("sort"), q.Get("dir"))
 	rows, err := s.reader.ListClasses(r.Context(), logsstore.ClassFilter{
-		Visibility: view.Visibility, Key: key, Limit: reviewLimit,
+		Visibility: view.Visibility, Key: key, Sort: sort, Dir: dir, Limit: reviewLimit,
 	})
 	if err != nil {
 		s.chrome.StoreError(w, "review", err)
@@ -77,6 +154,9 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		View:       view.Key,
 		Views:      reviewViews,
 		Key:        key,
+		Sort:       sort,
+		Dir:        dir,
+		Headers:    s.reviewHeaders(view.Key, key, sort, dir),
 		CanWrite:   s.canWrite(),
 		Severities: model.Severities,
 	})
@@ -223,8 +303,9 @@ func cleanDocRef(raw string) (string, bool) {
 	return u.String(), true
 }
 
-// reviewReturn is where a decision redirects: back to the queue view the
-// form was submitted from, re-validated rather than echoed.
+// reviewReturn is where a decision redirects: back to the queue view, filter
+// and sort order the form was submitted from, re-validated rather than
+// echoed.
 func (s *server) reviewReturn(r *http.Request) string {
 	q := url.Values{}
 	if v := r.PostFormValue("view"); v != "" {
@@ -232,6 +313,10 @@ func (s *server) reviewReturn(r *http.Request) string {
 	}
 	if k, ok := formKey(r, "filter"); ok {
 		q.Set("key", k)
+	}
+	if sort, dir := sanitizeClassSort(r.PostFormValue("sort"), r.PostFormValue("dir")); sort != "" {
+		q.Set("sort", sort)
+		q.Set("dir", dir)
 	}
 	target := s.chrome.Link("/review")
 	if len(q) > 0 {

@@ -188,8 +188,9 @@ func NewServer(r Reader, w Writer, rt Runtime, cfg chrome.Config) (http.Handler,
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
 	cfg.Funcs = template.FuncMap{
-		"headNodes": headNodes,
-		"moreNodes": moreNodes,
+		"headNodes":   headNodes,
+		"moreNodes":   moreNodes,
+		"moreModules": moreModules,
 	}
 
 	base, err := chrome.New(cfg)
@@ -401,6 +402,12 @@ func headNodes(refs []model.NodeInfo) []model.NodeInfo {
 		return refs[:rowNodes]
 	}
 	return refs
+}
+
+// moreModules returns how many modules the review queue's Module column
+// leaves out after the first, 0 for none; the class dialog lists them all.
+func moreModules(modules []string) int {
+	return max(len(modules)-1, 0)
 }
 
 // moreNodes returns how many nodes headNodes left out, 0 for none.

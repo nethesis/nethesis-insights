@@ -42,11 +42,70 @@ func buildSeverityRankSQL() string {
 // ClassFilter selects ListClasses' rows. Visibility "" means every
 // visibility but dismissed, unless Key is set: a dismissed class leaves the
 // "all" queue, yet a link to it by key must still find it. Key is a LIKE
-// prefix, as on the findings page.
+// prefix, as on the findings page. Sort is one of the ClassSort* keys and Dir
+// is SortAsc or SortDesc; anything else in either leaves the default order.
 type ClassFilter struct {
 	Visibility string
 	Key        string
+	Sort       string
+	Dir        string
 	Limit      int
+}
+
+// The review queue's sort keys, one per column of /review's table.
+const (
+	ClassSortTitle      = "class"
+	ClassSortModule     = "module"
+	ClassSortSeverity   = "severity"
+	ClassSortVisibility = "visibility"
+	ClassSortSystems    = "systems"
+	ClassSortFindings   = "findings"
+	ClassSortLastSeen   = "last_seen"
+)
+
+// The two sort directions ClassFilter.Dir accepts.
+const (
+	SortAsc  = "asc"
+	SortDesc = "desc"
+)
+
+// latestFindingSQL selects one column of a class's latest finding, the one
+// attachClassDetails shows: ordered as its titles are (last_seen, then title)
+// for the title, as its detail row is (last_seen, then id) for the modules.
+const latestFindingSQL = `(SELECT x.%s FROM findings x WHERE x.class_key = c.class_key ORDER BY x.last_seen DESC, x.%s LIMIT 1)`
+
+// classSortSQL maps each ClassSort* key to the fixed ORDER BY expression
+// ListClasses sorts on. It is the whole whitelist: a key that is not here
+// never reaches the SQL, and no part of a request is ever interpolated.
+// Each expression grows in the column's natural "more" direction, so
+// SortDesc is always "most first" -- for severity that means the most severe
+// first, which is why severity is weighted (critical highest) rather than
+// ranked (critical 0). The title, module and severity expressions are
+// correlated subqueries evaluated only when that column is chosen; modules
+// sort on the stored JSON text, whose first element is the module shown.
+var classSortSQL = map[string]string{
+	ClassSortTitle:  fmt.Sprintf(latestFindingSQL, "title", "title") + ` COLLATE NOCASE`,
+	ClassSortModule: fmt.Sprintf(latestFindingSQL, "modules", "id"),
+	ClassSortSeverity: fmt.Sprintf(`(%d - coalesce((SELECT MIN(%s) FROM findings x WHERE x.class_key = c.class_key), %d))`,
+		len(model.Severities), severityRankSQL, len(model.Severities)),
+	ClassSortVisibility: `c.visibility`,
+	ClassSortSystems:    `systems`,
+	ClassSortFindings:   `findings`,
+	ClassSortLastSeen:   `c.last_seen`,
+}
+
+// classOrder returns ListClasses' ORDER BY clause and its arguments: the
+// chosen column with class_key as the stable tiebreaker when f names a known
+// sort and direction, the queue's default order otherwise. NULLS LAST keeps a
+// decided class whose findings were all pruned -- no title, no module -- at
+// the bottom in both directions instead of heading an A-to-Z sort.
+func classOrder(f ClassFilter) (string, []any) {
+	expr, ok := classSortSQL[f.Sort]
+	if ok && (f.Dir == SortAsc || f.Dir == SortDesc) {
+		return expr + " " + strings.ToUpper(f.Dir) + " NULLS LAST, c.class_key", nil
+	}
+	return "(c.visibility = ?) DESC, systems DESC, findings DESC, c.last_seen DESC, c.class_key",
+		[]any{VisibilityPending}
 }
 
 // ClassRow is one class as the review queue shows it. The key is a hash, so
@@ -67,13 +126,21 @@ type ClassRow struct {
 	Evidence        []string
 }
 
-// ListClasses returns classes ranked the way the review queue wants them:
-// pending classes first -- an operator reviewing "all" must not have to
-// scroll past already-decided classes to find the one still waiting -- then
-// the class raised on the most systems, then the one with the most findings.
-// Counts are derived from findings rather than stored, so they cannot drift
-// from what is actually retained.
+// ListClasses returns classes ranked the way the review queue wants them.
+// By default: pending classes first -- an operator reviewing "all" must not
+// have to scroll past already-decided classes to find the one still waiting
+// -- then the class raised on the most systems, then the one with the most
+// findings. An explicit f.Sort replaces that whole order with the one column
+// (class_key breaking ties), pending-first included: an operator who clicked
+// a column asked for that column. Sorting happens in SQL, before the limit,
+// so a sorted page is the top of the whole queue rather than a reordering of
+// the default top. Counts are derived from findings rather than stored, so
+// they cannot drift from what is actually retained.
 func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, error) {
+	order, orderArgs := classOrder(f)
+	args := []any{f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key)}
+	args = append(append(args, orderArgs...), clampLimit(f.Limit))
+	// order is one of classOrder's fixed clauses, never request text.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.class_key, c.visibility, c.security, c.severity_override, c.doc_ref,
 		       c.first_prompt_version, c.first_seen, c.last_seen,
@@ -82,10 +149,9 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		FROM finding_classes c
 		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR c.visibility != ?)))
 		  AND (? = '' OR c.class_key LIKE ?)
-		ORDER BY (c.visibility = ?) DESC, systems DESC, findings DESC, c.last_seen DESC, c.class_key
+		ORDER BY `+order+`
 		LIMIT ?
-	`, f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key),
-		VisibilityPending, clampLimit(f.Limit))
+	`, args...) // #nosec G202 -- order is a fixed clause from classSortSQL
 	if err != nil {
 		return nil, fmt.Errorf("store: list classes: %w", err)
 	}

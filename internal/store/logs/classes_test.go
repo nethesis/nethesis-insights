@@ -6,6 +6,7 @@ package logs
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
@@ -446,5 +447,138 @@ func TestListAllFindingsHidesDismissedClasses(t *testing.T) {
 	mustDo(t, err)
 	if len(systems) != 1 || systems[0].OpenFindings != 2 || systems[0].Findings != 3 {
 		t.Fatalf("want 2 open (dismissed left out) of 3 retained, got %+v", systems)
+	}
+}
+
+// seedSortFixture stores three classes that each sort differently on every
+// column, so a table of expected orders can tell the columns apart:
+//
+//	v3:a  "alpha"   [mail]     low       1 system  1 finding   last 3000  customer
+//	v3:b  "Bravo"   [host]     critical  2 systems 2 findings  last 1000  pending
+//	v3:c  "charlie" [web, x]   medium    1 system  3 findings  last 2000  operator
+func seedSortFixture(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	seed := func(system, fp, class, severity, title string, modules []string, now int64) {
+		f := model.Finding{SystemID: system, Fingerprint: fp, Severity: severity, Title: title,
+			Modules: modules, Evidence: []string{}, ClassKey: class, PromptVersion: "p1"}
+		if _, err := s.UpsertFinding(ctx, f, now); err != nil {
+			t.Fatalf("upsert %s: %v", fp, err)
+		}
+	}
+	seed("sys1", "fp-a", "v3:a", "low", "alpha", []string{"mail"}, 3000)
+	seed("sys1", "fp-b1", "v3:b", "critical", "Bravo", []string{""}, 900)
+	seed("sys2", "fp-b2", "v3:b", "critical", "Bravo", []string{""}, 1000)
+	seed("sys1", "fp-c1", "v3:c", "medium", "charlie", []string{"web", "x"}, 1500)
+	seed("sys1", "fp-c2", "v3:c", "medium", "charlie", []string{"web", "x"}, 1600)
+	seed("sys1", "fp-c3", "v3:c", "medium", "charlie", []string{"web", "x"}, 2000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityCustomer, "op", 4000))
+	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityOperator, "op", 4000))
+}
+
+func classKeys(rows []ClassRow) string {
+	keys := make([]string, len(rows))
+	for i, r := range rows {
+		keys[i] = r.Key
+	}
+	return strings.Join(keys, ",")
+}
+
+// Every column sorts in SQL, in both directions, on that column alone:
+// pending-first is the default order's rule, not a column's, so v3:b (the
+// only pending class) lands wherever its value puts it.
+func TestListClassesSortsOnEveryColumn(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedSortFixture(t, s)
+
+	for _, tc := range []struct {
+		sort, dir, want string
+	}{
+		// Titles compare case-insensitively: "Bravo" is not before "alpha".
+		{ClassSortTitle, SortAsc, "v3:a,v3:b,v3:c"},
+		{ClassSortTitle, SortDesc, "v3:c,v3:b,v3:a"},
+		// The host bucket sorts first: it is the empty module id.
+		{ClassSortModule, SortAsc, "v3:b,v3:a,v3:c"},
+		{ClassSortModule, SortDesc, "v3:c,v3:a,v3:b"},
+		// Descending severity is most severe first.
+		{ClassSortSeverity, SortDesc, "v3:b,v3:c,v3:a"},
+		{ClassSortSeverity, SortAsc, "v3:a,v3:c,v3:b"},
+		{ClassSortVisibility, SortAsc, "v3:a,v3:c,v3:b"},
+		{ClassSortVisibility, SortDesc, "v3:b,v3:c,v3:a"},
+		// v3:a and v3:c tie on one system; class_key breaks the tie.
+		{ClassSortSystems, SortDesc, "v3:b,v3:a,v3:c"},
+		{ClassSortSystems, SortAsc, "v3:a,v3:c,v3:b"},
+		{ClassSortFindings, SortDesc, "v3:c,v3:b,v3:a"},
+		{ClassSortFindings, SortAsc, "v3:a,v3:b,v3:c"},
+		{ClassSortLastSeen, SortDesc, "v3:a,v3:c,v3:b"},
+		{ClassSortLastSeen, SortAsc, "v3:b,v3:c,v3:a"},
+	} {
+		rows, err := s.ListClasses(ctx, ClassFilter{Sort: tc.sort, Dir: tc.dir})
+		mustDo(t, err)
+		if got := classKeys(rows); got != tc.want {
+			t.Errorf("sort %s %s: got %s, want %s", tc.sort, tc.dir, got, tc.want)
+		}
+	}
+}
+
+// A decided class whose findings were all pruned has no title and no module;
+// it sorts last in both directions rather than heading an A-to-Z sort.
+func TestListClassesWithoutFindingsSortLast(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedSortFixture(t, s)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO finding_classes
+		(class_key, visibility, security, first_seen, last_seen) VALUES (?, ?, 0, 1, 1)`,
+		"v3:0", VisibilityCustomer)
+	mustDo(t, err)
+	for _, tc := range []struct {
+		sort, dir, want string
+	}{
+		{ClassSortTitle, SortAsc, "v3:a,v3:b,v3:c,v3:0"},
+		{ClassSortTitle, SortDesc, "v3:c,v3:b,v3:a,v3:0"},
+		{ClassSortModule, SortAsc, "v3:b,v3:a,v3:c,v3:0"},
+		{ClassSortModule, SortDesc, "v3:c,v3:a,v3:b,v3:0"},
+	} {
+		rows, err := s.ListClasses(ctx, ClassFilter{Sort: tc.sort, Dir: tc.dir})
+		mustDo(t, err)
+		if got := classKeys(rows); got != tc.want {
+			t.Errorf("sort %s %s: got %s, want %s", tc.sort, tc.dir, got, tc.want)
+		}
+	}
+}
+
+// The sort runs before the limit: a one-row page sorted by findings is the
+// class with the most findings in the whole queue, not the first row of the
+// default order.
+func TestListClassesSortsBeforeTheLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedSortFixture(t, s)
+	rows, err := s.ListClasses(ctx, ClassFilter{Sort: ClassSortFindings, Dir: SortDesc, Limit: 1})
+	mustDo(t, err)
+	if got := classKeys(rows); got != "v3:c" {
+		t.Fatalf("got %s, want v3:c", got)
+	}
+}
+
+// Anything but a known sort key and direction leaves the default order:
+// pending first, then systems, findings, last seen.
+func TestListClassesUnknownSortKeepsTheDefaultOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedSortFixture(t, s)
+	for _, f := range []ClassFilter{
+		{},
+		{Sort: "bogus", Dir: SortAsc},
+		{Sort: ClassSortTitle, Dir: "sideways"},
+		{Sort: ClassSortTitle},
+		{Sort: "title; DROP TABLE findings", Dir: SortDesc},
+	} {
+		rows, err := s.ListClasses(ctx, f)
+		mustDo(t, err)
+		if got := classKeys(rows); got != "v3:b,v3:c,v3:a" {
+			t.Errorf("%+v: got %s, want the default v3:b,v3:c,v3:a", f, got)
+		}
 	}
 }

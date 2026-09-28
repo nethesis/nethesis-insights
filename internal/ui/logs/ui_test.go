@@ -24,15 +24,15 @@ import (
 // logsstore.Store. It never touches a database, so this package's tests
 // never wait on a real store implementation.
 type fakeReader struct {
-	counts    logsstore.Counts
-	systems   []logsstore.SystemRow
-	analyses  []logsstore.AnalysisRow
-	gate      []logsstore.GateRow
-	gateSince int64 // the last since GateRollup was called with
-	cost      []logsstore.CostRow
-	findings  []model.Finding
-	templates []logsstore.TemplateRow
-	baselines []logsstore.BaselineRow
+	counts     logsstore.Counts
+	systems    []logsstore.SystemRow
+	analyses   []logsstore.AnalysisRow
+	gate       []logsstore.GateRow
+	gateSince  int64 // the last since GateRollup was called with
+	cost       []logsstore.CostRow
+	findings   []model.Finding
+	templates  []logsstore.TemplateRow
+	baselines  []logsstore.BaselineRow
 	roster     map[string]map[int]string
 	classes    []logsstore.ClassRow
 	classStats []logsstore.ClassStatsRow
