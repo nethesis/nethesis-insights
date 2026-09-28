@@ -231,12 +231,11 @@ rather than rendering a broken config. Re-run it after any change to either
 value.
 
 The routing half lands in a **directory** the proxy watches, rather than in a
-single file, so that an optional extra set of routers can be added beside it
-without editing it — see [the development monitoring
-stack](../deploy/dev/README.md). Nothing else in a production deployment puts
-a file there, and every file in that directory shares one namespace: a second
-file must never redefine a router, service or middleware `dynamic.yaml`
-already names.
+single file, so that an extra set of routers can be dropped in beside it
+without editing it — an edit would be overwritten the next time you render.
+Nothing in a standard deployment puts a second file there, and every file in
+that directory shares one namespace: a second file must never redefine a
+router, service or middleware `dynamic.yaml` already names.
 
 ### 7. Start
 
@@ -621,8 +620,8 @@ label alone. Traefik does the same for itself (`traefik_*`) out of the box.
 
 The one deliberate exception is the standard Go runtime and process
 collectors, which keep their conventional unprefixed `go_*` and `process_*`
-names on all four binaries (plus `promhttp_*`): every off-the-shelf Go or
-Grafana dashboard and every `go_*`-based alert rule queries those exact
+names on all four binaries (plus `promhttp_*`): every off-the-shelf Go
+dashboard and every `go_*`-based alert rule queries those exact
 names, and prefixing them would break all of it for the sake of tidiness.
 Tell the two apart by the `job` label your scrape config sets.
 
@@ -715,59 +714,6 @@ you need for the `go_*` and `process_*` metrics, which are identically named
 on all four binaries — `go_goroutines{job="nethesis-insights-authd"}`. Every
 other metric already carries its service in the name, so
 `insightsd_queue_depth` is unambiguous with or without the job label.
-
-### The job names are not cosmetic
-
-Keep the five `job_name` values exactly as written above. They are what the
-dashboard in the next section matches on: it derives each service's short
-label and its fixed colour from the `nethesis-insights-` prefix, selects the
-four Go binaries with
-`job=~"nethesis-insights-(logs|threat|sizing|authd)"` for the runtime panels,
-and picks the proxy out with `job="nethesis-insights-traefik"`. Rename a job
-and those panels go blank — the metrics are still collected and every other
-panel still draws, which is what makes it confusing rather than obvious.
-
-If your Prometheus has a naming convention of its own that these have to fit,
-change them in one place and one place only: the `job_name` values above and
-the four `job=~`/`job=` matchers in the dashboard JSON.
-
-### The dashboard
-
-`deploy/dev/grafana/dashboards/nethesis-insights.json` is written to be
-imported into whatever Grafana you already run — it is stored under
-`deploy/dev/` because that is where the stack that provisions it
-automatically lives, not because it only works there. It carries no
-deployment-specific value: every panel queries through a **datasource
-variable** rather than a fixed datasource id, so it resolves to your default
-Prometheus on first open instead of pointing at one that does not exist.
-
-To install it by hand:
-
-1. Copy `deploy/dev/grafana/dashboards/nethesis-insights.json` to the machine
-   running Grafana, or open it in the repository and copy its contents.
-2. In Grafana, **Dashboards → New → Import**, paste the JSON, **Load**.
-3. Choose a folder if you want one, then **Import**.
-
-There is no datasource field to fill in on that screen — the variable is
-resolved when the dashboard opens, not when it is imported. It appears as
-**Nethesis Insights** (uid `nethesis-insights`) already pointing at your
-default Prometheus, and the **Data source** picker at its top left switches
-it to another one if you have more than one. Twenty-five panels in eight rows:
-overview, HTTP, the log pipeline, Threat Shield, forward auth, background
-passes, the proxy, and the Go runtime. Nothing in it writes anywhere or needs
-a plugin.
-
-Two things it assumes, both satisfied by the scrape config above:
-
-- **The job names**, as the previous subsection describes.
-- **Every one of the five targets.** A missing job costs you the panels that
-  query it and nothing else — the dashboard does not fail as a whole.
-
-Imported this way the dashboard is an ordinary editable dashboard: Grafana
-owns it, and re-importing a later version of this file overwrites your edits.
-That is the trade for editing it in the browser. The development stack takes
-the opposite one, provisioning it read-only from the file so that git and the
-running dashboard cannot disagree.
 
 ## The operator UI
 

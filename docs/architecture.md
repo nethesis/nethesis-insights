@@ -882,7 +882,7 @@ unprefixed half by accident.
 
 The standard collectors are the deliberate exception: `go_*`, `process_*` and
 promhttp's own `promhttp_*` are registered on the **raw** registry and keep
-their conventional names, because every off-the-shelf Go/Grafana dashboard
+their conventional names, because every off-the-shelf Go runtime dashboard
 and every `go_*`-based alert rule queries those exact strings -- prefixing
 them would buy internal consistency at the cost of breaking all of it. The
 scrape is served from the raw registry, so one response carries both halves.
@@ -972,20 +972,13 @@ six pipeline routers use, whose public prefix (`/logs`, `/blocklist`,
 `/sizing`) is always followed by more path, not the whole thing.
 
 Traefik's file provider is pointed at the **directory** `/etc/traefik/dynamic`
-rather than at `dynamic.yaml` itself, and that is the one deploy-shape
-concession the optional development monitoring stack (`deploy/dev/`,
-Prometheus + Grafana in the same pod) extracted from the production
-configuration. It is what lets that stack add its two routers as a second
-file, `dev.yaml`, written only by `deploy/dev/render-dev.sh`; a host that
-never ran that script has no such file and therefore no such routers, which
-an entry in `dynamic.yaml.tmpl` could not achieve -- that would leave every
-deployment routing `/grafana` at a container it is not running. The cost is
-that all files in the directory merge into one provider namespace, so a
-second file must never redefine a name the first one uses: that is a
-last-one-wins race decided by filename order, not an error. Nothing in
-`deploy/dev/` changes a rule in this document -- it adds no endpoint, stores
-nothing, and reads only the same `/metrics` handlers described above, over
-loopback and therefore without the `metrics-auth` credential.
+rather than at `dynamic.yaml` itself, so a host that needs extra routers can
+drop a second file in beside the rendered `dynamic.yaml` instead of editing
+it: `deploy/render.sh` would overwrite the edit on the next render, and an
+entry in `dynamic.yaml.tmpl` would ship those routers to every deployment.
+The cost is that all files in the directory merge into one provider
+namespace, so a second file must never redefine a name the first one uses:
+that is a last-one-wins race decided by filename order, not an error.
 
 ## Data model and storage
 

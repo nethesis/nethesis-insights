@@ -7,9 +7,8 @@
 # Renders deploy/traefik/*.tmpl to /etc/traefik/traefik.yaml and
 # /etc/traefik/dynamic/dynamic.yaml (or under DEST_DIR, if given as $1).
 # The dynamic half lands in a subdirectory because traefik.yaml.tmpl points
-# the file provider at a DIRECTORY -- see its comment: that is what lets the
-# optional development stack (deploy/dev/) add routers as a second file
-# rather than an edit to this one.
+# the file provider at a DIRECTORY -- see its comment: an extra file of
+# routers can be dropped in beside dynamic.yaml rather than edited into it.
 # Both Traefik files are committed as templates deliberately
 # -- templating one and leaving the other static is a trap, since the
 # static one looks editable in place and either the edit is silently

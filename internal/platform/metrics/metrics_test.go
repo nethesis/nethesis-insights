@@ -48,7 +48,7 @@ func TestHandlerExposesStandardCollectors(t *testing.T) {
 
 // The service prefix must reach everything this package defines and NOTHING
 // else. The standard collectors keep their conventional names because every
-// off-the-shelf Go/Grafana dashboard and every go_*-based alert rule queries
+// off-the-shelf Go runtime dashboard and every go_*-based alert rule queries
 // those exact strings -- so a later refactor that "tidies up" by wrapping
 // the whole registry, rather than only the registerer this package's
 // constructors use, has to fail here.
