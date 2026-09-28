@@ -4,7 +4,7 @@
 #
 # Rendered to /etc/traefik/traefik.yaml at deploy time:
 #   set -a; . /etc/insights/deploy.env; set +a
-#   envsubst '$INSIGHTS_HOST $ACME_EMAIL' < traefik.yaml.tmpl > /etc/traefik/traefik.yaml
+#   envsubst '$INSIGHTS_HOST $ACME_EMAIL $METRICS_SCRAPER' < traefik.yaml.tmpl > /etc/traefik/traefik.yaml
 # INSIGHTS_HOST and ACME_EMAIL are both deploy-time inputs -- see
 # dynamic.yaml.tmpl for the six Host() matchers INSIGHTS_HOST also drives.
 # Both Traefik files are templates deliberately: templating one and leaving
@@ -31,8 +31,8 @@ entryPoints:
   # comment: only 80 and 443 ever leave the pod). This is where Traefik's
   # OWN Prometheus exporter listens; it is never reachable directly, only
   # republished at the public /metrics/traefik path (dynamic.yaml's
-  # metrics-traefik router, itself gated by metricsAuth) the same way the
-  # four Go backends' own /metrics are. 8082 does not collide with any of
+  # metrics-traefik router, itself limited to METRICS_SCRAPER) the same way
+  # the four Go backends' own /metrics are. 8082 does not collide with any of
   # this deployment's other ports (9590, 9595-9596, 9605-9606, 9615-9616).
   metrics:
     address: "127.0.0.1:8082"

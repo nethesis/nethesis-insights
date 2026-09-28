@@ -23,6 +23,11 @@
 # (Traefik matches no router and every request 404s), but an unset
 # ACME_EMAIL would silently render "email: " and fail ACME registration in a
 # way that looks like a network problem.
+#
+# METRICS_SCRAPER, also from deploy.env, is the one address (or CIDR)
+# allowed to read the /metrics/* paths; it defaults to 2.119.67.169,
+# metrics.nethesis.it's public address. host-firewall.sh reads the same
+# variable for node_exporter's port, so set it once there.
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -39,6 +44,17 @@ fi
 
 : "${INSIGHTS_HOST:?INSIGHTS_HOST is not set -- define it in $deploy_env}"
 : "${ACME_EMAIL:?ACME_EMAIL is not set -- define it in $deploy_env}"
+METRICS_SCRAPER=${METRICS_SCRAPER:-2.119.67.169}
+# Traefik refuses a sourceRange it cannot parse by dropping the middleware,
+# and every router naming it with it -- a hostname here would take all five
+# metrics paths offline with nothing but a log line to say why.
+case $METRICS_SCRAPER in
+'' | *[!0-9a-fA-F.:/]*)
+    echo "render: METRICS_SCRAPER=$METRICS_SCRAPER is not an IP address or CIDR" >&2
+    exit 1
+    ;;
+esac
+export METRICS_SCRAPER
 
 mkdir -p "$dest_dir" "$dynamic_dir"
 
@@ -67,11 +83,14 @@ trap 'rm -f "$tmp_dynamic" "$tmp_traefik"' EXIT
 
 # The explicit variable list matters: unquoted and unargumented, envsubst
 # also expands Traefik's own ${...} syntax, producing a config that parses
-# cleanly and is silently wrong.
-envsubst '$INSIGHTS_HOST $ACME_EMAIL' \
+# cleanly and is silently wrong. The single quotes are the point, so
+# SC2016 is not a finding here.
+# shellcheck disable=SC2016
+envsubst '$INSIGHTS_HOST $ACME_EMAIL $METRICS_SCRAPER' \
     < "$script_dir/traefik/dynamic.yaml.tmpl" \
     > "$tmp_dynamic"
-envsubst '$INSIGHTS_HOST $ACME_EMAIL' \
+# shellcheck disable=SC2016
+envsubst '$INSIGHTS_HOST $ACME_EMAIL $METRICS_SCRAPER' \
     < "$script_dir/traefik/traefik.yaml.tmpl" \
     > "$tmp_traefik"
 

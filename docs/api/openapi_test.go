@@ -7,7 +7,8 @@
 // OpenAPI, that the set of documented paths exactly matches the routes this
 // server actually registers (nothing missing, nothing stale left over from
 // a removed endpoint), that the set of documented (path, method) operations
-// matches too, and that every operation declares a security scheme.
+// matches too, and that every operation declares a security scheme -- or,
+// for the /metrics/* paths alone, an explicit `security: []`.
 //
 // What this test CANNOT prove: that the request/response *schemas* in the
 // YAML match the Go structs in internal/model, that examples are
@@ -148,14 +149,21 @@ func scanPaths(t *testing.T, path string) parsed {
 // each backend's /metrics at a public path under /metrics/* (see
 // deploy/traefik/dynamic.yaml.tmpl) so a monitoring system outside the pod
 // can scrape it. A path a client can actually reach belongs in the public
-// contract regardless of which credential gates it, so the five
-// /metrics/* paths (four backends plus Traefik's own) are documented below
-// as the "metrics" pseudo-service, with their own security scheme
-// (metricsAuth) rather than pinned as excluded the way /healthz is.
+// contract regardless of what gates it, so the five /metrics/* paths (four
+// backends plus Traefik's own) are documented below as the "metrics"
+// pseudo-service rather than pinned as excluded the way /healthz is.
+//
+// They are also the only operations with no credential at all: Traefik
+// admits one source address (METRICS_SCRAPER) and nothing else, which
+// OpenAPI has no security scheme for. So they are marked noCredential and
+// must say `security: []` explicitly -- an opt-out has to be written down,
+// and TestEveryOperationDeclaresSecurity still fails any other operation
+// that tries it.
 var services = []struct {
-	name   string
-	prefix string
-	routes []struct {
+	name         string
+	prefix       string
+	noCredential bool
+	routes       []struct {
 		path   string
 		method string
 	}
@@ -188,11 +196,11 @@ var services = []struct {
 		// Not a Go binary's route prefix: five independent Traefik routers,
 		// one per backend (the four Go binaries' own /metrics plus
 		// Traefik's built-in exporter), grouped under one public /metrics/
-		// namespace so a monitoring system's scrape config can apply one
-		// metricsAuth credential to a single path prefix. See the doc
-		// comment above services.
-		name:   "metrics",
-		prefix: "/metrics",
+		// namespace. Gated by source address, not a credential. See the
+		// doc comment above services.
+		name:         "metrics",
+		prefix:       "/metrics",
+		noCredential: true,
 		routes: []struct{ path, method string }{
 			{"/logs", "get"},
 			{"/threat", "get"},
@@ -296,9 +304,25 @@ func TestHealthzNotDocumented(t *testing.T) {
 func TestEveryOperationDeclaresSecurity(t *testing.T) {
 	got := scanPaths(t, openAPIPath)
 
+	noCredential := map[string]bool{}
+	for _, svc := range services {
+		if !svc.noCredential {
+			continue
+		}
+		for _, r := range svc.routes {
+			noCredential[svc.prefix+r.path] = true
+		}
+	}
+
 	for op := range got.operations {
 		if !got.sawSecurityLine[op] {
 			t.Errorf("%s %s: no 'security:' key found -- every operation must declare a security scheme", op.method, op.path)
+			continue
+		}
+		if noCredential[op.path] {
+			if got.securityDeclared[op] {
+				t.Errorf("%s %s: declares a security scheme, but this path takes no credential -- it must say 'security: []'", op.method, op.path)
+			}
 			continue
 		}
 		if !got.securityDeclared[op] {

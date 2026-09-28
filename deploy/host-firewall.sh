@@ -7,7 +7,7 @@
 # Closes the host down to SSH plus the proxy's two ports: turns Cockpit off
 # and turns firewalld on with ssh, http and https allowed in the default
 # zone. Also opens node_exporter's 9100 (node-exporter.container), but only
-# to the metrics server -- METRICS_SCRAPER, an address or a name, default
+# to the metrics server -- METRICS_SCRAPER, an address or CIDR, default
 # 2.119.67.169 (metrics.nethesis.it's public address). Idempotent, so it is safe to re-run on a
 # server already running.
 #
@@ -28,14 +28,24 @@
 # firewall-offline-cmd, so starting it cannot lock the operator out of the
 # session running this script, even on a zone someone stripped of ssh.
 #
-# The default is an address, not metrics.nethesis.it, because that name
-# resolves to a private address inside Nethesis's network, while scrapes
-# arrive from its public one. firewalld matches addresses, not names, so a
-# name given in METRICS_SCRAPER is resolved once, here. If the metrics server
-# moves to a new address, scraping stops until this is re-run with it;
-# re-running also closes the old address, since every 9100 rule is replaced
-# rather than added to.
+# METRICS_SCRAPER is an address, never a name: metrics.nethesis.it resolves
+# to a private address inside Nethesis's network while scrapes arrive from
+# its public one, and firewalld matches addresses anyway. It is read from
+# /etc/insights/deploy.env when that exists -- the same value render.sh puts
+# into Traefik's ipAllowList for the /metrics/* paths, so the two cannot
+# disagree -- and can be given in front of the command before deploy.env is
+# written. If the metrics server moves to a new address, scraping stops
+# until this is re-run with it; re-running also closes the old address,
+# since every 9100 rule is replaced rather than added to.
 set -euo pipefail
+
+deploy_env=/etc/insights/deploy.env
+if [ -f "$deploy_env" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$deploy_env"
+    set +a
+fi
 
 scraper=${METRICS_SCRAPER:-2.119.67.169}
 node_exporter_port=9100
@@ -45,14 +55,15 @@ command -v firewall-cmd >/dev/null 2>&1 || {
     exit 1
 }
 
-# Resolved before anything changes: a name that does not resolve stops the
-# script with the host untouched, rather than leaving 9100 open to nobody
-# (or, worse, to a guess).
-mapfile -t scraper_addrs < <(getent ahosts "$scraper" | awk '{print $1}' | sort -u)
-if [ "${#scraper_addrs[@]}" -eq 0 ]; then
-    echo "host-firewall: $scraper does not resolve -- set METRICS_SCRAPER or fix DNS" >&2
+# Checked before anything changes, so a hostname or a typo stops the script
+# with the host untouched. firewalld does the real parsing; this only
+# refuses what cannot be an address or CIDR at all.
+case $scraper in
+'' | *[!0-9a-fA-F.:/]*)
+    echo "host-firewall: METRICS_SCRAPER=$scraper is not an IP address or CIDR" >&2
     exit 1
-fi
+    ;;
+esac
 
 if systemctl list-unit-files cockpit.socket >/dev/null 2>&1; then
     systemctl disable --now cockpit.socket cockpit.service >/dev/null 2>&1 || true
@@ -98,12 +109,10 @@ while IFS= read -r rule; do
         ;;
     esac
 done < <(firewall-cmd --permanent --zone="$zone" --list-rich-rules)
-for addr in "${scraper_addrs[@]}"; do
-    family=ipv4
-    case $addr in *:*) family=ipv6 ;; esac
-    firewall-cmd --permanent --zone="$zone" \
-        --add-rich-rule="rule family=\"$family\" source address=\"$addr\" port port=\"$node_exporter_port\" protocol=\"tcp\" accept" >/dev/null
-done
+family=ipv4
+case $scraper in *:*) family=ipv6 ;; esac
+firewall-cmd --permanent --zone="$zone" \
+    --add-rich-rule="rule family=\"$family\" source address=\"$scraper\" port port=\"$node_exporter_port\" protocol=\"tcp\" accept" >/dev/null
 firewall-cmd --reload >/dev/null
 
-echo "firewalld on, zone $zone allows: $(firewall-cmd --zone="$zone" --list-services); $node_exporter_port/tcp from $scraper (${scraper_addrs[*]}) only; cockpit off" >&2
+echo "firewalld on, zone $zone allows: $(firewall-cmd --zone="$zone" --list-services); $node_exporter_port/tcp from $scraper only; cockpit off" >&2

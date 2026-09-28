@@ -139,12 +139,14 @@ except the pod's 80 and 443", not the firewall.
 `node-exporter.container` is the one thing the firewall *does* guard, and that
 is why it is outside the pod on the host network: a host-network listener is
 an ordinary host listener, so firewalld filters it. Port 9100 is open only to
-`METRICS_SCRAPER` — default `2.119.67.169`, `metrics.nethesis.it`'s public
-address, since the name resolves to a private one inside Nethesis's network;
-a name given there is resolved when the script runs, because firewalld
-matches addresses, not names — and the
-unit `BindsTo=firewalld.service`, so with no firewall the exporter is not
-running rather than open to everyone.
+`METRICS_SCRAPER` — an address or CIDR from `/etc/insights/deploy.env`,
+default `2.119.67.169`, `metrics.nethesis.it`'s public address; never the
+name, which resolves to a private address inside Nethesis's network — and
+the unit `BindsTo=firewalld.service`, so with no firewall the exporter is
+not running rather than open to everyone. The same `METRICS_SCRAPER` is the
+only source Traefik lets read `/metrics/*` (see "Metrics" below): one value,
+enforced by the firewall where the firewall can see the port and by the
+proxy where it cannot.
 
 **Three independent pipelines, one proxy, one auth cache, three databases.**
 The bundle path spends money per call, so everything in it exists to avoid
@@ -974,12 +976,19 @@ package depending on `internal/platform/metrics` itself -- only the three
 
 Traefik republishes each binary's `/metrics`, plus its own built-in
 Prometheus exporter, at a public path under `/metrics/*`
-(`deploy/traefik/dynamic.yaml.tmpl`), gated by a BasicAuth credential
-(`metrics-auth`, `/etc/traefik/metrics.htpasswd`) that is deliberately
-**not** `ADMIN_API_KEY` and not a node's forward-auth credential -- see
-`docs/admin-guide.md`'s "Metrics" section for the full endpoint list, the
-metric catalogue and the deploy-time credential generation
-(`deploy/gen-metrics-auth.sh`). Because `/metrics/<name>` strips its whole
+(`deploy/traefik/dynamic.yaml.tmpl`), gated by source address alone: the
+`metrics-allow` `ipAllowList` admits only `METRICS_SCRAPER` (rendered from
+`deploy.env` by `deploy/render.sh`) and answers everyone else `403`. There is
+no password, matching every other host `metrics.nethesis.it` scrapes; a
+BasicAuth credential shipped first and was removed as the one exception. It
+is Traefik's check rather than firewalld's because the pod's 443 is
+published through netavark's DNAT, which firewalld never filters. It relies
+on the depth-0 source criterion, the connection's `RemoteAddr`, being the
+real client: rootful netavark DNATs inbound traffic without masquerading,
+the same fact the per-IP `rate-limit` buckets depend on, and
+`forwardedHeaders.trustedIPs` is empty so no `X-Forwarded-For` can stand in
+for it. See `docs/admin-guide.md`'s "Metrics" section for the full endpoint
+list and the metric catalogue. Because `/metrics/<name>` strips its whole
 public path and needs the backend's fixed `/metrics` back afterwards --
 `stripPrefix` alone cannot do this: stripping a request path's entire length
 leaves `""`, which Traefik forces to `"/"`, never `"/metrics"` -- each

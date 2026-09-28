@@ -71,8 +71,8 @@ tags:
   - name: observability
     description: >-
       Prometheus scrape endpoints for the four Go binaries and the Traefik
-      proxy, gated by a dedicated `metricsAuth` credential distinct from
-      every other surface's.
+      proxy. No credential: the proxy answers only the metrics server's
+      source address (`METRICS_SCRAPER`) and everyone else `403`.
 paths:
   /logs/v1/bundles:
     post:
@@ -822,24 +822,24 @@ paths:
         Exposition-format text for `insightsd`'s process, HTTP, bundle-queue,
         LLM-call, budget and housekeeping-pass metrics -- see
         `docs/admin-guide.md`'s "Metrics" section for the full metric list.
-        Unlike the six pipeline surfaces above, this is gated by a
-        **separate** BasicAuth credential (`metricsAuth`, Traefik's
-        `metrics-auth` middleware reading `/etc/traefik/metrics.htpasswd`),
-        deliberately not `ADMIN_API_KEY` or a node credential: a monitoring
-        system holds its own password, never the operator's or the fleet's.
-        `insightsd` itself answers unauthenticated on its own `LISTEN_ADDR`
-        (`GET /metrics` with no `/logs` prefix) -- this BasicAuth gate exists
-        only at the proxy, on the public path.
-      security:
-        - metricsAuth: []
+        Unlike the six pipeline surfaces above, this takes **no
+        credential**: Traefik's `metrics-allow` middleware admits only the
+        metrics server's source address (`METRICS_SCRAPER` in
+        `/etc/insights/deploy.env`, default `2.119.67.169`) and answers
+        every other client `403`, the same rule as every other host that
+        server scrapes. OpenAPI has no security scheme for a source-address
+        check, hence `security: []`. `insightsd` itself answers on its own
+        `LISTEN_ADDR` (`GET /metrics` with no `/logs` prefix) -- the address
+        check exists only at the proxy, on the public path.
+      security: []
       responses:
         "200":
           description: Prometheus text exposition format.
           content:
             text/plain; version=0.0.4; charset=utf-8:
               schema: { type: string }
-        "401":
-          description: Invalid or missing credentials.
+        "403":
+          description: The client is not the metrics server's address.
 
   /metrics/threat:
     get:
@@ -849,19 +849,17 @@ paths:
       description: |
         Exposition-format text for `threatd`'s process, HTTP, ingest-queue
         (including `ingestq_full_total`) and blocklist-consensus-pass
-        metrics -- see `docs/admin-guide.md`'s "Metrics" section. Same
-        `metricsAuth` credential as every other `/metrics/*` path, distinct
-        from `ADMIN_API_KEY`; see `/metrics/logs`'s description for why.
-      security:
-        - metricsAuth: []
+        metrics -- see `docs/admin-guide.md`'s "Metrics" section.
+        No credential; the same source-address check as `/metrics/logs`.
+      security: []
       responses:
         "200":
           description: Prometheus text exposition format.
           content:
             text/plain; version=0.0.4; charset=utf-8:
               schema: { type: string }
-        "401":
-          description: Invalid or missing credentials.
+        "403":
+          description: The client is not the metrics server's address.
 
   /metrics/sizing:
     get:
@@ -871,19 +869,17 @@ paths:
       description: |
         Exposition-format text for `sizingd`'s process, HTTP and
         cohort-pass metrics -- see `docs/admin-guide.md`'s "Metrics"
-        section. Same `metricsAuth` credential as every other `/metrics/*`
-        path, distinct from `ADMIN_API_KEY`; see `/metrics/logs`'s
-        description for why.
-      security:
-        - metricsAuth: []
+        section.
+        No credential; the same source-address check as `/metrics/logs`.
+      security: []
       responses:
         "200":
           description: Prometheus text exposition format.
           content:
             text/plain; version=0.0.4; charset=utf-8:
               schema: { type: string }
-        "401":
-          description: Invalid or missing credentials.
+        "403":
+          description: The client is not the metrics server's address.
 
   /metrics/authd:
     get:
@@ -893,19 +889,17 @@ paths:
       description: |
         Exposition-format text for `authd`'s process, HTTP and forward-auth
         cache/upstream metrics -- see `docs/admin-guide.md`'s "Metrics"
-        section. Same `metricsAuth` credential as every other `/metrics/*`
-        path, distinct from `ADMIN_API_KEY`; see `/metrics/logs`'s
-        description for why.
-      security:
-        - metricsAuth: []
+        section.
+        No credential; the same source-address check as `/metrics/logs`.
+      security: []
       responses:
         "200":
           description: Prometheus text exposition format.
           content:
             text/plain; version=0.0.4; charset=utf-8:
               schema: { type: string }
-        "401":
-          description: Invalid or missing credentials.
+        "403":
+          description: The client is not the metrics server's address.
 
   /metrics/traefik:
     get:
@@ -917,19 +911,17 @@ paths:
         a loopback-only `metrics` entryPoint, `127.0.0.1:8082`), republished
         at this public path the same way the four backends' own `/metrics`
         are: entrypoint-, router- and service-labeled request counts and
-        latencies for every proxied route. Same `metricsAuth` credential as
-        every other `/metrics/*` path, distinct from `ADMIN_API_KEY`; see
-        `/metrics/logs`'s description for why.
-      security:
-        - metricsAuth: []
+        latencies for every proxied route.
+        No credential; the same source-address check as `/metrics/logs`.
+      security: []
       responses:
         "200":
           description: Prometheus text exposition format.
           content:
             text/plain; version=0.0.4; charset=utf-8:
               schema: { type: string }
-        "401":
-          description: Invalid or missing credentials.
+        "403":
+          description: The client is not the metrics server's address.
 
 components:
   securitySchemes:
@@ -959,17 +951,6 @@ components:
         proxy (a second `forwardAuth` middleware) and cached under a key
         that includes the service, so a node whose ingest credential is
         already cached as valid still gets the entitlement checked.
-    metricsAuth:
-      type: http
-      scheme: basic
-      description: >-
-        A single `prometheus` user, HTTP Basic, checked by Traefik's own
-        `metrics-auth` middleware against `/etc/traefik/metrics.htpasswd` --
-        never by the Go backends and never against `AUTH_VALIDATE_URL` or
-        `ADMIN_API_KEY`. The password is generated at deploy time
-        (`deploy/gen-metrics-auth.sh`) and lives in
-        `/etc/insights/metrics.env`; see `docs/admin-guide.md`'s "Metrics"
-        section.
   schemas:
     Error:
       type: object
