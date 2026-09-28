@@ -65,8 +65,14 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <fieldset role="group">
 <button type="submit">Deliver to customers</button>
 <button type="submit" class="secondary" formaction="{{$.Base}}/review/internal">Keep internal</button>
+<button type="submit" class="secondary" formaction="{{$.Base}}/review/dismiss">Dismiss</button>
 </fieldset>
 </form>
+<p><small>Dismiss hides this class from every page, including this queue, for good. It saves no
+money: the AI still sees it as already known. Undo from the <em>dismissed</em> view by delivering
+or keeping it internal.{{if gt (len .Evidence) 1}} <strong>This class groups several different
+log lines</strong>, so dismissing it also hides any later, different conclusion drawn from the same
+module and priority.{{end}}</small></p>
 <form method="post" action="{{$.Base}}/review/security">
 <input type="hidden" name="key" value="{{.Key}}">
 <input type="hidden" name="view" value="{{$.View}}">

@@ -529,6 +529,11 @@ const findingColumns = `f.id, f.system_id, f.fingerprint, f.severity, f.title, f
 const findingClassJoin = `
 	LEFT JOIN finding_classes c ON c.class_key = f.class_key`
 
+// notDismissed is the operator views' filter over findingClassJoin, and
+// takes VisibilityDismissed as its one argument. A finding with no class row
+// (NULL visibility) is kept: only a decision hides anything.
+const notDismissed = `(c.visibility IS NULL OR c.visibility != ?)`
+
 // OpenFindings feeds prompt.Render, so it deliberately does not join
 // finding_classes: no operator decision -- visibility, severity override,
 // doc_ref -- can reach the model through it.

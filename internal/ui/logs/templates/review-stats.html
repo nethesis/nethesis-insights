@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 {{define "content"}}
 <h1>Review stats</h1>
 <p><small>What each prompt version raised and what operators decided about it. A prompt
-change that works shows up as a larger delivered share and fewer internal classes.
+change that works shows up as a larger delivered share and fewer internal and dismissed classes.
 <strong>Security-tagged</strong> overlaps the other columns: it counts classes tagged security,
 whatever their visibility.</small></p>
 
@@ -14,7 +14,8 @@ whatever their visibility.</small></p>
 <thead>
 <tr>
 <th scope="col">Prompt version</th><th scope="col" class="num">Classes</th><th scope="col" class="num">Pending</th>
-<th scope="col" class="num">Delivered</th><th scope="col" class="num">Internal</th><th scope="col" class="num">Security-tagged</th>
+<th scope="col" class="num">Delivered</th><th scope="col" class="num">Internal</th>
+<th scope="col" class="num">Dismissed</th><th scope="col" class="num">Security-tagged</th>
 </tr>
 </thead>
 <tbody>
@@ -25,10 +26,11 @@ whatever their visibility.</small></p>
 <td class="num">{{.Pending}}</td>
 <td class="num">{{.Delivered}}</td>
 <td class="num">{{.Internal}}</td>
+<td class="num">{{.Dismissed}}</td>
 <td class="num">{{.Security}}</td>
 </tr>
 {{else}}
-<tr><td colspan="6">no classes yet</td></tr>
+<tr><td colspan="7">no classes yet</td></tr>
 {{end}}
 </tbody>
 </table>

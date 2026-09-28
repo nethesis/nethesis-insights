@@ -224,7 +224,7 @@ func TestReuseIsOffWhenTheWindowIsZero(t *testing.T) {
 
 // Decisions change what is paid for and what is delivered, never what the
 // model is told. Two deployments that differ only by decisions on the class
-// behind an open finding -- hiding it, retagging its security bit, a
+// behind an open finding -- hiding it, dismissing it, retagging its security bit, a
 // severity override, a doc reference -- must render byte-identical prompts
 // for the next window.
 func TestDecisionsNeverReachThePrompt(t *testing.T) {
@@ -257,6 +257,9 @@ func TestDecisionsNeverReachThePrompt(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := s.SetClassDocRef(ctx, key, "https://docs.example.org/x", "op", 2000); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetClassVisibility(ctx, key, logsstore.VisibilityDismissed, "op", 2000); err != nil {
 				t.Fatal(err)
 			}
 		}

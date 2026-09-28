@@ -185,20 +185,22 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 
 // ListSystems returns every system plus per-system aggregates, ordered by
 // last_seen descending. The six correlated subqueries each hit an index
-// prefixed by system_id.
+// prefixed by system_id. The open count leaves out dismissed classes, like
+// every other view; the total counts every retained finding.
 func (s *Store) ListSystems(ctx context.Context) ([]SystemRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			s.system_id, s.collector_version, s.first_seen, s.last_seen,
 			(SELECT count(*) FROM system_templates st WHERE st.system_id = s.system_id) AS templates,
-			(SELECT count(*) FROM findings f WHERE f.system_id = s.system_id AND f.status = ?) AS open_findings,
+			(SELECT count(*) FROM findings f`+findingClassJoin+`
+			 WHERE f.system_id = s.system_id AND f.status = ? AND `+notDismissed+`) AS open_findings,
 			(SELECT count(*) FROM findings f WHERE f.system_id = s.system_id) AS findings,
 			(SELECT count(*) FROM analyses a WHERE a.system_id = s.system_id) AS windows,
 			(SELECT coalesce(sum(a.llm_called), 0) FROM analyses a WHERE a.system_id = s.system_id) AS llm_calls,
 			(SELECT coalesce(sum(a.cost_micros), 0) FROM analyses a WHERE a.system_id = s.system_id) AS cost_micros
 		FROM systems s
 		ORDER BY s.last_seen DESC
-	`, model.StatusOpen)
+	`, model.StatusOpen, VisibilityDismissed)
 	if err != nil {
 		return nil, fmt.Errorf("store: list systems: %w", err)
 	}
@@ -402,8 +404,9 @@ func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 const SortRecent = "recent"
 
 // ListAllFindings is the fleet-wide counterpart to ListFindings: no implicit
-// system scope, no visibility filter -- the operator sees every finding, and
-// each one's class review state alongside it -- and systemID/status/
+// system scope and no visibility filter but one -- the operator sees every
+// finding except those of a dismissed class, and each one's class review
+// state alongside it -- and systemID/status/
 // severity/idLike are each optional filters ("" means no filter). systemID
 // and idLike both match with SQL LIKE, letting an operator paste a prefix of
 // the (unshortened) system ID, the short finding ID shown in the UI table,
@@ -420,13 +423,14 @@ func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity,
 		FROM findings f` + findingClassJoin + `
 		WHERE (? = '' OR f.system_id LIKE ?) AND (? = '' OR f.status = ?) AND (? = '' OR f.severity = ?)
 		  AND (? = '' OR f.id LIKE ? OR f.fingerprint LIKE ? OR f.class_key LIKE ?)
+		  AND ` + notDismissed + `
 		ORDER BY f.last_seen DESC
 		LIMIT ?
 	`
 	systemPattern := likePattern(systemID)
 	idPattern := likePattern(idLike)
 	findings, err := s.queryFindings(ctx, query, systemID, systemPattern, status, status, severity, severity,
-		idLike, idPattern, idPattern, idPattern, clampLimit(limit))
+		idLike, idPattern, idPattern, idPattern, VisibilityDismissed, clampLimit(limit))
 	if err != nil {
 		return nil, err
 	}

@@ -273,6 +273,13 @@ func TestPruneClassesSparesDecidedAndReferencedClasses(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:decided"); err != nil {
 		t.Fatal(err)
 	}
+	// dismissed: a dismissal is a decision, and must apply again when the
+	// class recurs after its findings were pruned.
+	seedClassFinding(t, s, "sys1", "fp-dis", "v3:dismissed", "low", "t", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:dismissed", VisibilityDismissed, "op", 1000))
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:dismissed"); err != nil {
+		t.Fatal(err)
+	}
 	// orphan: neither decided nor referenced, old -- the only candidate.
 	seedClassFinding(t, s, "sys1", "fp-orphan", "v3:orphan", "low", "t", false, 1000)
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM findings WHERE class_key = ?", "v3:orphan"); err != nil {
@@ -291,7 +298,7 @@ func TestPruneClassesSparesDecidedAndReferencedClasses(t *testing.T) {
 	if _, ok, _ := s.GetClass(ctx, "v3:orphan"); ok {
 		t.Fatal("the unreferenced, undecided, old class survived")
 	}
-	for _, key := range []string{"v3:referenced", "v3:decided", "v3:recent"} {
+	for _, key := range []string{"v3:referenced", "v3:decided", "v3:dismissed", "v3:recent"} {
 		if _, ok, _ := s.GetClass(ctx, key); !ok {
 			t.Fatalf("%s was pruned", key)
 		}

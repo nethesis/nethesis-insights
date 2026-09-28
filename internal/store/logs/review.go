@@ -40,7 +40,9 @@ func buildSeverityRankSQL() string {
 }
 
 // ClassFilter selects ListClasses' rows. Visibility "" means every
-// visibility; Key is a LIKE prefix, as on the findings page.
+// visibility but dismissed, unless Key is set: a dismissed class leaves the
+// "all" queue, yet a link to it by key must still find it. Key is a LIKE
+// prefix, as on the findings page.
 type ClassFilter struct {
 	Visibility string
 	Key        string
@@ -78,11 +80,12 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		       (SELECT count(DISTINCT x.system_id) FROM findings x WHERE x.class_key = c.class_key) AS systems,
 		       (SELECT count(*) FROM findings x WHERE x.class_key = c.class_key) AS findings
 		FROM finding_classes c
-		WHERE (? = '' OR c.visibility = ?)
+		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR c.visibility != ?)))
 		  AND (? = '' OR c.class_key LIKE ?)
 		ORDER BY (c.visibility = ?) DESC, systems DESC, findings DESC, c.last_seen DESC, c.class_key
 		LIMIT ?
-	`, f.Visibility, f.Visibility, f.Key, likePattern(f.Key), VisibilityPending, clampLimit(f.Limit))
+	`, f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key),
+		VisibilityPending, clampLimit(f.Limit))
 	if err != nil {
 		return nil, fmt.Errorf("store: list classes: %w", err)
 	}
@@ -203,8 +206,8 @@ func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 }
 
 // ClassStatsRow is /review/stats' row: what one prompt.Version raised and
-// what operators made of it. Pending, Delivered and Internal partition
-// Classes. Security overlaps them: it counts classes tagged security,
+// what operators made of it. Pending, Delivered, Internal and Dismissed
+// partition Classes. Security overlaps them: it counts classes tagged security,
 // whatever their visibility.
 type ClassStatsRow struct {
 	PromptVersion string
@@ -212,6 +215,7 @@ type ClassStatsRow struct {
 	Pending       int
 	Delivered     int
 	Internal      int
+	Dismissed     int
 	Security      int
 }
 
@@ -223,9 +227,10 @@ func (s *Store) ClassStats(ctx context.Context) ([]ClassStatsRow, error) {
 		       sum(CASE WHEN visibility = ? THEN 1 ELSE 0 END),
 		       sum(CASE WHEN visibility = ? THEN 1 ELSE 0 END),
 		       sum(CASE WHEN visibility = ? THEN 1 ELSE 0 END),
+		       sum(CASE WHEN visibility = ? THEN 1 ELSE 0 END),
 		       sum(security)
 		FROM finding_classes GROUP BY 1 ORDER BY max(first_seen) DESC
-	`, VisibilityPending, VisibilityCustomer, VisibilityOperator)
+	`, VisibilityPending, VisibilityCustomer, VisibilityOperator, VisibilityDismissed)
 	if err != nil {
 		return nil, fmt.Errorf("store: class stats: %w", err)
 	}
@@ -234,7 +239,7 @@ func (s *Store) ClassStats(ctx context.Context) ([]ClassStatsRow, error) {
 	out := []ClassStatsRow{}
 	for rows.Next() {
 		var r ClassStatsRow
-		if err := rows.Scan(&r.PromptVersion, &r.Classes, &r.Pending, &r.Delivered, &r.Internal, &r.Security); err != nil {
+		if err := rows.Scan(&r.PromptVersion, &r.Classes, &r.Pending, &r.Delivered, &r.Internal, &r.Dismissed, &r.Security); err != nil {
 			return nil, fmt.Errorf("store: scan class stats: %w", err)
 		}
 		out = append(out, r)

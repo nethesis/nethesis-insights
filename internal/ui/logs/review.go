@@ -28,7 +28,8 @@ var reviewViews = []reviewView{
 	{Key: "pending", Label: "pending review", Visibility: logsstore.VisibilityPending},
 	{Key: "customer", Label: "delivered", Visibility: logsstore.VisibilityCustomer},
 	{Key: "operator", Label: "internal", Visibility: logsstore.VisibilityOperator},
-	{Key: "all", Label: "all", Visibility: ""},
+	{Key: "dismissed", Label: "dismissed", Visibility: logsstore.VisibilityDismissed},
+	{Key: "all", Label: "all but dismissed", Visibility: ""},
 }
 
 func lookupReviewView(key string) reviewView {
@@ -142,6 +143,8 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityCustomer, actor, now)
 	case "/review/internal":
 		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityOperator, actor, now)
+	case "/review/dismiss":
+		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityDismissed, actor, now)
 	case "/review/security":
 		security, ok := parseOnOff(r.PostFormValue("security"))
 		if !ok {

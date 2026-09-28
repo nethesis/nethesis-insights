@@ -28,10 +28,16 @@ const (
 	VisibilityPending  = "pending"
 	VisibilityCustomer = "customer"
 	VisibilityOperator = "operator"
+	// A dismissed class is hidden from every view, customer and operator
+	// alike. Hidden, not dropped: its findings still upsert on recurrence and
+	// OpenFindings still returns them, so the prompt keeps listing them as
+	// known and the model does not re-raise them on every paid call.
+	VisibilityDismissed = "dismissed"
 
 	// The class_decisions actions, one per operator decision.
 	ActionDeliver  = "deliver"
 	ActionInternal = "internal"
+	ActionDismiss  = "dismiss"
 	ActionSecurity = "security"
 	ActionSeverity = "severity"
 	ActionDocRef   = "doc_ref"
@@ -40,7 +46,7 @@ const (
 var (
 	ErrUnknownClass      = errors.New("store: unknown finding class")
 	ErrInvalidSeverity   = errors.New("store: unknown severity")
-	ErrInvalidVisibility = errors.New("store: visibility must be customer or operator")
+	ErrInvalidVisibility = errors.New("store: visibility must be customer, operator or dismissed")
 )
 
 // Class is one finding_classes row.
@@ -103,9 +109,10 @@ func (s *Store) classDecision(ctx context.Context, key, actor, action string, no
 }
 
 // SetClassVisibility decides whether a class's findings reach the customer
-// (VisibilityCustomer, "deliver") or stay on the operator UI
-// (VisibilityOperator, "internal"). Never back to pending: a decision can be
-// changed, not taken back.
+// (VisibilityCustomer, "deliver"), stay on the operator UI
+// (VisibilityOperator, "internal") or leave every view (VisibilityDismissed,
+// "dismiss"). Never back to pending: a decision can be changed, not taken
+// back, so a dismissal is undone by delivering or keeping the class internal.
 func (s *Store) SetClassVisibility(ctx context.Context, key, visibility, actor string, now int64) error {
 	var action string
 	switch visibility {
@@ -113,6 +120,8 @@ func (s *Store) SetClassVisibility(ctx context.Context, key, visibility, actor s
 		action = ActionDeliver
 	case VisibilityOperator:
 		action = ActionInternal
+	case VisibilityDismissed:
+		action = ActionDismiss
 	default:
 		return ErrInvalidVisibility
 	}

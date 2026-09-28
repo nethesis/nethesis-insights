@@ -905,8 +905,8 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
-| `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal, or all of them. |
+| `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here except those of a dismissed class; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
+| `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal or dismissed, or all but the dismissed ones. |
 | `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. |
 | `/logs/review/audit` | Every review decision, who made it and when. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
@@ -1298,8 +1298,21 @@ time next month, which get it delivered with no new review. It never applies
 to just the one finding you happened to be looking at. The decisions are:
 
 - **Deliver** — the class's findings go to customers.
-- **Keep internal** — they stay on the operator dashboard only. Either can be
-  changed later; neither can be taken back to "pending".
+- **Keep internal** — they stay on the operator dashboard only.
+- **Dismiss** — for noise nobody needs to see again. The class disappears
+  from every page: the customer's findings, the operator's findings page,
+  the machines page's open count and the review queue (including "all").
+  Security classes can be dismissed too, and keep their security tag. It
+  does not save money — the AI is still told about these findings, so it
+  does not report them again as new — and it does not delete them. To undo
+  it, pick the **dismissed** view on `/review` and deliver the class or keep
+  it internal. Be careful with a class whose evidence lists several
+  different log lines: it stands for any conclusion the AI drew from that
+  module and priority together, so dismissing it also hides later, different
+  problems from the same place. The form warns about these.
+
+Deliver, keep internal and dismiss can each be replaced by another later;
+none can be taken back to "pending".
 - **Security on/off** — whether customers see the class tagged as a security
   problem. The node's own classification sets it the first time the class is
   seen; after that it is the operator's, and a recurrence never resets it.

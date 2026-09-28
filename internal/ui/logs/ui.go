@@ -124,6 +124,7 @@ const (
 var writableRoutes = map[string]bool{
 	"/review/deliver":  true,
 	"/review/internal": true,
+	"/review/dismiss":  true,
 	"/review/security": true,
 	"/review/severity": true,
 	"/review/doc-ref":  true,

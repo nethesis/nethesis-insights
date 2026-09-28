@@ -144,6 +144,7 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 	}{
 		{"/review/deliver", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa customer alice"},
 		{"/review/internal", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa operator alice"},
+		{"/review/dismiss", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa dismissed alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"on"}}, "security v3:aaaa on alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"off"}}, "security v3:aaaa off alice"},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"high"}}, "severity v3:aaaa high alice"},
@@ -297,7 +298,7 @@ func TestReviewOffersEveryDecisionForASecurityClass(t *testing.T) {
 		{Class: logsstore.Class{Key: "v3:s", Visibility: logsstore.VisibilityPending, Security: true}},
 	}
 	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
-	for _, path := range []string{"/review/deliver", "/review/internal", "/review/security", "/review/severity", "/review/doc-ref"} {
+	for _, path := range []string{"/review/deliver", "/review/internal", "/review/dismiss", "/review/security", "/review/severity", "/review/doc-ref"} {
 		if !strings.Contains(body, path) {
 			t.Errorf("a security class was not offered %s", path)
 		}
@@ -325,5 +326,33 @@ func TestFindingDetailOpensInADialog(t *testing.T) {
 	}
 	if strings.Contains(body, "<details>") {
 		t.Error("findings rows still expand in place")
+	}
+}
+
+// Dismissing a class that groups several log lines hides every later
+// conclusion drawn from its bucket, so the form says so; a one-line class
+// carries no such warning.
+func TestReviewWarnsBeforeDismissingABucketClass(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:bucket", Visibility: logsstore.VisibilityPending}, Evidence: []string{"a", "b"}},
+	}
+	const warning = "groups several different"
+	if body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review").Body.String(); !strings.Contains(body, warning) {
+		t.Fatal("no warning before dismissing a multi-line class")
+	}
+	r.classes[0].Evidence = []string{"a"}
+	if body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review").Body.String(); strings.Contains(body, warning) {
+		t.Fatal("a one-line class carries the bucket warning")
+	}
+}
+
+// The dismissed view is where a dismissal is undone, so it must exist and
+// filter on the stored visibility.
+func TestReviewHasADismissedView(t *testing.T) {
+	r := seededReader()
+	get(t, newTestServer(t, r, nil), "/review?view=dismissed")
+	if r.classSeen.Visibility != logsstore.VisibilityDismissed {
+		t.Fatalf("dismissed view filtered on %q", r.classSeen.Visibility)
 	}
 }

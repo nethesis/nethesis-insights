@@ -1864,7 +1864,7 @@ nothing is copied onto `findings`.
 
 | Route | Store method | Effect |
 |---|---|---|
-| `/review/deliver`, `/review/internal` | `SetClassVisibility` | `visibility = customer`/`operator`. Never back to `pending` (`ErrInvalidVisibility`) |
+| `/review/deliver`, `/review/internal`, `/review/dismiss` | `SetClassVisibility` | `visibility = customer`/`operator`/`dismissed`. Never back to `pending` (`ErrInvalidVisibility`) |
 | `/review/security` | `SetClassSecurity` | the `security` tag, `on`/`off` — nothing else is accepted |
 | `/review/severity` | `SetClassSeverity` | `severity_override`, `""` clears |
 | `/review/doc-ref` | `SetClassDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
@@ -1875,6 +1875,8 @@ cross-site refusal), parameters from the body only, registered only with
 `ADMIN_API_KEY` — and `/review/audit` reads the trail back. There is no
 ignore and no merge: a class has no cost to silence (paying is the gate's
 business) and no second name to fold into (it is derived, not chosen).
+Dismiss is not the removed trigger Ignore under a new name: Ignore stopped
+*paying* for a trigger, dismiss only stops *showing* a class (see below).
 
 `ListClasses` (`internal/store/logs/review.go`) orders the queue **pending
 first** — a bound parameter compared against `VisibilityPending`, not a
@@ -1918,12 +1920,32 @@ Rules that are not visible from the code:
   `UpsertFinding`'s conflict clause uses) for the class keys of the findings
   it just bumped. Without it, a class answered from the trigger memory every
   window forever would look stale to the queue's own `last_seen` ordering.
+- **Dismissed is hidden, not dropped.** The fourth visibility removes a
+  noise class from every view — the customer's, `ListAllFindings`, the
+  systems page's open count, the queue's pending and "all" views — but its
+  findings still upsert on recurrence and `OpenFindings` still returns them.
+  So the prompt keeps listing them as already known and the model does not
+  re-raise them on every paid call; dropping them would let a decision reach
+  the prompt and would delete the only trace of a new problem landing in a
+  dismissed bucket class. It saves no money, by construction: the class is
+  known only after the call, so it cannot decide whether to pay, and a
+  dismissed finding stays open for reuse. A dismissed class is still found
+  by `?key=` and on the queue's `dismissed` view; it is undone by delivering
+  it or keeping it internal, and `PruneClasses` spares it like any decided
+  class, so the dismissal applies again when the class recurs after its
+  findings were pruned. **Security classes can be dismissed too**, and keep
+  their tag: security is a tag, not a visibility, and a new line the edge
+  classifies as security hashes to a different class (`category` is in
+  `fingerprint.Class`), so it can never recur inside a dismissed
+  non-security class. A class whose latest finding cites two or more
+  templates is probably a `bucket:` class, and dismissing it also hides
+  every later, different conclusion in that bucket; the form warns.
 - **A decision changes what the customer reads, never the finding row.**
   The severity override replaces `severity` in `ListFindings` only; the
   stored severity is what `prompt.Render` prints, and `OpenFindings` joins
   nothing.
 - **`/review/stats` partitions by `first_prompt_version`**: pending,
-  delivered and internal partition a version's classes, and "security"
+  delivered, internal and dismissed partition a version's classes, and "security"
   overlaps them, counting tagged classes whatever their visibility. It is the
   number to watch when the prompt changes. It counts retained classes only,
   and an undecided class is pruned once its findings are (see "Maintenance

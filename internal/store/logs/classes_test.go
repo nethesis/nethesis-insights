@@ -178,6 +178,21 @@ func TestVisibilityNeverReturnsToPending(t *testing.T) {
 	if !ok || c.Visibility != VisibilityCustomer {
 		t.Fatalf("visibility reverted to pending on recurrence: %+v", c)
 	}
+
+	// A dismissal is undone by a new decision, never by recurrence.
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 4000))
+	seedClassFinding(t, s, "sys3", "fp-a-3", "v3:a", "low", "a", false, 5000)
+	c, _, err = s.GetClass(ctx, "v3:a")
+	mustDo(t, err)
+	if c.Visibility != VisibilityDismissed {
+		t.Fatalf("a recurrence undid a dismissal: %+v", c)
+	}
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityOperator, "op", 6000))
+	c, _, err = s.GetClass(ctx, "v3:a")
+	mustDo(t, err)
+	if c.Visibility != VisibilityOperator {
+		t.Fatalf("keeping a dismissed class internal did not undo the dismissal: %+v", c)
+	}
 }
 
 // The queue lists pending classes first, whatever their systems/findings
@@ -299,17 +314,137 @@ func TestClassStatsPartitionsEachPromptVersion(t *testing.T) {
 	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
 	seedClassFinding(t, s, "sys1", "fp-b", "v3:b", "low", "b", true, 1000)
 	seedClassFinding(t, s, "sys1", "fp-c", "v3:c", "low", "c", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-d", "v3:d", "low", "d", false, 1000)
 	mustDo(t, s.SetClassVisibility(ctx, "v3:b", VisibilityCustomer, "op", 2000))
 	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityOperator, "op", 2000))
+	mustDo(t, s.SetClassVisibility(ctx, "v3:d", VisibilityDismissed, "op", 2001))
 	rows, err := s.ClassStats(ctx)
 	mustDo(t, err)
-	want := ClassStatsRow{PromptVersion: "p1", Classes: 3, Pending: 1, Delivered: 1, Internal: 1, Security: 1}
+	want := ClassStatsRow{PromptVersion: "p1", Classes: 4, Pending: 1, Delivered: 1, Internal: 1, Dismissed: 1, Security: 1}
 	if len(rows) != 1 || rows[0] != want {
 		t.Fatalf("got %+v, want %+v", rows, want)
 	}
 	all, err := s.ListClassDecisions(ctx, 0)
 	mustDo(t, err)
-	if len(all) != 2 || all[0].Key != "v3:c" {
+	if len(all) != 3 || all[0].Key != "v3:d" {
 		t.Fatalf("decisions newest first: %+v", all)
+	}
+}
+
+// A dismissed class is hidden from the customer like an internal one, on
+// every system it appears on.
+func TestDismissedFindingsNeverReachTheReadAPI(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	seedClassFinding(t, s, "sys2", "fp-a-2", "v3:a", "low", "a", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityCustomer, "op", 2000))
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 3000))
+	for _, sys := range []string{"sys1", "sys2"} {
+		got, err := s.ListFindings(ctx, sys, 0, "")
+		mustDo(t, err)
+		if len(got) != 0 {
+			t.Fatalf("%s: a dismissed finding reached the read API: %+v", sys, got)
+		}
+	}
+}
+
+// Security is a tag, not a visibility: a security class can be dismissed,
+// and keeps its tag while it is.
+func TestSecurityClassesCanBeDismissed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-sec", "v3:sec", "high", "s", true, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:sec", VisibilityDismissed, "op", 2000))
+	c, _, err := s.GetClass(ctx, "v3:sec")
+	mustDo(t, err)
+	if c.Visibility != VisibilityDismissed || !c.Security {
+		t.Fatalf("want dismissed and still tagged security, got %+v", c)
+	}
+	ds, err := s.ClassDecisions(ctx, "v3:sec")
+	mustDo(t, err)
+	if len(ds) != 1 || ds[0].Action != ActionDismiss || ds[0].Actor != "op" {
+		t.Fatalf("a dismissal must be audited as dismiss: %+v", ds)
+	}
+}
+
+// Hidden, not dropped: a recurrence still upserts the finding, and the
+// prompt's input still lists it as known.
+func TestDismissedClassKeepsItsFindings(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 2000))
+	out, err := s.UpsertFinding(ctx, model.Finding{SystemID: "sys1", Fingerprint: "fp-a", Severity: "low",
+		Title: "a", Modules: []string{}, Evidence: []string{}, ClassKey: "v3:a", PromptVersion: "p1"}, 3000)
+	mustDo(t, err)
+	if out != OutcomeBumped {
+		t.Fatalf("a recurrence of a dismissed finding must update it, got %q", out)
+	}
+	open, err := s.OpenFindings(ctx, "sys1")
+	mustDo(t, err)
+	if len(open) != 1 || open[0].Fingerprint != "fp-a" || open[0].OccurrenceCount != 2 || open[0].LastSeen != 3000 {
+		t.Fatalf("OpenFindings must still return the dismissed finding: %+v", open)
+	}
+}
+
+// A dismissed class leaves the queue: not pending, not in "all"; its own
+// view and a lookup by key still find it.
+func TestDismissedClassesLeaveTheQueue(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-b", "v3:b", "low", "b", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 2000))
+
+	for name, f := range map[string]ClassFilter{
+		"pending": {Visibility: VisibilityPending},
+		"all":     {},
+	} {
+		rows, err := s.ListClasses(ctx, f)
+		mustDo(t, err)
+		if len(rows) != 1 || rows[0].Key != "v3:b" {
+			t.Fatalf("%s view: want only v3:b, got %+v", name, rows)
+		}
+	}
+	for name, f := range map[string]ClassFilter{
+		"dismissed": {Visibility: VisibilityDismissed},
+		"by key":    {Key: "v3:a"},
+	} {
+		rows, err := s.ListClasses(ctx, f)
+		mustDo(t, err)
+		if len(rows) != 1 || rows[0].Key != "v3:a" {
+			t.Fatalf("%s: want v3:a, got %+v", name, rows)
+		}
+	}
+}
+
+// The operator's findings page and the systems page leave dismissed
+// classes out too; a finding with no class is kept.
+func TestListAllFindingsHidesDismissedClasses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-b", "v3:b", "low", "b", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-none", "", "low", "n", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 2000))
+
+	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	mustDo(t, err)
+	got := fingerprints(all)
+	if _, ok := got["fp-a"]; ok || len(got) != 2 {
+		t.Fatalf("want fp-b and fp-none only, got %+v", all)
+	}
+	byKey, err := s.ListAllFindings(ctx, "", "", "", "v3:a", "", 0)
+	mustDo(t, err)
+	if len(byKey) != 0 {
+		t.Fatalf("a dismissed finding is hidden even when searched for: %+v", byKey)
+	}
+
+	mustDo(t, s.UpsertSystem(ctx, System{SystemID: "sys1", FirstSeen: 1000, LastSeen: 1000}))
+	systems, err := s.ListSystems(ctx)
+	mustDo(t, err)
+	if len(systems) != 1 || systems[0].OpenFindings != 2 || systems[0].Findings != 3 {
+		t.Fatalf("want 2 open (dismissed left out) of 3 retained, got %+v", systems)
 	}
 }
