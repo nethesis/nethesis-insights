@@ -21,7 +21,8 @@
 # backend.
 http:
   middlewares:
-    # Sized for ~2700 nodes on this host with no firewall of any kind, once
+    # Sized for ~2700 nodes on this host, where nothing in front of Traefik
+    # limits request rates (the host firewall only filters ports), once
     # authd becomes the single pre-auth entry point for all three pipelines.
     # Traefik's rateLimit buckets per source IP by default, and legitimate
     # per-node traffic is far under this: bundles post every 15 minutes

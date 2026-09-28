@@ -16,7 +16,7 @@ see `docs/api/openapi.yaml`.
 - [Overview](#overview)
 - [Requirements](#requirements)
 - [Installing the server](#installing-the-server)
-  - [1. Install the container runtime](#1-install-the-container-runtime)
+  - [1. Prepare the host](#1-prepare-the-host)
   - [2. Bound the journal](#2-bound-the-journal)
   - [3. Fetch the images](#3-fetch-the-images)
   - [4. Install the units](#4-install-the-units)
@@ -37,6 +37,8 @@ see `docs/api/openapi.yaml`.
 - [Upgrading the server](#upgrading-the-server)
 - [Removing the server](#removing-the-server)
 - [Metrics](#metrics)
+  - [What to scrape](#what-to-scrape)
+  - [How the endpoints work](#how-the-endpoints-work)
 - [The operator UI](#the-operator-ui)
   - [Before exposing a dashboard](#before-exposing-a-dashboard)
   - [Signing in](#signing-in)
@@ -88,21 +90,23 @@ of each service may run against a given database.
 | Container runtime | rootful `podman` 5 or newer, with `container-selinux`, from the distribution repositories |
 | CPU and memory | 2 vCPU and 2 GB RAM is enough for a fleet of a few thousand nodes. The databases are small and the model runs off-box. |
 | Disk | 20 GB. The three SQLite files stay in the low hundreds of MB at fleet scale; the journal is capped during install. |
-| Network | ports 80 and 443 free on the host **and reachable from the internet**. The certificate is issued over HTTP-01, so port 80 must be genuinely reachable, not merely unfiltered. |
+| Network | ports 80 and 443 free on the host **and reachable from the internet**. The certificate is issued over HTTP-01, so port 80 must be genuinely reachable, not merely unfiltered. The install turns the host firewall on and leaves only SSH, 80 and 443 open, plus 9100 (host metrics) for the metrics server alone. |
 | DNS | one A record pointing at the host. Everything is served from that one hostname. |
 | Credentials | an OpenAI-compatible API key, if the log pipeline is to call a model. Threat Shield and fleet sizing need none. |
 
 Give the host to this deployment alone. The install caps the journal
-system-wide, which is only correct on a machine that runs nothing else.
+system-wide, turns Cockpit off and closes every port except SSH, 80 and 443
+(and 9100 for the metrics server), which is only correct on a machine that
+runs nothing else.
 
 ## Installing the server
 
 Run everything as `root`. You need the repository's `deploy/` directory on the
 host — copy it there, or clone the repository.
 
-### 1. Install the container runtime
+### 1. Prepare the host
 
-    dnf install -y podman container-selinux httpd-tools
+    dnf install -y podman container-selinux httpd-tools firewalld
     install -d -m 755 /etc/containers/systemd
 
 `httpd-tools` is only for `htpasswd` in step 5.
@@ -111,6 +115,31 @@ Check that quadlet is present, since the whole deployment is quadlet units:
 
     podman --version                                                 # >= 5
     ls /usr/lib/systemd/system-generators/podman-system-generator     # exists
+
+Then close the host:
+
+    bash deploy/host-firewall.sh
+
+This turns Cockpit off and turns the firewall on, with only SSH, HTTP and
+HTTPS allowed. It also opens port 9100 — the host metrics exporter, see
+"Metrics" — to the metrics server and nobody else. By default that is
+`2.119.67.169`, the public address of `metrics.nethesis.it`; the name itself
+is not used, because inside the Nethesis network it points to a private
+address. To allow a different server, put its address (or a name) in front
+of the command: `METRICS_SCRAPER=203.0.113.10 bash deploy/host-firewall.sh`.
+The firewall matches addresses, so a name is looked up once, when the script
+runs, and the script stops, changing nothing, if it does not resolve. **If
+the metrics server changes address, run the script again with the new
+one**: until then it cannot scrape, and re-running also closes the old
+address. Cloud images of Rocky, Alma and RHEL often ship with Cockpit —
+a web login with root access — listening on port 9090 and no firewall at all.
+The script allows SSH before it starts the firewall, so it cannot cut off the
+session you run it from. Running it again changes nothing.
+
+The firewall protects the host's own services. It does **not** protect a port
+a container publishes: podman's own rules let that traffic through whatever
+the firewall says. What keeps the dashboards private is that no container
+publishes a port except the pod's 80 and 443 — step 8 checks this.
 
 ### 2. Bound the journal
 
@@ -131,12 +160,13 @@ This is host-wide. It is the reason the host must be dedicated.
       podman pull ghcr.io/nethesis/nethesis-insights-$s:latest
     done
     podman pull docker.io/library/traefik:v3.7.13
+    podman pull quay.io/prometheus/node-exporter:v1.12.1
 
 The images are public and multi-arch (`linux/amd64`, `linux/arm64`); no
 registry login is needed. The four `ghcr.io` pulls are a warm-up rather than a
 prerequisite: those units carry `Pull=newer`, so the first `systemctl start`
-fetches them anyway. The `traefik` pull is required — that unit is pinned to a
-fixed tag and has no `Pull=` line. To build them on the host instead, use
+fetches them anyway. The `traefik` and `node-exporter` pulls are required —
+those units are pinned to a fixed tag and have no `Pull=` line. To build them on the host instead, use
 `podman build --build-arg SERVICE=<service> -t localhost/insights-<service> .`
 and change each unit's `Image=` line to match.
 
@@ -146,8 +176,8 @@ and change each unit's `Image=` line to match.
     install -m 644 deploy/quadlet/*.volume    /etc/containers/systemd/
     install -m 644 deploy/quadlet/*.container /etc/containers/systemd/
 
-Ten units: one pod, four volumes (the three databases and the certificate
-store), and five containers. All five containers share **one** pod and
+Eleven units: one pod, four volumes (the three databases and the certificate
+store), and six containers. Five of the containers share **one** pod and
 therefore one network namespace. That is not a packaging convenience — it is
 what makes the proxy's connection to a service a real loopback connection with
 no address translation in the path, which is what the default
@@ -156,6 +186,13 @@ no address translation in the path, which is what the default
 The pod publishes ports 80 and 443. No container publishes a port of its own,
 which is what keeps the three operator dashboards reachable only through the
 proxy.
+
+The sixth container, `node-exporter`, reports the host's own CPU, memory, disk
+and network figures. It sits **outside** the pod, on the host's network, and
+listens on port 9100. That is what lets the firewall guard it: unlike a
+published pod port, it is an ordinary host service. It will not start without
+the firewall, and it stops if the firewall stops, so it is never reachable by
+anyone but the metrics server.
 
 ### 5. Create the secrets
 
@@ -244,6 +281,7 @@ router, service or middleware `dynamic.yaml` already names.
     systemctl start authd.service
     systemctl start insightsd.service threatd.service sizingd.service
     systemctl start traefik.service
+    systemctl start node-exporter.service
 
 Quadlet generates these units from the files installed in step 4, so
 `systemctl enable` is neither needed nor available. `WantedBy=multi-user.target`
@@ -251,10 +289,10 @@ inside each unit is what starts them at boot.
 
 ### 8. Verify
 
-    systemctl is-active insights-pod authd insightsd threatd sizingd traefik
+    systemctl is-active insights-pod authd insightsd threatd sizingd traefik node-exporter
     podman ps --format '{{.Names}}\t{{.Status}}'
 
-The four services report `healthy`. The proxy reports only `Up` — its unit
+The four services and `node-exporter` report `healthy`. The proxy reports only `Up` — its unit
 carries no health check, so that is its correct steady state.
 
 Confirm every container actually joined the pod, because one that did not is a
@@ -266,9 +304,18 @@ Then confirm the host's port surface:
 
     ss -tlnp | grep -E ':(80|443|959[0-9]|96[0-9][0-9])\b'
 
-**Expect 80 and 443 only.** A 95xx or 96xx port here means a container kept a
+**Expect 80 and 443 only.** (Port 9100 is also open, held by
+`node_exporter`; the pattern above leaves it out, and the next check covers
+it.) A 95xx or 96xx port here means a container kept a
 published port and is not in the pod. That is an unauthenticated fleet-wide
-dashboard on a public interface — stop and fix it before going further.
+dashboard on a public interface — stop and fix it before going further. The
+firewall does not save you here: it does not filter container ports.
+
+Then the firewall and Cockpit:
+
+    firewall-cmd --list-services           # ssh http https (dhcpv6-client may be listed too)
+    firewall-cmd --list-rich-rules         # one 9100 rule per metrics server address, nothing else
+    systemctl is-active cockpit.socket     # inactive, or no such unit
 
 Finally, the routed path:
 
@@ -457,7 +504,7 @@ conversely, **a pipeline reached from inside that CIDR accepts any password**.
 Two consequences:
 
 - Never publish a pipeline's own port. The units do not, and the shared pod is
-  what makes the default value correct: all five containers share one network
+  what makes the default value correct: all five containers in the pod share one network
   namespace, so the proxy's connection really is `127.0.0.1` by construction.
 - Widen it only for a client you would trust unauthenticated. Testing a
   pipeline from another machine needs it widened to that machine's address,
@@ -555,8 +602,8 @@ generated unit.
 
 Stop everything, then remove the units:
 
-    systemctl stop traefik insightsd threatd sizingd authd insights-pod
-    rm -f /etc/containers/systemd/{authd,insightsd,threatd,sizingd,traefik}.container
+    systemctl stop node-exporter traefik insightsd threatd sizingd authd insights-pod
+    rm -f /etc/containers/systemd/{authd,insightsd,threatd,sizingd,traefik,node-exporter}.container
     rm -f /etc/containers/systemd/insights.pod
     rm -f /etc/containers/systemd/{insights-logs,insights-threat,insights-sizing,traefik-acme}.volume
     systemctl daemon-reload
@@ -580,6 +627,16 @@ Then the configuration, the secrets and the images:
       podman rmi ghcr.io/nethesis/nethesis-insights-$s:latest
     done
     podman rmi docker.io/library/traefik:v3.7.13
+    podman rmi quay.io/prometheus/node-exporter:v1.12.1
+
+The firewall stays on and Cockpit stays off; both were changes to the host
+rather than to this deployment. To undo them:
+
+    firewall-cmd --permanent --remove-service=http --remove-service=https
+    firewall-cmd --permanent --list-rich-rules | grep 'port="9100"' |
+      while read -r r; do firewall-cmd --permanent --remove-rich-rule="$r"; done
+    firewall-cmd --reload
+    systemctl enable --now cockpit.socket    # only if Cockpit was in use
 
 Two things to know afterwards. Nodes keep calling in and get a connection
 refused, which they treat as a retryable outage — they do not need
@@ -589,6 +646,29 @@ that imported the blocklist keeps its last copy until its own TTL lapses;
 removing the server does not unblock anything.
 
 ## Metrics
+
+### What to scrape
+
+Six endpoints per server. Point Prometheus at every one of them; a sample
+config with these exact job names is further down.
+
+| Job name | URL | What it measures | Access |
+|---|---|---|---|
+| `nethesis-insights-logs` | `https://<host>/metrics/logs` | the log pipeline (`insightsd`): queue, AI calls and spend | scrape password (install step 5) |
+| `nethesis-insights-threat` | `https://<host>/metrics/threat` | Threat Shield (`threatd`): ingest queue, blocklist pass | scrape password |
+| `nethesis-insights-sizing` | `https://<host>/metrics/sizing` | fleet sizing (`sizingd`): cohort pass | scrape password |
+| `nethesis-insights-authd` | `https://<host>/metrics/authd` | node login checks (`authd`): cache hits, upstream answers | scrape password |
+| `nethesis-insights-traefik` | `https://<host>/metrics/traefik` | the proxy: every request, by route and status | scrape password |
+| `nethesis-insights-node` | `http://<host>:9100/metrics` | the host: CPU, memory, disk, network | none — the firewall lets in only the metrics server |
+
+The scrape password is user `prometheus` with the `METRICS_AUTH_PASSWORD`
+value from `/etc/insights/metrics.env`.
+
+A server that does not run every pipeline answers `502` on the missing ones'
+paths. On a server running Threat Shield alone, scrape just `threat`,
+`authd`, `traefik` and `node`.
+
+### How the endpoints work
 
 Every binary — `authd`, `insightsd`, `threatd`, `sizingd` — exposes
 Prometheus exposition text at `GET /metrics` on its own `LISTEN_ADDR`, next to
@@ -696,19 +776,17 @@ scrape_configs:
     basic_auth: {username: prometheus, password: <the METRICS_AUTH_PASSWORD value>}
     static_configs: [{targets: ["insights.example.com"]}]
     metrics_path: /metrics/traefik
+  - job_name: nethesis-insights-node
+    static_configs:
+      - targets: ["insights.example.com:9100"]
 ```
 
-On a development host you can skip all of this and run Prometheus and Grafana
-in the pod itself, scraping the four binaries over loopback with no credential
-at all — see [the development monitoring
-stack](../deploy/dev/README.md). That is a dev convenience and is deliberately
-absent from a production deployment, which is expected to be scraped by the
-monitoring system that already exists. **Never install it on a host serving
-real nodes**: inside the pod, Grafana counts as the trusted proxy and shares
-the dashboards' web address, which lets it post events under any system and
-make allowlist changes. The development stack's README explains both.
+The last job is the host itself: `node_exporter`'s standard `node_*` metrics,
+straight from port 9100 rather than through the proxy. It has no password and
+no TLS; the firewall, which lets in only the metrics server, is its only
+protection (install step 1).
 
-The five jobs all scrape the same host on the same port, differing only in
+The five `/metrics/` jobs all scrape the same host on the same port, differing only in
 `metrics_path`, so the `job` label is what separates them. That label is what
 you need for the `go_*` and `process_*` metrics, which are identically named
 on all four binaries — `go_goroutines{job="nethesis-insights-authd"}`. Every

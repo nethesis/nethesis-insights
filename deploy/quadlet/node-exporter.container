@@ -1,0 +1,49 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Prometheus node exporter (host metrics)
+# Port 9100 is open to the whole internet except for firewalld, which lets
+# only the metrics server in (deploy/host-firewall.sh). BindsTo= makes that
+# the only way this runs: with no firewalld the unit does not start, and a
+# firewalld that stops or dies takes this down with it, so "scraper only"
+# never quietly becomes "anyone".
+BindsTo=firewalld.service
+After=firewalld.service
+
+[Container]
+# Pinned, like traefik.container: a third-party image nobody here builds, so
+# it has no Pull= line and install step 3 pulls it.
+Image=quay.io/prometheus/node-exporter:v1.12.1
+ContainerName=node-exporter
+# Deliberately NOT in insights.pod. It reports on the host, so it needs the
+# host's network and process namespaces. The host network is also what makes
+# the firewall apply at all: a pod port is published through netavark's
+# DNAT, which firewalld does not filter (see insights.pod), whereas a
+# host-network listener is an ordinary host listener, which it does.
+Network=host
+PodmanArgs=--pid=host
+# The host's root, read-only, which is where the filesystem and hardware
+# collectors read from. SecurityLabelDisable instead of :z because :z on /
+# would relabel the entire host filesystem for SELinux -- the one mistake in
+# this directory that cannot be undone with a restart.
+Volume=/:/host:ro,rslave
+SecurityLabelDisable=true
+Exec=--path.rootfs=/host --web.listen-address=:9100
+HealthCmd=wget -qO /dev/null http://127.0.0.1:9100/metrics || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=5s
+
+[Service]
+Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

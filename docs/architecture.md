@@ -129,6 +129,23 @@ three pipelines — share one podman pod and therefore one network namespace, so
 Traefik's connection to a backend is a genuine loopback connection with no NAT
 in the path; see "Authentication" below for why that is load-bearing.
 
+The host runs firewalld (`deploy/host-firewall.sh`: ssh, http and https only,
+Cockpit off), but that filters the host's own listeners and nothing more:
+netavark's DNAT sends a container's published port around it, which was
+verified on the deployed host. So the rule that keeps the three
+unauthenticated dashboards private is still "no container publishes a port
+except the pod's 80 and 443", not the firewall.
+
+`node-exporter.container` is the one thing the firewall *does* guard, and that
+is why it is outside the pod on the host network: a host-network listener is
+an ordinary host listener, so firewalld filters it. Port 9100 is open only to
+`METRICS_SCRAPER` — default `2.119.67.169`, `metrics.nethesis.it`'s public
+address, since the name resolves to a private one inside Nethesis's network;
+a name given there is resolved when the script runs, because firewalld
+matches addresses, not names — and the
+unit `BindsTo=firewalld.service`, so with no firewall the exporter is not
+running rather than open to everyone.
+
 **Three independent pipelines, one proxy, one auth cache, three databases.**
 The bundle path spends money per call, so everything in it exists to avoid
 spending it. Threat Shield and fleet sizing are both high-volume factual data

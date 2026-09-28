@@ -8,11 +8,15 @@ Description=nethesis-insights
 
 [Pod]
 PodName=insights
-# The only ports that exist outside this host. Every backend listens on
+# The only ports the pod publishes (node-exporter.container, outside the pod
+# on the host network, adds 9100 for the metrics server only). Every backend
+# listens on
 # loopback inside the shared namespace and has no published port at all, which
 # is what keeps the three unauthenticated operator UIs reachable only through
-# Traefik's BasicAuth -- the target machine has no firewall of any kind, so
-# "not published" is worth a great deal more than "bound to 127.0.0.1".
+# Traefik's BasicAuth. deploy/host-firewall.sh does not change that: firewalld
+# filters the host's own listeners, but netavark's DNAT sends a published
+# container port around it (verified on the deployed host), so "not
+# published" is still worth a great deal more than "bound to 127.0.0.1".
 PublishPort=80:80
 PublishPort=443:443
 
