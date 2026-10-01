@@ -649,8 +649,8 @@ config with the labels the dashboard needs is further down.
 
 | `service` label | URL | What it measures | Access |
 |---|---|---|---|
-| `logs` | `https://<host>/metrics/logs` | the log pipeline (`insightsd`): queue, AI calls and spend | only from the metrics server |
-| `threat` | `https://<host>/metrics/threat` | Threat Shield (`threatd`): ingest queue, blocklist pass | only from the metrics server |
+| `logs` | `https://<host>/metrics/logs` | the log pipeline (`insightsd`): machines reporting, gate decisions, findings, queue, AI calls and spend | only from the metrics server |
+| `threat` | `https://<host>/metrics/threat` | Threat Shield (`threatd`): machines reporting, events, blocklist size, ingest queue, blocklist pass | only from the metrics server |
 | `sizing` | `https://<host>/metrics/sizing` | fleet sizing (`sizingd`): cohort pass | only from the metrics server |
 | `authd` | `https://<host>/metrics/authd` | node login checks (`authd`): cache hits, upstream answers | only from the metrics server |
 | `traefik` | `https://<host>/metrics/traefik` | the proxy: every request, by route and status | only from the metrics server |
@@ -711,6 +711,11 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
 | `insightsd_trigger_suppressions_total{reason}` | `insightsd` | windows the gate fired on that were answered without calling the AI: `trigger_hit` (already asked on that machine, answer still current) — the only reason |
+| `insightsd_windows_total{result}` | `insightsd` | every new 15-minute window, by what the gate decided: `called` (an AI call was made — counted per attempt, so a retried window counts again), `gated_out` (nothing worth a call), `reused` (answered from trigger memory) or `budget` (stopped by the spending ceiling before the gate ran). A duplicate window is not counted |
+| `insightsd_active_systems`, `threatd_active_systems` | both | machines that reported in the last 24 hours: a log bundle for `insightsd`, a threat event for `threatd` |
+| `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
+| `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
+| `threatd_blocklist_entries` | `threatd` | addresses in the published feed — what nodes download, after the allowlist and `BLOCKLIST_MAX_ENTRIES` |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -724,8 +729,10 @@ gate reasons and findings.
 **Counters start at 0, not missing.** Every counter above whose labels are a
 known list — the four `insightsd_llm_calls_total` outcomes, the
 `insightsd_budget_rejections_total` reason, the
-`insightsd_trigger_suppressions_total` reason, both `authd_*` families,
-`threatd_ingestq_full_total`, and both `<svc>_pass_runs_total` results — is
+`insightsd_trigger_suppressions_total` reason, the four
+`insightsd_windows_total` results, every `threatd_events_total` result, both
+`authd_*` families, `threatd_ingestq_full_total`, and both
+`<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
 counts has ever happened. That is what lets an alert like
 `rate(insightsd_llm_calls_total{result="permanent"}[5m]) > 0` work on a
@@ -739,6 +746,18 @@ occur), and `<svc>_pass_last_success_timestamp_seconds` appears only once
 that pass has genuinely succeeded — a `0` there would mean "last succeeded in
 1970" and would trip every staleness alert on every restart
 (`time() - threatd_pass_last_success_timestamp_seconds > 3600`).
+
+**The counts of machines, findings and blocklist entries update on the
+background pass, not on every scrape.** They are read from the database,
+and reading it on every scrape would compete with the pipeline's own writes.
+`threatd`'s are refreshed after each consensus pass (every
+`BLOCKLIST_CONSENSUS_INTERVAL`, default 5 minutes) and `insightsd`'s after
+each maintenance pass (every `MAINT_INTERVAL`, default 10 minutes), so a
+graph of them moves in steps of that size. Right after a restart they are
+missing until the first pass finishes, and `threatd_blocklist_entries` stays
+missing until a consensus pass has succeeded: "not counted yet" is not the
+same as zero. If a refresh fails, the previous values stay up and the pass
+is counted as failed in `<svc>_pass_runs_total`.
 
 A sample Prometheus scrape config. It is the shape `metrics.nethesis.it`
 already uses: one job for the five `/metrics/` endpoints, one for the host,
@@ -824,7 +843,7 @@ resolved when the dashboard opens, not when it is imported. It appears as
 **Nethesis Insights** (uid `nethesis-insights`) already pointing at your
 default Prometheus, and the **Data source** picker at its top left switches
 it to another one if you have more than one. The **Server** picker next to it
-chooses which Nethesis Insights server the panels show. Twenty-five panels
+chooses which Nethesis Insights server the panels show. Thirty-one panels
 in eight rows: overview, HTTP, the log pipeline, Threat Shield, forward auth,
 background passes, the proxy, and the Go runtime. Nothing in it writes anywhere or needs
 a plugin. The host's own `node_*` metrics are not on it; any standard

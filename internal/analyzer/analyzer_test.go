@@ -542,6 +542,7 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 type recordingAnalyzerMetrics struct {
 	budgetRejections    []string
 	triggerSuppressions []string
+	windows             []string
 	llmCalls            []struct {
 		result string
 		cost   int64
@@ -554,6 +555,7 @@ func (r *recordingAnalyzerMetrics) hooks() *Metrics {
 		TriggerSuppressed: func(reason string) {
 			r.triggerSuppressions = append(r.triggerSuppressions, reason)
 		},
+		Window: func(result string) { r.windows = append(r.windows, result) },
 		LLMCall: func(result string, cost int64) {
 			r.llmCalls = append(r.llmCalls, struct {
 				result string

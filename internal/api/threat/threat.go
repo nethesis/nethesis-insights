@@ -140,6 +140,10 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.cfg.Events != nil {
+		s.cfg.Events(res.Counters)
+	}
+
 	slog.Debug("threat report accepted",
 		"system_id", authenticatedSystemID,
 		"decisions", len(report.Decisions),

@@ -208,6 +208,18 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	return c, nil
 }
 
+// ActiveSystems counts the distinct systems with an event observed at or
+// after since, for threatd_active_systems. threat_events rather than
+// threat_ingest_daily, because the latter is keyed by day and would make the
+// count jump at every UTC midnight.
+func (s *Store) ActiveSystems(ctx context.Context, since int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(DISTINCT system_id) FROM threat_events WHERE observed_at >= ?`, since).Scan(&n); err != nil {
+		return 0, fmt.Errorf("threat: count active systems: %w", err)
+	}
+	return n, nil
+}
+
 // ThreatEventRow is one stored threat_events row.
 type ThreatEventRow struct {
 	ID, SystemID, AttackerIP, Scenario string

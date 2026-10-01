@@ -5,9 +5,11 @@ package analyzer
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/nethesis/nethesis-insights/internal/budget"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
@@ -295,5 +297,49 @@ func TestProcessReportsTriggerSuppressions(t *testing.T) {
 
 	if len(rec.triggerSuppressions) != 1 || rec.triggerSuppressions[0] != SuppressedTriggerHit {
 		t.Fatalf("trigger suppressions = %v, want [%s]", rec.triggerSuppressions, SuppressedTriggerHit)
+	}
+}
+
+// Every fresh window lands in exactly one WindowResults bucket, and a
+// duplicate in none: windows_total is "gated vs not gated" on the dashboard,
+// so a path that forgot to count would make the split quietly wrong.
+func TestProcessCountsEveryWindowOnce(t *testing.T) {
+	s := newTestStore(t)
+	stub := &llm.Stub{Content: emptyJSON}
+	c := &clock{t: 1000}
+	a := New(s, stub, testBudget(s), reuseConfig(time.Hour), c.now)
+	rec := &recordingAnalyzerMetrics{}
+	a.Metrics = rec.hooks()
+
+	seed(t, a, "sys1") // novel template
+	c.t = 2000
+	process(t, a, deviating("sys1", 1000)) // new trigger: paid
+	c.t = 3000
+	process(t, a, deviating("sys1", 2000)) // same trigger: reused
+	quiet := steadyBundle("sys1")
+	quiet.Window = model.Window{Start: 3000, End: 3100}
+	process(t, a, quiet)
+	process(t, a, quiet) // duplicate: not counted
+
+	want := []string{WindowCalled, WindowCalled, WindowReused, WindowGatedOut}
+	if !slices.Equal(rec.windows, want) {
+		t.Fatalf("windows = %v, want %v", rec.windows, want)
+	}
+}
+
+func TestProcessCountsBudgetSuppressedWindows(t *testing.T) {
+	s := newTestStore(t)
+	stub := &llm.Stub{Content: emptyJSON}
+	capped := budget.New(s, budget.Config{MaxCallsPerSystemPerDay: 1}, func() int64 { return 1000 })
+	a := New(s, stub, capped, testConfig(), func() int64 { return 1000 })
+	rec := &recordingAnalyzerMetrics{}
+	a.Metrics = rec.hooks()
+
+	seed(t, a, "sys1")
+	process(t, a, deviating("sys1", 1000))
+
+	want := []string{WindowCalled, WindowBudget}
+	if !slices.Equal(rec.windows, want) {
+		t.Fatalf("windows = %v, want %v", rec.windows, want)
 	}
 }

@@ -21,16 +21,13 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 )
 
 // PassName is what this pass is called in the log line svc.RunPassLoop
 // writes and in the `pass` label of the metrics it feeds. Exported because
 // cmd/insightsd needs the same string to pre-create that label's children
-// (metrics.NewPass) while RunLoop below is what actually hands it to
-// svc.RunPassLoop -- one definition, so the log line and the metric can
-// never disagree about this pass's name.
+// (metrics.NewPass) and to hand to svc.RunPassLoop -- one definition, so
+// the log line and the metric can never disagree about this pass's name.
 const PassName = "log maintenance"
 
 // Reader is the slice of logsstore.Store this pass needs. Declared here,
@@ -89,7 +86,7 @@ func New(r Reader, cfg Config) *Runner {
 // job, not a secondary step protecting a published artifact that must not
 // be blocked by it. Run therefore always returns nil; the error return
 // exists only to satisfy the same `Run(ctx, now) error` shape blocklist.Runner
-// and baseline.Runner have, for RunLoop below.
+// and baseline.Runner have, for svc.RunPassLoop.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	templatesPruned := r.prune(ctx, "templates", r.store.PruneTemplates, now-r.cfg.TemplateRetention.Milliseconds())
 	findingsPruned := r.prune(ctx, "findings", r.store.PruneFindings, now-r.cfg.FindingRetention.Milliseconds())
@@ -127,21 +124,4 @@ func (r *Runner) prune(ctx context.Context, table string, fn func(context.Contex
 		return 0
 	}
 	return n
-}
-
-// RunLoop runs the pass immediately and then every interval until ctx is
-// cancelled -- immediately so a restart does not leave months of backlog
-// unpruned until the first tick, the same reason blocklist's and baseline's
-// loops run their first pass before waiting.
-//
-// This used to be a third byte-for-byte copy of the ticker loop threatd and
-// sizingd each kept privately, unexported, in their own main.go: no package
-// under internal/platform existed yet that every binary could import, so
-// each pass loop's owner carried its own. internal/platform/svc now holds
-// that loop (svc.RunPassLoop), so RunLoop is a thin wrapper over it: *Runner
-// already satisfies svc.Pass, and there is nothing left for this method to
-// do but supply the log line's name. cmd/insightsd/main.go is unaffected --
-// it still just calls maintRunner.RunLoop(ctx, interval).
-func (r *Runner) RunLoop(ctx context.Context, interval time.Duration, rec svc.PassRecorder) <-chan struct{} {
-	return svc.RunPassLoop(ctx, PassName, r, interval, rec)
 }

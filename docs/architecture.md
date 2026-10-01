@@ -217,9 +217,9 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/platform/auth` | `ForwardAuth` — forwards `Authorization: Basic` to an external validator, with a pepper-hashed TTL cache and fail-closed behaviour. `Validate` takes a service: empty for the plain subscription check, a name for `<base>/service/<name>`, which is both the URL and part of the cache key. Used only by `cmd/authd` now; moved from `internal/auth`. An optional nil-safe `ForwardAuth.Metrics` hook (`CacheHit`, `CacheMiss`, `Upstream`) is fed on every `Validate` call; `cmd/authd` wires it to `metrics.Auth`. |
 | `internal/platform/httpx` | `ClientIP`/`SystemID` (the trusted-proxy boundary every pipeline relies on), `Logging` (the request logger, wrapped around every binary's mux) and `Healthz`. `Logging` takes an optional `MetricsRecorder` (`*metrics.HTTP` satisfies it) and feeds it method/route/status/duration for every request after logging it -- `RouteLabel` derives the metrics label from the matched `net/http` `ServeMux` pattern (`Request.Pattern`), never `r.URL.Path`, so the label set stays the small fixed list of registered routes instead of being unbounded. |
 | `internal/platform/sqlitex` | `Open` — WAL, `busy_timeout=5000`, `SetMaxOpenConns(1)` — plus the write mutex every `store/*` package embeds. |
-| `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Trigger`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
+| `internal/platform/metrics` | `NewRegistry(service)`/`Handler` (a per-process `Registry` pairing the raw `*prometheus.Registry` the scrape is gathered from with a `WrapRegistererWithPrefix(service+"_", …)` registerer everything here registers through, plus the `/metrics` handler over it) and typed constructors -- `HTTP` (request count/duration, fed by `httpx.Logging`), `LLM`, `Budget`, `Trigger`, `Pass` (satisfies `svc.PassRecorder`), `Auth` (satisfies `auth.Metrics`'s hooks), `IngestQueueFull`, `Results` (a counter with one caller-owned `result` vocabulary: `insightsd_windows_total`, `threatd_events_total`), `RegisterQueueGauges` (GaugeFuncs over `queue.Queue`/`ingestq.Queue[T]`'s already-live `Depth`/`Cap`/`Workers`), `StoreGauges` (database-derived gauges a periodic pass `Set`s and the scrape serves from memory -- see "Metrics"). Every label set is a small closed enumeration -- never `system_id`, a raw path, a scenario, a template or a module, the same cardinality rule "Gate reasons carry no computed values" states for `gate_reasons`. |
 | `internal/platform/ingestq` | Generic bounded work queue (`Queue[T]`, `ErrFull`, a fixed worker pool, `Depth`/`Cap`/`Workers`). Bounds concurrency against a single-writer database; it is not a durability layer and not a latency-hiding one. threatd's ingest is the only user; `internal/queue` (log-pipeline bundles) is deliberately not rebuilt on top of it — see that row. An optional nil-safe `Queue.Metrics.Full` hook (`*metrics.IngestQueueFull` supplies it) counts `ErrFull`, separately from the generic `503` `<svc>_http_requests_total` already records, because it names the specific saturated-queue condition rather than the generic symptom. |
-| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint.Runner.RunLoop` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `<svc>_pass_runs_total`/`_pass_duration_seconds`/`_pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
+| `internal/platform/svc` | `Getenv`/`GetenvInt`/`GetenvDuration` and `RunPassLoop` (plus the `Pass` interface it takes, and `Then`, which appends a refresh step to a pass). These were three byte-for-byte-identical copies — in `cmd/threatd/main.go`, `cmd/sizingd/main.go` and, for the loop, `internal/maint` — until this package existed to hold them; see "Consensus pass", "Cohort pass" and "Maintenance pass" below for how each caller uses it. `RunPassLoop` also takes an optional `PassRecorder` (`*metrics.Pass` satisfies it), fed the pass's name, error and duration after every run — the one hook that gives `blocklist consensus`, `sizing cohort` and `log maintenance` their `<svc>_pass_runs_total`/`_pass_duration_seconds`/`_pass_last_success_timestamp_seconds` metrics without each caller wiring its own timing. |
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding — and `fingerprint.Class`, the same identity without the system, which is what an operator reviews. Pure, sha256-based. |
 | `internal/trigger` | `trigger.Key` — the fleet-wide name of the condition that made the gate fire, derived from `gate.Decision` alone, and the key of the per-system reuse memory; `trigger.IsSecurity`. Pure, sha256-based, prefixed by `trigger.Version`. See "Cost control: trigger memory". |
@@ -227,7 +227,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
 | `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, baselines), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`), the trigger memory (`triggers.go`) and the finding-class review state (`classes.go` for the decisions, `review.go` for the queue's reads). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneClasses`/`PruneAnalyses`/`PruneSystemTriggers`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
-| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, trigger, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `TriggerSuppressed`, `LLMCall`) reports one call per budget-suppressed window, one per window the trigger memory answered, and one per LLM attempt, classed `success`/`transient`/`permanent`/`parse` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.Trigger`/`metrics.LLM`. |
+| `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, trigger, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `TriggerSuppressed`, `LLMCall`, `Window`) reports one call per budget-suppressed window, one per window the trigger memory answered, one per LLM attempt, classed `success`/`transient`/`permanent`/`parse`, and one per fresh window, classed by `WindowResults` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.Trigger`/`metrics.LLM`/`metrics.Results`. |
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses`, `system_nodes` and `system_triggers` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
@@ -430,9 +430,9 @@ Driven by a ticker in `cmd/insightsd` at `MAINT_INTERVAL` (default 10m), with
 one pass run immediately at startup so a restart does not leave months of
 unpruned backlog sitting until the first tick — the same reasoning as
 `blocklist.Runner`'s and `baseline.Runner`'s own immediate-first-pass loops,
-and now the same code: `maint.Runner.RunLoop(ctx, interval)` is a one-line
-wrapper over `svc.RunPassLoop`, the same helper the consensus and cohort
-passes drive directly from their `cmd/*` binaries. insightsd had no
+and now the same code: `cmd/insightsd` drives it through `svc.RunPassLoop`,
+the same helper the consensus and cohort passes use, wrapped in `svc.Then` so
+the database-derived gauges are refreshed after every run (see "Metrics"). insightsd had no
 housekeeping at all before this: `internal/store/logs` carried zero `DELETE`
 statements, so with the fleet feeding it every 15 minutes,
 `system_templates`, `findings` and `analyses` all grew without bound.
@@ -787,8 +787,8 @@ Runs every `SIZING_PASS_INTERVAL` (default 1h — the inputs are whole days, so
 faster cannot produce a different answer), started after the listeners, first
 pass immediately, in `cmd/sizingd`, via `svc.RunPassLoop(ctx, "sizing cohort",
 cohortPass, sizingPassInterval)`. Same call, with a different `svc.Pass` and
-name, drives the consensus loop in `cmd/threatd` and (through
-`maint.Runner.RunLoop`) insightsd's housekeeping pass — see
+name, drives the consensus loop in `cmd/threatd` and insightsd's
+housekeeping pass — see
 `internal/platform/svc` in "Package layering". The two `cmd/*` copies of this
 loop were byte-for-byte identical (confirmed by diff before extracting
 `svc.RunPassLoop`), which is why they moved rather than staying "the same
@@ -929,13 +929,25 @@ Everywhere a live accessor already exists -- `queue.Queue.Depth/Cap/Workers`,
 `ingestq.Queue[T].Depth/Cap/Workers` -- `metrics.RegisterQueueGauges` wires a
 `GaugeFunc` reading it directly at scrape time, so there is no polling loop
 and no second source of truth to drift from the queue's own state. The same
-"read the existing accessor, add no bookkeeping" rule is why no DB-derived
-gauge (open findings, blocklist size, published cohorts) was added: each
-pipeline has exactly one SQLite writer, and a gauge that ran a query per
-scrape would compete with it. Should one ever be needed, it must be computed
-once on the pipeline's own periodic pass (`internal/maint`, `internal/blocklist`,
-`internal/baseline`) and cached in memory behind the gauge, never queried
-live.
+"read the existing accessor, add no bookkeeping" rule is why a DB-derived
+gauge is never queried at scrape time: each pipeline has exactly one SQLite
+writer, and a gauge that ran a query per scrape would compete with it on the
+scraper's schedule. The ones that exist -- `insightsd_active_systems`,
+`insightsd_findings{status}`, `threatd_active_systems`,
+`threatd_blocklist_entries` -- are `metrics.StoreGauges`: computed once on
+the pipeline's own periodic pass and served from memory. `svc.Then(pass,
+refresh)` runs the refresh after every pass whatever the pass returned (a
+failed consensus pass must not also freeze the gauges) and fails the run if
+either failed, so a broken refresh shows on `<svc>_pass_runs_total`. A
+failed refresh leaves the last good reading up; before the first one every
+family is absent, because "not counted yet" must not read as "none". The
+same reason leaves `threatd_blocklist_entries` out until the feed is
+`Ready`. Their resolution is therefore the pass interval -- 5 minutes for
+consensus, 10 for maintenance -- which is plenty for counts that move over
+hours. "Active" means reported within `metrics.ActiveWindow` (24 h), one
+value for both binaries; threatd measures it on `threat_events.observed_at`
+rather than `threat_ingest_daily`, whose day key would make the count jump
+at every UTC midnight.
 
 **Every enumerable child is pre-created at 0.** A prometheus `CounterVec`
 creates a child only on the first `WithLabelValues` call, and a family with
@@ -949,7 +961,9 @@ reason. So each constructor calls `WithLabelValues` for every label value it
 can enumerate and discards the result, which registers the child at 0.
 Where the vocabulary belongs to another package the constructor takes it as a
 parameter (`metrics.NewBudget(reg, budget.SuppressedSystemCap)`,
-`metrics.NewAuth(reg, auth.Upstream*)`, `metrics.NewPass(reg, maint.PassName)`)
+`metrics.NewAuth(reg, auth.Upstream*)`, `metrics.NewPass(reg, maint.PassName)`,
+`metrics.NewResults(reg, …, analyzer.WindowResults...)` and
+`model.ThreatCounterResults`)
 rather than restating the strings, so there is never a second copy to drift.
 Two deliberate exceptions: the `HTTP` families stay lazy, because `status`
 and `method` are not closed sets and enumerating them would invent series
@@ -959,8 +973,13 @@ succeeded at the Unix epoch" and would fire
 `time() - threatd_pass_last_success_timestamp_seconds > 3600` on every restart.
 Absent is the honest representation of "has not succeeded yet".
 
-Three optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`
-(LLM call outcome and budget rejections, wired in `cmd/insightsd`),
+Four optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`
+(LLM call outcome, budget rejections, and `Window` -- one call per fresh
+window, `called`/`gated_out`/`reused`/`budget`, for
+`insightsd_windows_total`; a duplicate window is not counted), the threat
+API's `Config.Events` (each `202`'s `model.ThreatCounters`, for
+`threatd_events_total{result}`; a `503` is not counted because the reporter
+re-sends it), both wired in their `cmd/*`,
 `auth.ForwardAuth.Metrics` (cache hit/miss and upstream result, wired in
 `cmd/authd`), and `ingestq.Queue[T].Metrics.Full` (the saturated-queue
 counter, wired in `cmd/threatd`) -- each the same shape as the pattern
@@ -968,9 +987,8 @@ established elsewhere in this codebase for an optional side effect: a struct
 of function fields, checked for nil before every call, so every existing
 caller and test predates the field and needs no change. `svc.RunPassLoop`'s
 optional `PassRecorder` parameter (`*metrics.Pass` satisfies it) is the
-fourth: it is what gives `blocklist consensus`, `sizing cohort` and `log
-maintenance` (via `internal/maint.Runner.RunLoop`, itself a thin wrapper over
-`RunPassLoop`) their run/duration/last-success metrics without each pass
+fifth: it is what gives `blocklist consensus`, `sizing cohort` and `log
+maintenance` their run/duration/last-success metrics without each pass
 package depending on `internal/platform/metrics` itself -- only the three
 `main()`s that already import it do.
 

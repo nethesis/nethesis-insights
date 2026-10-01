@@ -5,6 +5,7 @@ package svc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -14,6 +15,24 @@ import (
 // internal/maint.Runner) all satisfy it.
 type Pass interface {
 	Run(ctx context.Context, now int64) error
+}
+
+// Then returns a Pass that runs p and then after, on every run and whatever
+// p returned, failing if either did. It is how a binary refreshes the gauges
+// it reads from its database: on the pass that already owns that database's
+// schedule, never on the scraper's.
+func Then(p Pass, after func(ctx context.Context, now int64) error) Pass {
+	return thenPass{p, after}
+}
+
+type thenPass struct {
+	p     Pass
+	after func(ctx context.Context, now int64) error
+}
+
+func (t thenPass) Run(ctx context.Context, now int64) error {
+	err := t.p.Run(ctx, now)
+	return errors.Join(err, t.after(ctx, now))
 }
 
 // PassRecorder observes one completed run of a Pass: its name (the same

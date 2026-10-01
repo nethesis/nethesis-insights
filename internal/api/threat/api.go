@@ -116,6 +116,13 @@ type Config struct {
 	// dropped at ingest -- see threat.Options.MaxAge.
 	MaxEventAge time.Duration
 	Now         func() int64
+
+	// Events, when set, is fed the counters of every report the handler
+	// answered 202 -- what ingest did with each decision, for
+	// threatd_events_total. A report refused with 503 is not fed: the
+	// reporter sends it again, and counting it twice would inflate the
+	// rate.
+	Events func(model.ThreatCounters)
 }
 
 func defaultNow() int64 { return time.Now().UnixMilli() }

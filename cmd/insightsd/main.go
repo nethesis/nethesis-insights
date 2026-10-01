@@ -28,6 +28,7 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/maint"
+	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/platform/svc"
@@ -251,6 +252,9 @@ func main() {
 	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)
 	triggerMetrics := metrics.NewTrigger(reg, analyzer.TriggerSuppressions...)
 	passMetrics := metrics.NewPass(reg, maint.PassName)
+	windowMetrics := metrics.NewResults(reg, "windows_total",
+		"Fresh bundle windows, by what the gate decided: called, gated_out, reused (trigger memory) or budget.",
+		analyzer.WindowResults...)
 
 	bud := budget.New(s, budget.Config{
 		MaxConcurrency:          llmMaxConcurrency,
@@ -278,6 +282,7 @@ func main() {
 		BudgetRejected:    budgetMetrics.Rejected,
 		TriggerSuppressed: triggerMetrics.Suppressed,
 		LLMCall:           llmMetrics.Call,
+		Window:            windowMetrics.Inc,
 	}
 
 	// Ingest hands bundles to the queue and answers immediately; the workers
@@ -286,6 +291,11 @@ func main() {
 	q := queue.New(queueSize, analysisTimeout, az.Process)
 	q.Start(queueWorkers)
 	metrics.RegisterQueueGauges(reg, "bundle", q.Depth, q.Cap, q.Workers)
+	storeGauges := metrics.NewStoreGauges(reg,
+		metrics.StoreGauge{Name: "active_systems", Help: "Systems that sent a log bundle in the last 24 hours."},
+		metrics.StoreGauge{Name: "findings", Help: "Retained findings by status; dismissed classes are left out.",
+			Label: "status", Values: []string{model.StatusOpen, model.StatusStale}},
+	)
 
 	// The housekeeping pass: no LLM, no gate, no fingerprint -- just pruning
 	// system_templates, findings and analyses. See internal/maint's doc and
@@ -405,7 +415,8 @@ func main() {
 	// pass runs immediately rather than one interval in, so a restart does
 	// not leave months of backlog unpruned until MAINT_INTERVAL elapses.
 	maintCtx, stopMaint := context.WithCancel(context.Background())
-	maintDone := maintRunner.RunLoop(maintCtx, maintInterval, passMetrics)
+	maintDone := svc.RunPassLoop(maintCtx, maint.PassName,
+		svc.Then(maintRunner, logGauges(s, storeGauges)), maintInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -435,4 +446,29 @@ func main() {
 	stopMaint()
 	<-maintDone
 	slog.Info("maintenance loop stopped")
+}
+
+// logGauges refreshes insightsd's database-derived gauges after each
+// maintenance pass -- after, so a finding the pass just pruned is not
+// counted: the systems reporting now, and the findings by status.
+func logGauges(s *logsstore.Store, g *metrics.StoreGauges) func(context.Context, int64) error {
+	return func(ctx context.Context, now int64) error {
+		active, err := s.ActiveSystems(ctx, now-metrics.ActiveWindow.Milliseconds())
+		if err != nil {
+			return err
+		}
+		counts, err := s.FindingCounts(ctx)
+		if err != nil {
+			return err
+		}
+		findings := make(map[string]float64, len(counts))
+		for status, n := range counts {
+			findings[status] = float64(n)
+		}
+		g.Set(metrics.StoreReading{
+			"active_systems": {"": float64(active)},
+			"findings":       findings,
+		})
+		return nil
+	}
 }

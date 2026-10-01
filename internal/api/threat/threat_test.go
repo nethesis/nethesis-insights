@@ -219,6 +219,36 @@ func TestThreatIngestAnswers503WhenTheQueueIsFull(t *testing.T) {
 	}
 }
 
+// Events is fed each 202's counters and nothing for a 503: the reporter
+// re-sends a refused batch, and counting it then too would double it.
+func TestThreatIngestFeedsEventCountersOnlyForAcceptedReports(t *testing.T) {
+	var fed []model.ThreatCounters
+	cfg := Config{
+		MaxDecisions: 500,
+		Now:          func() int64 { return threatNow },
+		Events:       func(c model.ThreatCounters) { fed = append(fed, c) },
+	}
+	body := reportBody(t, testSystemID,
+		decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec"),
+		decision("10.0.0.1", "crowdsecurity/ssh-bf", "crowdsec"))
+
+	full := NewServer(&fakeThreatStore{}, &fakeQueue{err: ingestq.ErrFull}, nil, trustedProxy, cfg, nil, nil)
+	if rec := postThreat(t, full, body, true); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d, want 503", rec.Code)
+	}
+	if len(fed) != 0 {
+		t.Fatalf("a refused report was counted: %+v", fed)
+	}
+
+	ok := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, trustedProxy, cfg, nil, nil)
+	if rec := postThreat(t, ok, body, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", rec.Code)
+	}
+	if len(fed) != 1 || fed[0].Accepted != 1 || fed[0].DroppedPrivateIP != 1 {
+		t.Fatalf("fed counters: %+v, want one report with 1 accepted and 1 private dropped", fed)
+	}
+}
+
 // A batch every decision of which is dropped by threat.Sanitize still has
 // counters worth recording: RecordIngestCounters (now run by the consumer)
 // is what keeps a reporter whose every event is rejected visible on

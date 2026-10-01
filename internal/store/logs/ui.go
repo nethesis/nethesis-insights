@@ -183,6 +183,37 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	return c, nil
 }
 
+// ActiveSystems counts the systems whose last bundle arrived at or after
+// since -- the fleet that is reporting now, for insightsd_active_systems.
+func (s *Store) ActiveSystems(ctx context.Context, since int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM systems WHERE last_seen >= ?`, since).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count active systems: %w", err)
+	}
+	return n, nil
+}
+
+// FindingCounts counts the retained findings by status, for
+// insightsd_findings. Dismissed classes are left out, as in every other view.
+func (s *Store) FindingCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT f.status, count(*) FROM findings f`+findingClassJoin+`
+		WHERE `+notDismissed+` GROUP BY f.status`, VisibilityDismissed)
+	if err != nil {
+		return nil, fmt.Errorf("store: count findings by status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	counts := map[string]int{}
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("store: scan finding count: %w", err)
+		}
+		counts[status] = n
+	}
+	return counts, rows.Err()
+}
+
 // ListSystems returns every system plus per-system aggregates, ordered by
 // last_seen descending. The six correlated subqueries each hit an index
 // prefixed by system_id. The open count leaves out dismissed classes, like

@@ -25,6 +25,7 @@ import (
 
 	threatapi "github.com/nethesis/nethesis-insights/internal/api/threat"
 	"github.com/nethesis/nethesis-insights/internal/blocklist"
+	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/ingestq"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
@@ -278,6 +279,9 @@ func main() {
 	httpMetrics := metrics.NewHTTP(reg)
 	passMetrics := metrics.NewPass(reg, consensusName)
 	ingestFullMetrics := metrics.NewIngestQueueFull(reg)
+	eventMetrics := metrics.NewResults(reg, "events_total",
+		"Decisions received on POST /v1/events, by what ingest did with each: accepted, a dropped_* reason, or truncated.",
+		model.ThreatCounterResults...)
 
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
@@ -291,12 +295,21 @@ func main() {
 	ingestQueue.Metrics = &ingestq.Metrics{Full: ingestFullMetrics.Counter("threat_events")}
 	ingestQueue.Start(limits.QueueWorkers)
 	metrics.RegisterQueueGauges(reg, "threat_events", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
+	storeGauges := metrics.NewStoreGauges(reg,
+		metrics.StoreGauge{Name: "active_systems", Help: "Distinct systems with a threat event observed in the last 24 hours."},
+		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in the published blocklist feed."},
+	)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
 		MaxDecisions:               limits.MaxDecisions,
 		MaxAllowlistRequestsPerSys: limits.MaxAllowlistPerSystem,
 		MaxEventAge:                consensusCfg.Retention,
 		Now:                        func() int64 { return time.Now().UnixMilli() },
+		Events: func(c model.ThreatCounters) {
+			for i, n := range c.ByResult() {
+				eventMetrics.Add(model.ThreatCounterResults[i], n)
+			}
+		},
 	}, metrics.Handler(reg), httpMetrics)
 
 	httpServer := &http.Server{
@@ -373,7 +386,8 @@ func main() {
 	// interval in, so a restart does not leave the feed answering 503 for
 	// five minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
-	consensusDone := svc.RunPassLoop(consensusCtx, consensusName, consensus, consensusInterval, passMetrics)
+	consensusDone := svc.RunPassLoop(consensusCtx, consensusName,
+		svc.Then(consensus, threatGauges(s, snapshot, storeGauges)), consensusInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -402,4 +416,25 @@ func main() {
 	stopConsensus()
 	<-consensusDone
 	slog.Info("consensus loop stopped")
+}
+
+// threatGauges refreshes threatd's database-derived gauges after each
+// consensus pass: the systems reporting now, from the store, and the
+// published feed's size, from the snapshot the pass just generated -- the
+// number the fleet actually downloads, after the allowlist and
+// BLOCKLIST_MAX_ENTRIES. While no pass has ever succeeded there is no feed,
+// so that family is left out rather than reported as an empty blocklist.
+func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.StoreGauges) func(context.Context, int64) error {
+	return func(ctx context.Context, now int64) error {
+		active, err := s.ActiveSystems(ctx, now-metrics.ActiveWindow.Milliseconds())
+		if err != nil {
+			return err
+		}
+		reading := metrics.StoreReading{"active_systems": {"": float64(active)}}
+		if v := snap.View(); v.Ready {
+			reading["blocklist_entries"] = map[string]float64{"": float64(v.Entries)}
+		}
+		g.Set(reading)
+		return nil
+	}
 }

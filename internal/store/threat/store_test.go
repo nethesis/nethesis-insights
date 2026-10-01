@@ -578,3 +578,25 @@ func mustExec(t *testing.T, s *Store, query string) {
 		t.Fatalf("exec %q: %v", query, err)
 	}
 }
+
+func TestActiveSystemsCountsDistinctRecentReporters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for sys, evs := range map[string][]model.ThreatEvent{
+		"old": {threatEvent("203.0.113.1", "ssh", 1000, 1)},
+		// Two events from one system count once.
+		"busy": {threatEvent("203.0.113.2", "ssh", 6000, 1), threatEvent("203.0.113.3", "http", 7000, 1)},
+		"edge": {threatEvent("203.0.113.4", "ssh", 5000, 1)},
+	} {
+		if _, _, err := s.InsertThreatEvents(ctx, sys, evs); err != nil {
+			t.Fatalf("insert %s: %v", sys, err)
+		}
+	}
+	n, err := s.ActiveSystems(ctx, 5000)
+	if err != nil {
+		t.Fatalf("ActiveSystems: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ActiveSystems = %d, want 2", n)
+	}
+}

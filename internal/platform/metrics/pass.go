@@ -35,9 +35,8 @@ const (
 // passes "blocklist consensus", cmd/sizingd "sizing cohort", cmd/insightsd
 // maint.PassName -- so that pass_runs_total's success and failure children
 // are pre-created at 0 and the family is present before the first run
-// finishes. Each caller passes the same string it hands svc.RunPassLoop (or,
-// for insightsd, the one maint.Runner.RunLoop hands it), so there is no
-// second copy to drift.
+// finishes. Each caller passes the same string it hands svc.RunPassLoop, so
+// there is no second copy to drift.
 //
 // pass_duration_seconds needs no pre-creation: a histogram vec child would
 // export an all-zero bucket set, and a rate over an absent histogram is the

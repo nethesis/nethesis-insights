@@ -69,3 +69,20 @@ type ThreatCounters struct {
 	DroppedTime      int `json:"dropped_time"`
 	Truncated        int `json:"truncated"`
 }
+
+// ThreatCounterResults names every ThreatCounters field by its JSON key, in
+// field order: the closed vocabulary threatd_events_total{result} is
+// pre-created from. ByResult returns the counts in the same order, so the
+// two cannot drift.
+var ThreatCounterResults = []string{
+	"accepted", "dropped_type", "dropped_scope", "dropped_origin",
+	"dropped_bad_ip", "dropped_private_ip", "dropped_time", "truncated",
+}
+
+// ByResult returns each counter in ThreatCounterResults order.
+func (c ThreatCounters) ByResult() []int {
+	return []int{
+		c.Accepted, c.DroppedType, c.DroppedScope, c.DroppedOrigin,
+		c.DroppedBadIP, c.DroppedPrivateIP, c.DroppedTime, c.Truncated,
+	}
+}

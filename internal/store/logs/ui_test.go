@@ -742,3 +742,31 @@ func TestGateRollupCountsSuppressedWindowsApart(t *testing.T) {
 		t.Fatalf("windows=%d calls=%d suppressed=%d, want 3/1/2", r.Windows, r.LLMCalls, r.Suppressed)
 	}
 }
+
+func TestActiveSystemsCountsOnlyRecentSystems(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for id, seen := range map[string]int64{"old": 1000, "edge": 5000, "new": 9000} {
+		mustDo(t, s.UpsertSystem(ctx, System{SystemID: id, FirstSeen: seen, LastSeen: seen}))
+	}
+	n, err := s.ActiveSystems(ctx, 5000)
+	mustDo(t, err)
+	if n != 2 {
+		t.Fatalf("ActiveSystems = %d, want 2 (the cutoff is inclusive)", n)
+	}
+}
+
+func TestFindingCountsByStatusLeavesOutDismissedClasses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedFinding(t, ctx, s, "sys1", "fp-open", "low", model.StatusOpen, 1000)
+	seedFinding(t, ctx, s, "sys2", "fp-stale", "low", model.StatusStale, 1000)
+	seedClassFinding(t, s, "sys3", "fp-dismissed", "v3:dismissed", "low", "d", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:dismissed", VisibilityDismissed, "op", 2000))
+
+	got, err := s.FindingCounts(ctx)
+	mustDo(t, err)
+	if got[model.StatusOpen] != 1 || got[model.StatusStale] != 1 || len(got) != 2 {
+		t.Fatalf("FindingCounts = %v, want one open and one stale", got)
+	}
+}

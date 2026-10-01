@@ -41,6 +41,26 @@ const (
 // pre-create one child per reason.
 var TriggerSuppressions = []string{SuppressedTriggerHit}
 
+// What became of one fresh window, for insightsd_windows_total: the gate's
+// verdict as the fleet's cost profile, in one family. A duplicate window is
+// not counted -- nothing was decided for it.
+const (
+	// WindowCalled: the gate fired and the LLM was called. Counted per
+	// attempt, so a window retried after a transient error counts again,
+	// the same as llm_calls_total.
+	WindowCalled = "called"
+	// WindowGatedOut: the gate found nothing worth a call.
+	WindowGatedOut = "gated_out"
+	// WindowReused: the gate fired and the trigger memory answered.
+	WindowReused = "reused"
+	// WindowBudget: the budget stopped the window before the gate ran.
+	WindowBudget = "budget"
+)
+
+// WindowResults lists every value above, for the metrics package to
+// pre-create one child per result.
+var WindowResults = []string{WindowCalled, WindowGatedOut, WindowReused, WindowBudget}
+
 // Store is the slice of logsstore.Store the analyzer needs: the write path
 // that records templates, baselines, findings and the analyses ledger, plus
 // the prior-state reads the gate depends on. Declared here, narrow, rather
@@ -84,8 +104,8 @@ type Config struct {
 // Metrics is the optional counter set Process reports against: one call to
 // BudgetRejected per window the budget suppressed before the gate ran, one
 // call to TriggerSuppressed per window the trigger memory answered (one of
-// TriggerSuppressions), and
-// one call to LLMCall per attempt -- "success", "transient", "permanent" or
+// TriggerSuppressions), one call to Window per fresh window (one of
+// WindowResults), and one call to LLMCall per attempt -- "success", "transient", "permanent" or
 // "parse" (see the metrics.LLMResult* constants), with costMicros set only
 // on success. Nil fields (or a nil *Metrics, the zero value of Analyzer's
 // Metrics field) are skipped, so every existing caller and test is
@@ -95,6 +115,13 @@ type Metrics struct {
 	BudgetRejected    func(reason string)
 	TriggerSuppressed func(reason string)
 	LLMCall           func(result string, costMicros int64)
+	Window            func(result string)
+}
+
+func (m *Metrics) window(result string) {
+	if m != nil && m.Window != nil {
+		m.Window(result)
+	}
 }
 
 func (m *Metrics) budgetRejected(reason string) {
@@ -258,6 +285,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		slog.Warn("window suppressed by budget",
 			"system_id", b.SystemID, "window_start", b.Window.Start, "limit", verdict.Suppressed)
 		a.Metrics.budgetRejected(verdict.Suppressed)
+		a.Metrics.window(WindowBudget)
 		return a.record(ctx, b, analysisEntry{
 			windowStart:  b.Window.Start,
 			windowEnd:    b.Window.End,
@@ -286,6 +314,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// 6. Gated out: record bookkeeping, no LLM call.
 	if !decision.Call {
 		slog.Info("bundle gated out", "system_id", b.SystemID, "window_start", b.Window.Start)
+		a.Metrics.window(WindowGatedOut)
 		return a.record(ctx, b, analysisEntry{
 			windowStart: b.Window.Start,
 			windowEnd:   b.Window.End,
@@ -319,6 +348,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			return fmt.Errorf("analyzer: record trigger sighting: %w", err)
 		}
 		a.Metrics.triggerSuppressed(suppressed)
+		a.Metrics.window(WindowReused)
 		return a.record(ctx, b, analysisEntry{
 			windowStart:  b.Window.Start,
 			windowEnd:    b.Window.End,
@@ -358,6 +388,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	if err != nil {
 		return fmt.Errorf("analyzer: budget acquire: %w", err)
 	}
+	a.Metrics.window(WindowCalled)
 	llmStart := time.Now()
 	resp, err := a.llm.Complete(ctx, llm.Request{Model: a.cfg.Model, UserPrompt: rendered})
 	release()

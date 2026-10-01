@@ -145,3 +145,40 @@ func TestRunPassLoopFeedsTheRecorderOnSuccessAndFailure(t *testing.T) {
 		t.Fatalf("got calls=%d name=%q err=%v, want 1 \"failing pass\" a non-nil error", calls2, name2, err2)
 	}
 }
+
+// Then runs its follow-up even when the pass failed -- a failed consensus
+// pass must not also freeze the gauges -- and reports both failures.
+func TestThenRunsAfterWhateverThePassReturned(t *testing.T) {
+	passErr, afterErr := errors.New("pass"), errors.New("after")
+	for _, tc := range []struct {
+		name          string
+		pass, after   error
+		wantPass      bool
+		wantAfter     bool
+		wantAfterRuns int
+	}{
+		{"both succeed", nil, nil, false, false, 1},
+		{"pass fails", passErr, nil, true, false, 1},
+		{"after fails", nil, afterErr, false, true, 1},
+		{"both fail", passErr, afterErr, true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &recordingPass{calls: make(chan int64, 1), err: tc.pass}
+			var afterNow []int64
+			err := Then(p, func(_ context.Context, now int64) error {
+				afterNow = append(afterNow, now)
+				return tc.after
+			}).Run(context.Background(), 42)
+
+			if got := <-p.calls; got != 42 {
+				t.Fatalf("pass ran with now = %d, want 42", got)
+			}
+			if len(afterNow) != tc.wantAfterRuns || afterNow[0] != 42 {
+				t.Fatalf("after ran with %v, want [42]", afterNow)
+			}
+			if errors.Is(err, passErr) != tc.wantPass || errors.Is(err, afterErr) != tc.wantAfter {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
