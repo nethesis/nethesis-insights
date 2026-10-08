@@ -11,6 +11,7 @@ type Stub struct {
 	Model        string
 	InputTokens  int
 	OutputTokens int
+	CachedTokens int
 	Err          error
 
 	Calls       int
@@ -28,5 +29,6 @@ func (s *Stub) Complete(ctx context.Context, req Request) (Response, error) {
 		Model:        s.Model,
 		InputTokens:  s.InputTokens,
 		OutputTokens: s.OutputTokens,
+		CachedTokens: s.CachedTokens,
 	}, nil
 }

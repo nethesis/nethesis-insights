@@ -7,9 +7,9 @@ import "github.com/prometheus/client_golang/prometheus"
 
 // Results is a counter with one `result` label whose vocabulary belongs to
 // the caller: insightsd's windows_total (what the gate decided for each
-// window) and threatd's events_total (what ingest did with each decision).
-// The vocabulary is passed in, never restated here, so there is no second
-// copy to drift -- the same arrangement as NewTrigger and NewBudget.
+// window) and gate_templates_total, and threatd's events_total (what ingest
+// did with each decision). The vocabulary is passed in, never restated here,
+// so there is no second copy to drift -- the same arrangement as NewBudget.
 type Results struct {
 	counter *prometheus.CounterVec
 }

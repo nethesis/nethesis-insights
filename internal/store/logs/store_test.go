@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
@@ -223,7 +222,7 @@ func TestSamplesNeverStoredInSystemTemplates(t *testing.T) {
 	}
 	// KnownTemplates is keyed by canonical key, not raw text: the gate asks
 	// "have we seen this condition", not "have we seen this exact string".
-	if !known[model.CanonicalKey("mod1", "tpl1")] {
+	if _, ok := known[model.CanonicalKey("mod1", "tpl1")]; !ok {
 		t.Fatalf("expected tpl1 to be known, got %v", known)
 	}
 }
@@ -239,33 +238,27 @@ func contains(s, substr string) bool {
 	})()
 }
 
-func TestBaselinesSeedThenBlend(t *testing.T) {
+// KnownTemplates carries last_seen because the gate's silence rule reads it,
+// and last_seen never moves backwards: a late retry of an older window would
+// otherwise make a template the system sent minutes ago look silent.
+func TestKnownTemplatesCarriesLastSeenThatNeverMovesBack(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	digest := []model.DigestEntry{{ModuleID: "mod1", Priority: 1, Observed: 100}}
-	if err := s.UpsertBaselines(ctx, "sys1", digest, 0.3); err != nil {
-		t.Fatalf("seed: %v", err)
+	key := model.CanonicalKey("mod1", "tpl1")
+	for _, seen := range []int64{5000, 3000} {
+		if err := s.UpsertTemplates(ctx, "sys1", []model.Template{
+			{Template: "tpl1", Count: 1, ModuleID: "mod1", LastSeen: seen},
+		}, 9000); err != nil {
+			t.Fatalf("upsert templates: %v", err)
+		}
 	}
-	baselines, err := s.Baselines(ctx, "sys1")
+	known, err := s.KnownTemplates(ctx, "sys1")
 	if err != nil {
-		t.Fatalf("baselines: %v", err)
+		t.Fatalf("known templates: %v", err)
 	}
-	if v := baselines[gate.BaselineKey{ModuleID: "mod1", Priority: 1}]; v != 100 {
-		t.Fatalf("expected seed to observed value 100, got %v", v)
-	}
-
-	digest2 := []model.DigestEntry{{ModuleID: "mod1", Priority: 1, Observed: 200}}
-	if err := s.UpsertBaselines(ctx, "sys1", digest2, 0.3); err != nil {
-		t.Fatalf("blend: %v", err)
-	}
-	baselines, err = s.Baselines(ctx, "sys1")
-	if err != nil {
-		t.Fatalf("baselines: %v", err)
-	}
-	want := 0.3*200 + 0.7*100
-	if v := baselines[gate.BaselineKey{ModuleID: "mod1", Priority: 1}]; v != want {
-		t.Fatalf("expected blended value %v, got %v", want, v)
+	if got := known[key]; got != 5000 {
+		t.Fatalf("last_seen = %d, want 5000 (the later sighting)", got)
 	}
 }
 
@@ -354,7 +347,7 @@ func TestUpsertTemplatesStoresTheModuleFamily(t *testing.T) {
 	// Both instances resolve to the one stored key -- this is the round trip
 	// that makes the second instance of a line non-novel.
 	for _, m := range []string{"nethvoice5", "nethvoice39", "nethvoice"} {
-		if !known[model.CanonicalKey(m, line)] {
+		if _, ok := known[model.CanonicalKey(m, line)]; !ok {
 			t.Errorf("%s: stored template did not read back as known", m)
 		}
 	}

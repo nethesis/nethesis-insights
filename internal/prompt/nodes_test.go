@@ -16,9 +16,6 @@ func nodeBundle(nodes ...[]int) model.Bundle {
 		SystemID:         "sys-1",
 		CollectorVersion: "1.0.0",
 		Window:           model.Window{Start: 1700000000000, End: 1700000900000},
-		Digest: []model.DigestEntry{
-			{ModuleID: "openldap1", Priority: 3, Observed: 10},
-		},
 	}
 	for i, ns := range nodes {
 		b.Templates = append(b.Templates, model.Template{

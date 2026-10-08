@@ -6,10 +6,9 @@
 // write path used by the analyzer, does not balloon.
 //
 // None of these take s.db's write mutex: that mutex serializes writers only,
-// and the existing read paths (KnownTemplates, Baselines, queryFindings)
-// already follow that precedent. Every unbounded-by-default list here is
-// bounded (see clampLimit; ListBaselines is the one deliberate exception,
-// documented at its own definition), and none of them ever returns a raw
+// and the existing read paths (KnownTemplates, queryFindings) already
+// follow that precedent. Every unbounded-by-default list here is bounded
+// (see clampLimit), and none of them ever returns a raw
 // sample -- this is the read-side half of the rule that samples live only in
 // the bundle in flight and are never persisted.
 package logs
@@ -45,7 +44,7 @@ const dayMillis = 86400000
 
 // Counts is per-table row counts, for the status page.
 type Counts struct {
-	Systems, Templates, Baselines, Findings, Analyses int
+	Systems, Templates, Findings, Analyses int
 }
 
 // SystemRow is one system plus the cross-table aggregates the operator UI's
@@ -77,14 +76,11 @@ type AnalysisRow struct {
 	DurationMs             int
 	Error                  string
 
-	// SuppressedBy names what stopped this window from being paid for, if
-	// something did -- a budget limit, or the trigger memory. A gated row
-	// with a value here was not cheap: it was refused, or answered from
-	// memory.
+	// SuppressedBy names the budget limit that stopped this window from
+	// being paid for, if one did. A gated row with a value here was not
+	// cheap: it was refused.
 	SuppressedBy string
-	// TriggerKey is the window's trigger key, when the gate fired.
-	TriggerKey string
-	CreatedAt  int64
+	CreatedAt    int64
 }
 
 // GateRow is one distinct gate-reason set, after the three empty spellings
@@ -95,10 +91,9 @@ type AnalysisRow struct {
 // counts only the rows that actually cost money, so LLMCalls-PaidCalls is the
 // number of calls that were made and produced nothing.
 //
-// Suppressed counts the windows something stopped from being paid for --
-// a budget limit (those carry no reasons, so they land in the nil row) or
-// the trigger memory (those keep the reasons the gate fired with). For a
-// reasoned row, Windows == LLMCalls + Suppressed.
+// Suppressed counts the windows a budget limit stopped from being paid for.
+// Those carry no reasons, so they land in the nil row; for a reasoned row,
+// Windows == LLMCalls.
 type GateRow struct {
 	Reasons                                  []string // nil means "no reasons"
 	Windows, LLMCalls, PaidCalls, Suppressed int
@@ -120,14 +115,6 @@ type TemplateRow struct {
 	Priority                               int
 	TotalCount                             int64
 	FirstSeen, LastSeen                    int64
-}
-
-// BaselineRow is one module_baselines row, for the /baselines page.
-type BaselineRow struct {
-	SystemID, ModuleID string
-	Priority           int
-	EWMARate           float64
-	UpdatedAt          int64
 }
 
 // clampLimit applies defaultListLimit whenever the caller passed a
@@ -170,9 +157,6 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM system_templates`).Scan(&c.Templates); err != nil {
 		return Counts{}, fmt.Errorf("store: count templates: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM module_baselines`).Scan(&c.Baselines); err != nil {
-		return Counts{}, fmt.Errorf("store: count baselines: %w", err)
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM findings`).Scan(&c.Findings); err != nil {
 		return Counts{}, fmt.Errorf("store: count findings: %w", err)
@@ -270,7 +254,7 @@ func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, system_id, window_start, window_end, gated, llm_called, completed,
 		       gate_reasons, input_tokens, output_tokens, cached_tokens, cost_micros, model,
-		       duration_ms, error, suppressed_by, trigger_key, created_at
+		       duration_ms, error, suppressed_by, created_at
 		FROM analyses
 		WHERE (? = '' OR system_id = ?)
 		ORDER BY window_start DESC
@@ -286,16 +270,15 @@ func (s *Store) ListAnalyses(ctx context.Context, systemID string, limit int) ([
 		var r AnalysisRow
 		var gated, llmCalled, completed int
 		var gateReasons string
-		var errMsg, suppressedBy, triggerKey sql.NullString
+		var errMsg, suppressedBy sql.NullString
 		var cachedTokens sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.SystemID, &r.WindowStart, &r.WindowEnd, &gated, &llmCalled, &completed,
 			&gateReasons, &r.InputTokens, &r.OutputTokens, &cachedTokens, &r.CostMicros, &r.Model,
-			&r.DurationMs, &errMsg, &suppressedBy, &triggerKey, &r.CreatedAt); err != nil {
+			&r.DurationMs, &errMsg, &suppressedBy, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan analysis row: %w", err)
 		}
 		r.CachedTokens = int(cachedTokens.Int64)
 		r.SuppressedBy = suppressedBy.String
-		r.TriggerKey = triggerKey.String
 		r.Gated = gated != 0
 		r.LLMCalled = llmCalled != 0
 		r.Completed = completed != 0
@@ -499,36 +482,6 @@ func (s *Store) ListTemplates(ctx context.Context, systemID string, limit int) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list templates: %w", err)
-	}
-	return result, nil
-}
-
-// ListBaselines returns module_baselines rows. systemID == "" means every
-// system. Unlike the other list methods this has no limit: baselines are
-// bounded by (system_id, module_id, priority) cardinality, not by an
-// unbounded event stream.
-func (s *Store) ListBaselines(ctx context.Context, systemID string) ([]BaselineRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT system_id, module_id, priority, ewma_rate, updated_at
-		FROM module_baselines
-		WHERE (? = '' OR system_id = ?)
-		ORDER BY system_id, module_id, priority
-	`, systemID, systemID)
-	if err != nil {
-		return nil, fmt.Errorf("store: list baselines: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	result := []BaselineRow{}
-	for rows.Next() {
-		var r BaselineRow
-		if err := rows.Scan(&r.SystemID, &r.ModuleID, &r.Priority, &r.EWMARate, &r.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("store: scan baseline row: %w", err)
-		}
-		result = append(result, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list baselines: %w", err)
 	}
 	return result, nil
 }

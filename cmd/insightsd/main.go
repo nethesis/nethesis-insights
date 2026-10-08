@@ -114,19 +114,25 @@ func main() {
 	llmBaseURL := svc.Getenv("LLM_BASE_URL", "")
 	llmModel := svc.Getenv("LLM_MODEL", "")
 	llmAPIKey := svc.Getenv("LLM_API_KEY", "")
-	gateTolerance := svc.GetenvFloat("GATE_TOLERANCE", 3.0)
-	// Absolute floors under the deviation condition. A ratio is not evidence
-	// when the denominator is 2: the dev fleet's median bucket baseline was
-	// 3.1 lines per window, and the buckets that fired most often were the
-	// smallest ones in it.
-	gateMinExpected := svc.GetenvFloat("GATE_MIN_EXPECTED", 10)
-	gateMinObserved := svc.GetenvFloat("GATE_MIN_OBSERVED", 20)
+	// Empty sends no service_tier. "flex" halves OpenAI's price for slower
+	// answers; raise LLM_TIMEOUT and ANALYSIS_TIMEOUT with it.
+	llmServiceTier := svc.Getenv("LLM_SERVICE_TIER", "")
 	// How many novel templates a window needs before novelty alone pays for a
 	// call. A new security template still fires on its own.
 	gateMinNewTemplates := svc.GetenvInt("GATE_MIN_NEW_TEMPLATES", 3)
-	// How many templates that are neither novel, security-classified nor in a
-	// deviating module the prompt carries as context.
-	promptMaxAmbient := svc.GetenvInt("PROMPT_MAX_AMBIENT", 60)
+	// The share of tokens an unknown template must share with a known one to
+	// count as known (gate.Config.Similarity); 1 turns the check off. 0.9
+	// skipped 28% of the dev fleet's spend.
+	gateSimilarity := svc.GetenvFloat("GATE_SIMILARITY", 0.9)
+	// How long a known template must be absent for its return to count as
+	// new (gate.Config.Silence); 0 turns it off. Just over a week, so a
+	// weekly job's lines do not come back "new" every week.
+	gateSilence := svc.GetenvDuration("GATE_SILENCE", 8*24*time.Hour)
+	// How many templates that are neither novel nor security-classified the
+	// prompt carries as context. They are most of a prompt's tokens and none
+	// of its evidence: 60 lines of ~175 characters were up to ~3,500 of the
+	// ~8,200 tokens of an average dev-fleet call.
+	promptMaxAmbient := svc.GetenvInt("PROMPT_MAX_AMBIENT", 20)
 	// The ceiling under LLM spend (internal/budget). The per-system cap is
 	// what makes the fleet's worst case arithmetic rather than emergent.
 	llmMaxConcurrency := svc.GetenvInt("LLM_MAX_CONCURRENCY", 4)
@@ -153,17 +159,10 @@ func main() {
 	// tag is read off any masked record, whatever its module.
 	excludeServices := getenvModuleSet("PIPELINE_EXCLUDE_SERVICES", "insights,alert-proxy")
 	staleAfter := svc.GetenvDuration("STALE_AFTER", 24*time.Hour)
-	// TRIGGER_REUSE_WINDOW is how long after a paid call the same trigger on
-	// the same system is answered from memory instead of paid for again,
-	// counted from that call. 24h matches STALE_AFTER: a finding the reuse
-	// keeps open cannot outlive the call it came from by more than a day, so
-	// a persistent condition is re-analysed at least daily. On the dev
-	// fleet a 1-day and a 7-day window saved the same (18.1% vs 18.6% of
-	// spend), so longer buys little. 0 disables reuse.
-	triggerReuseWindow := svc.GetenvDuration("TRIGGER_REUSE_WINDOW", 24*time.Hour)
-	ewmaAlpha := svc.GetenvFloat("EWMA_ALPHA", 0.3)
 	priceInput := svc.GetenvFloat("LLM_PRICE_INPUT_PER_MTOK", 0)
 	priceOutput := svc.GetenvFloat("LLM_PRICE_OUTPUT_PER_MTOK", 0)
+	// Cached input defaults to half the input price, gpt-4o-mini's discount.
+	priceCachedInput := svc.GetenvFloat("LLM_PRICE_CACHED_INPUT_PER_MTOK", priceInput/2)
 	llmTimeout := svc.GetenvDuration("LLM_TIMEOUT", 120*time.Second)
 	queueSize := svc.GetenvInt("QUEUE_SIZE", 256)
 	queueWorkers := svc.GetenvInt("QUEUE_WORKERS", 2)
@@ -174,13 +173,11 @@ func main() {
 	// trade-off -- see maint.Config's doc for the full reasoning behind
 	// every default; the short version is repeated at each variable below.
 	//
-	// TEMPLATE_RETENTION is the gate's novelty memory (system_templates).
-	// Pruned too eagerly, a resurrected template reads as new and
-	// manufactures an LLM call for a line that was never actually novel, so
-	// this must comfortably outlive the longest natural gap between
-	// occurrences of a real recurring line -- a monthly cron, a quarterly
-	// certificate renewal, even a yearly one. 400 days clears a full year
-	// with margin.
+	// TEMPLATE_RETENTION is the gate's novelty memory (system_templates). A
+	// template silent past GATE_SILENCE counts as new on its return anyway,
+	// so this only has to stay above that; 400 days keeps the Templates
+	// page's history and the node roster findings cite (PruneNodes shares
+	// this cutoff).
 	templateRetention := svc.GetenvDuration("TEMPLATE_RETENTION", 400*24*time.Hour)
 	// FINDING_RETENTION only costs continuity -- a recurrence past this
 	// window reads as a brand-new finding (OutcomeInserted) rather than a
@@ -204,6 +201,15 @@ func main() {
 	// between passes, unlike sizingd's hourly cohort pass whose inputs are
 	// whole days and cannot answer differently more often.
 	maintInterval := svc.GetenvDuration("MAINT_INTERVAL", 10*time.Minute)
+
+	if gateSimilarity <= 0 || gateSimilarity > 1 {
+		slog.Error("invalid GATE_SIMILARITY: must be above 0 and at most 1", "value", gateSimilarity)
+		os.Exit(1)
+	}
+	if gateSilence < 0 {
+		slog.Error("invalid GATE_SILENCE: must not be negative", "value", gateSilence.String())
+		os.Exit(1)
+	}
 
 	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
@@ -231,7 +237,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := llm.NewOpenAI(llmBaseURL, llmAPIKey, llmTimeout)
+	client := llm.NewOpenAI(llmBaseURL, llmAPIKey, llmServiceTier, llmTimeout)
 
 	now := func() int64 { return time.Now().UnixMilli() }
 
@@ -250,11 +256,13 @@ func main() {
 	httpMetrics := metrics.NewHTTP(reg)
 	llmMetrics := metrics.NewLLM(reg)
 	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)
-	triggerMetrics := metrics.NewTrigger(reg, analyzer.TriggerSuppressions...)
 	passMetrics := metrics.NewPass(reg, maint.PassName)
 	windowMetrics := metrics.NewResults(reg, "windows_total",
-		"Fresh bundle windows, by what the gate decided: called, gated_out, reused (trigger memory) or budget.",
+		"Fresh bundle windows, by what the gate decided: called, gated_out or budget.",
 		analyzer.WindowResults...)
+	templateMetrics := metrics.NewResults(reg, "gate_templates_total",
+		"Templates the gate's novelty refinements moved: near_known (similar to a known one, not paid for) or returning (back after GATE_SILENCE, paid for as new).",
+		analyzer.TemplateResults...)
 
 	bud := budget.New(s, budget.Config{
 		MaxConcurrency:          llmMaxConcurrency,
@@ -264,25 +272,23 @@ func main() {
 
 	cfg := analyzer.Config{
 		Gate: gate.Config{
-			Tolerance:       gateTolerance,
-			MinExpected:     gateMinExpected,
-			MinObserved:     gateMinObserved,
 			MinNewTemplates: gateMinNewTemplates,
+			Similarity:      gateSimilarity,
+			Silence:         gateSilence.Milliseconds(),
 		},
 		PromptAmbient:      promptMaxAmbient,
 		StaleAfter:         staleAfter,
-		EWMAAlpha:          ewmaAlpha,
 		Model:              llmModel,
 		InputPerMTok:       priceInput,
+		CachedInputPerMTok: priceCachedInput,
 		OutputPerMTok:      priceOutput,
-		TriggerReuseWindow: triggerReuseWindow,
 	}
 	az := analyzer.New(s, client, bud, cfg, now)
 	az.Metrics = &analyzer.Metrics{
-		BudgetRejected:    budgetMetrics.Rejected,
-		TriggerSuppressed: triggerMetrics.Suppressed,
-		LLMCall:           llmMetrics.Call,
-		Window:            windowMetrics.Inc,
+		BudgetRejected: budgetMetrics.Rejected,
+		LLMCall:        llmMetrics.Call,
+		Window:         windowMetrics.Inc,
+		Templates:      templateMetrics.Add,
 	}
 
 	// Ingest hands bundles to the queue and answers immediately; the workers
@@ -333,13 +339,14 @@ func main() {
 		{Name: "LLM_MODEL", Value: llmModel},
 		{Name: "LLM_API_KEY", Value: svc.SecretState(llmAPIKey != "")},
 		{Name: "ADMIN_API_KEY", Value: svc.SecretState(adminAPIKey != "")},
+		{Name: "LLM_SERVICE_TIER", Value: llmServiceTier},
 		{Name: "LLM_TIMEOUT", Value: llmTimeout.String()},
 		{Name: "LLM_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceInput, 'f', -1, 64)},
+		{Name: "LLM_PRICE_CACHED_INPUT_PER_MTOK", Value: strconv.FormatFloat(priceCachedInput, 'f', -1, 64)},
 		{Name: "LLM_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(priceOutput, 'f', -1, 64)},
-		{Name: "GATE_TOLERANCE", Value: strconv.FormatFloat(gateTolerance, 'f', -1, 64)},
-		{Name: "GATE_MIN_EXPECTED", Value: strconv.FormatFloat(gateMinExpected, 'f', -1, 64)},
-		{Name: "GATE_MIN_OBSERVED", Value: strconv.FormatFloat(gateMinObserved, 'f', -1, 64)},
 		{Name: "GATE_MIN_NEW_TEMPLATES", Value: strconv.Itoa(gateMinNewTemplates)},
+		{Name: "GATE_SIMILARITY", Value: strconv.FormatFloat(gateSimilarity, 'f', -1, 64)},
+		{Name: "GATE_SILENCE", Value: gateSilence.String()},
 		{Name: "PROMPT_MAX_AMBIENT", Value: strconv.Itoa(promptMaxAmbient)},
 		{Name: "LLM_MAX_CONCURRENCY", Value: strconv.Itoa(llmMaxConcurrency)},
 		{Name: "LLM_MAX_CALLS_PER_SYSTEM_PER_DAY", Value: strconv.Itoa(llmMaxCallsPerSystemPerDay)},
@@ -347,8 +354,6 @@ func main() {
 		{Name: "PIPELINE_EXCLUDE_MODULES", Value: strings.Join(sortedKeys(excludeModules), ",")},
 		{Name: "PIPELINE_EXCLUDE_SERVICES", Value: strings.Join(sortedKeys(excludeServices), ",")},
 		{Name: "STALE_AFTER", Value: staleAfter.String()},
-		{Name: "TRIGGER_REUSE_WINDOW", Value: triggerReuseWindow.String()},
-		{Name: "EWMA_ALPHA", Value: strconv.FormatFloat(ewmaAlpha, 'f', -1, 64)},
 		{Name: "QUEUE_SIZE", Value: strconv.Itoa(queueSize)},
 		{Name: "QUEUE_WORKERS", Value: strconv.Itoa(queueWorkers)},
 		{Name: "ANALYSIS_TIMEOUT", Value: analysisTimeout.String()},
@@ -378,17 +383,17 @@ func main() {
 		"analysis_timeout", analysisTimeout.String(),
 		"llm_api_key_set", llmAPIKey != "",
 		"admin_api_key_set", adminAPIKey != "",
-		"gate_tolerance", gateTolerance,
-		"gate_min_expected", gateMinExpected,
-		"gate_min_observed", gateMinObserved,
+		"llm_service_tier", llmServiceTier,
 		"gate_min_new_templates", gateMinNewTemplates,
+		"gate_similarity", gateSimilarity,
+		"gate_silence", gateSilence.String(),
 		"prompt_max_ambient", promptMaxAmbient,
 		"llm_max_concurrency", llmMaxConcurrency,
 		"llm_max_calls_per_system_per_day", llmMaxCallsPerSystemPerDay,
 		"llm_daily_spend_cap_usd", llmDailySpendCapUSD,
 		"stale_after", staleAfter.String(),
-		"ewma_alpha", ewmaAlpha,
 		"price_input_per_mtok", priceInput,
+		"price_cached_input_per_mtok", priceCachedInput,
 		"price_output_per_mtok", priceOutput,
 	)
 

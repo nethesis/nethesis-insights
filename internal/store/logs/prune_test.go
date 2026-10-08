@@ -37,10 +37,10 @@ func TestPruneTemplatesByLastSeen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("known templates: %v", err)
 	}
-	if known[model.CanonicalKey("m1", "old line")] {
+	if _, ok := known[model.CanonicalKey("m1", "old line")]; ok {
 		t.Fatalf("expected the old template to be gone")
 	}
-	if !known[model.CanonicalKey("m1", "new line")] {
+	if _, ok := known[model.CanonicalKey("m1", "new line")]; !ok {
 		t.Fatalf("expected the new template, inside retention, to survive")
 	}
 }
@@ -233,26 +233,6 @@ func TestPruneLoopsAcrossMultipleBatches(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("expected nothing left to prune, got %d", remaining)
-	}
-}
-
-func TestPruneSystemTriggersByLastSeen(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-	for _, sg := range []TriggerSighting{
-		{SystemID: "old", Key: "t1:k", Called: true, Now: 1000},
-		{SystemID: "new", Key: "t1:k", Called: true, Now: 9000},
-	} {
-		if err := s.RecordTriggerSighting(ctx, sg); err != nil {
-			t.Fatal(err)
-		}
-	}
-	n, err := s.PruneSystemTriggers(ctx, 5000)
-	if err != nil || n != 1 {
-		t.Fatalf("pruned %d, err %v; want 1", n, err)
-	}
-	if look, _ := s.LookupTrigger(ctx, "new", "t1:k"); !look.SystemSeen {
-		t.Fatal("a recent system trigger was pruned")
 	}
 }
 

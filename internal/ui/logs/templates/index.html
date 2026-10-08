@@ -74,7 +74,6 @@ everywhere it has ever happened.</small></p>
 {{if .DocRef}}<dt>Documentation</dt><dd class="mono">{{.DocRef}}</dd>{{end}}
 <dt>Class</dt><dd class="mono">{{if .ClassKey}}{{.ClassKey}}{{else}}&mdash;{{end}}</dd>
 <dt>Security</dt><dd>{{if .Security}}tagged{{else}}no{{end}}</dd>
-<dt>Trigger</dt><dd class="mono">{{if .TriggerKey}}{{.TriggerKey}}{{else}}&mdash;{{end}}</dd>
 <dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>
 <dt>Occurrence count</dt><dd>{{.OccurrenceCount}}</dd>
 <dt>First seen</dt><dd class="mono">{{fmtTime .FirstSeen}}</dd>

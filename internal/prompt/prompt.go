@@ -12,10 +12,10 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-const Version = "v4"
+const Version = "v5"
 
-const System = `You analyze NethServer logs. You receive a digest of log volumes and masked ` +
-	`log-line templates with counts for one time window. Report ONLY real problems: ` +
+const System = `You analyze NethServer logs. You receive masked log-line templates with ` +
+	`counts for one time window. Report ONLY real problems: ` +
 	`things that indicate misconfiguration, failure, resource exhaustion, security ` +
 	`concerns, or other conditions an administrator would want to act on. Report only ` +
 	`NEW or CHANGED conditions -- never repeat anything listed in the ALREADY KNOWN ` +
@@ -108,13 +108,10 @@ func TemplateID(i int) string { return fmt.Sprintf("T%d", i+1) }
 // of 159. Sending the rest costs money on every call and buries the evidence
 // the model is supposed to weigh.
 type Selection struct {
-	// Novel is the set of canonical keys new to this system, and
-	// DeviatingModules the module instances over tolerance. Both come from
+	// Novel is the set of canonical keys new to this system. It comes from
 	// gate.Decision, so the prompt shows exactly what paid for the call.
-	// Novel keys are already family-scoped (model.CanonicalKey); the
-	// deviating modules are not, and Select collapses them itself.
-	Novel            map[string]bool
-	DeviatingModules map[string]bool
+	// The keys are already family-scoped (model.CanonicalKey).
+	Novel map[string]bool
 
 	// MaxAmbient caps how many of the remaining templates are shown, most
 	// frequent first. They are context, not evidence: without any, a model
@@ -150,8 +147,7 @@ type Line struct {
 // do.
 //
 // Then select: everything novel, everything the edge classified as security,
-// everything in a deviating module, and the top MaxAmbient of the remainder by
-// count.
+// and the top MaxAmbient of the remainder by count.
 //
 // Callers must pass the same Selection to Render and ResolveEvidence:
 // TemplateID numbers this list, so the identifiers the model cites only
@@ -161,17 +157,6 @@ func Select(b model.Bundle, sel Selection) []Line {
 		moduleID string
 		priority int
 		canon    string
-	}
-
-	// The gate reports deviation per module instance, because module_baselines
-	// is keyed that way -- one instance flooding is signal about that
-	// instance. Lines here are grouped per family, so the question a group
-	// asks is whether *any* of its instances deviates. Collapsing the set once
-	// is what keeps a deviating line out of the ambient pool, where
-	// MaxAmbient can drop the very line that paid for the call.
-	deviatingFamilies := make(map[string]bool, len(sel.DeviatingModules))
-	for m := range sel.DeviatingModules {
-		deviatingFamilies[model.ModuleFamily(m)] = true
 	}
 
 	grouped := map[key]*Line{}
@@ -217,8 +202,7 @@ func Select(b model.Bundle, sel Selection) []Line {
 		line := *grouped[k]
 		switch {
 		case sel.Novel[model.CanonicalKey(k.moduleID, line.Template.Template)],
-			line.Template.Category == "security",
-			deviatingFamilies[k.moduleID]:
+			line.Template.Category == "security":
 			kept = append(kept, line)
 		default:
 			ambient = append(ambient, line)
@@ -286,13 +270,11 @@ func ResolveEvidence(b model.Bundle, sel Selection, ids []string) ([]model.Templ
 // It is also the only place the section layout is explained, which the model
 // previously had to infer.
 const header = `SECTIONS
-DIGEST     one line per (module, priority) bucket: observed, expected, ratio.
-           Buckets the gate flagged as deviating are marked with *.
 TEMPLATES  the log lines worth your attention this window, each with an
            identifier to cite. count is how many lines matched; variants is
            how many spellings of the same line were folded into it. Templates
-           that are neither new, security-classified nor in a deviating module
-           are shown only as ambient context, most frequent first.
+           that are neither new nor security-classified are shown only as
+           ambient context, most frequent first.
 SAMPLING   how much of the window survived the collector's line budget.
 ALREADY KNOWN  conditions already raised for this system. Do not report them
            again.
@@ -307,35 +289,6 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 	var sb strings.Builder
 
 	sb.WriteString(header)
-
-	sb.WriteString("DIGEST (module priority observed expected ratio)\n")
-	digest := make([]model.DigestEntry, len(b.Digest))
-	copy(digest, b.Digest)
-	sort.Slice(digest, func(i, j int) bool {
-		if digest[i].ModuleID != digest[j].ModuleID {
-			return digest[i].ModuleID < digest[j].ModuleID
-		}
-		return digest[i].Priority < digest[j].Priority
-	})
-	for _, e := range digest {
-		expectedStr := "-"
-		ratioStr := "-"
-		if e.Expected != nil {
-			expectedStr = fmt.Sprintf("%.2f", *e.Expected)
-			if *e.Expected > 0 {
-				ratioStr = fmt.Sprintf("%.2f", float64(e.Observed)/(*e.Expected))
-			}
-		}
-		mark := ""
-		if sel.DeviatingModules[e.ModuleID] {
-			mark = " *"
-		}
-		// strings.Builder.Write never returns an error, but fmt.Fprintf's own
-		// signature always returns one regardless of the Writer passed in --
-		// discard it explicitly rather than leaving it unchecked.
-		_, _ = fmt.Fprintf(&sb, "%s %d %d %s %s%s\n", e.ModuleID, e.Priority, e.Observed, expectedStr, ratioStr, mark)
-	}
-	sb.WriteString("\n")
 
 	sb.WriteString("TEMPLATES (cite these identifiers in evidence)\n")
 	lines := Select(b, sel)

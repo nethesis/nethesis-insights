@@ -72,22 +72,10 @@ func (s *Store) pruneLoop(ctx context.Context, deleteSQL string, args ...any) (i
 
 // PruneTemplates deletes system_templates rows not seen since olderThan.
 //
-// This is the gate's "have I seen this template before" memory
-// (gate.Evaluate fires new_templates when a line's key is absent here), so
-// olderThan must be comfortably longer than the longest gap a real recurring
-// line can have -- see maint.Config.TemplateRetention for the default and
-// its justification. Pruned too eagerly, a monthly cron or a quarterly
-// certificate renewal looks "new" every time it recurs and pays for an LLM
-// call it would not otherwise have caused.
-//
-// module_baselines describes the same (system_id, module_id) buckets as
-// system_templates but is deliberately NOT pruned here: unlike this table it
-// does not grow with each distinct template ever seen, only with the number
-// of distinct buckets a system has (upserted in place, never appended), so
-// it stays small on its own and has no comparable backlog problem. If a
-// future change does prune it, its retention must be at least
-// TemplateRetention -- the two describe the same buckets, and a baseline
-// that outlives the templates it was computed from silently orphans them.
+// This is the gate's "have I seen this template before" memory. A row older
+// than the gate's silence would count as new on its return anyway, so
+// olderThan only has to stay above it -- see maint.Config.TemplateRetention
+// for the default and what else depends on it.
 func (s *Store) PruneTemplates(ctx context.Context, olderThan int64) (int, error) {
 	return s.pruneLoop(ctx, `
 		DELETE FROM system_templates
@@ -155,25 +143,6 @@ func (s *Store) PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 	return s.pruneLoop(ctx, `
 		DELETE FROM analyses WHERE id IN (
 			SELECT id FROM analyses WHERE created_at < ? LIMIT ?
-		)
-	`, olderThan)
-}
-
-// PruneSystemTriggers deletes system_triggers rows not seen since olderThan.
-//
-// This is the per-system half of the trigger memory: when a system last paid
-// for a trigger, which the reuse check measures TriggerReuseWindow against.
-// A row past FindingRetention describes a call whose findings are being
-// pruned too, so it can answer nothing; the only cost of dropping it is that
-// the next window on that system with the same trigger pays once before
-// reuse resumes.
-func (s *Store) PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error) {
-	return s.pruneLoop(ctx, `
-		DELETE FROM system_triggers
-		WHERE (system_id, trigger_key) IN (
-			SELECT system_id, trigger_key FROM system_triggers
-			WHERE last_seen < ?
-			LIMIT ?
 		)
 	`, olderThan)
 }

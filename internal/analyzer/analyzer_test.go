@@ -32,19 +32,16 @@ func newTestStore(t *testing.T) *logsstore.Store {
 	return s
 }
 
-func f(v float64) *float64 { return &v }
-
+// testConfig fires on a single novel template and leaves both novelty
+// refinements off; the cases that exercise them set them explicitly.
 func testConfig() Config {
 	return Config{
 		Gate: gate.Config{
-			Tolerance:       3.0,
-			MinExpected:     1,
-			MinObserved:     1,
 			MinNewTemplates: 1,
+			Similarity:      1,
 		},
 		PromptAmbient: 100,
 		StaleAfter:    24 * time.Hour,
-		EWMAAlpha:     0.3,
 		Model:         "test-model",
 	}
 }
@@ -64,9 +61,6 @@ func steadyBundle(systemID string) model.Bundle {
 		Templates: []model.Template{
 			{Template: "tpl1", Count: 5, ModuleID: "mod1", Priority: 1},
 		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "mod1", Priority: 1, Observed: 5},
-		},
 	}
 }
 
@@ -79,7 +73,7 @@ func TestGatedBundleNeverCallsLLM(t *testing.T) {
 
 	// The very first bundle for a brand-new system always has novel
 	// templates, so it necessarily calls the LLM once -- use it to seed
-	// known templates and baselines.
+	// known templates.
 	seed := steadyBundle("sys1")
 	seed.Window = model.Window{Start: 0, End: 50}
 	if err := a.Process(ctx, seed); err != nil {
@@ -89,9 +83,8 @@ func TestGatedBundleNeverCallsLLM(t *testing.T) {
 		t.Fatalf("expected exactly 1 llm call to seed state, got %d", stub.Calls)
 	}
 
-	// A second bundle with the same template and digest observed value
-	// (now matching the seeded baseline) should be fully steady-state and
-	// gated out -- no further LLM call.
+	// A second bundle with the same template should be fully steady-state
+	// and gated out -- no further LLM call.
 	b := steadyBundle("sys1")
 	if err := a.Process(ctx, b); err != nil {
 		t.Fatalf("process: %v", err)
@@ -388,41 +381,40 @@ func TestRecurrenceWithADifferentCitedSetIsBumped(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 
-	// observed is what makes the second window fire at all: by then the
-	// country variants are neither novel nor new, so only a surge in volume
-	// pays for the call -- which is exactly the brute-force case the security
-	// condition exists to catch.
-	crowdBundle := func(windowStart, observed int64, templates ...model.Template) model.Bundle {
+	crowdBundle := func(windowStart int64, templates ...model.Template) model.Bundle {
 		return model.Bundle{
 			SchemaVersion:    model.SchemaVersion,
 			SystemID:         "sys1",
 			CollectorVersion: "1.0",
 			Window:           model.Window{Start: windowStart, End: windowStart + 100},
 			Templates:        templates,
-			Digest:           []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: observed, Expected: f(5)}},
 		}
 	}
 	us := model.Template{Template: "ssh-bf by ip <IP> (US/<NUM>)", Count: 9, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
 	de := model.Template{Template: "ssh-bf by ip <IP> (DE/<NUM>)", Count: 4, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
+	// The second window needs something new to be paid for at all: by then
+	// the country variants are known.
+	repeat := model.Template{Template: "ssh-bf by ip <IP> (repeat offender)", Count: 2, ModuleID: "crowdsec1", Priority: 3, Category: "security"}
 
 	// First window: one template cited.
 	oneCitation := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"SSH Brute-Force Activity Detected","summary":"s",` +
 		`"suggested_action":"a","modules":[],"evidence":["T1"]}]}`
 	a := New(st, &llm.Stub{Content: oneCitation, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
-	if err := a.Process(ctx, crowdBundle(100, 5, us)); err != nil {
+	if err := a.Process(ctx, crowdBundle(100, us)); err != nil {
 		t.Fatalf("first window: %v", err)
 	}
 
 	// Second window: same condition, but a new country arrived and the model
 	// words the title differently. The two country variants canonicalize to
-	// one line, so there is a single identifier to cite -- which is the point:
-	// the model cannot split the condition by citing a different subset.
+	// one line, T1, so there is a single identifier to cite for them -- which
+	// is the point: the model cannot split the condition by citing a
+	// different subset.
 	oneCitationAgain := `{"window_assessment":"incident","findings":[` +
 		`{"severity":"high","title":"Repeated failed SSH logins from many hosts","summary":"s",` +
 		`"suggested_action":"a","modules":[],"evidence":["T1"]}]}`
 	b := New(st, &llm.Stub{Content: oneCitationAgain, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 2000 })
-	if err := b.Process(ctx, crowdBundle(100000, 50, de, us)); err != nil {
+	if err := b.Process(ctx, crowdBundle(100000, de, us, repeat)); err != nil {
 		t.Fatalf("second window: %v", err)
 	}
 
@@ -531,7 +523,7 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("KnownTemplates: %v", err)
 	}
-	if !known[model.CanonicalKey("mod1", "<3> [svc] something entirely new")] {
+	if _, ok := known[model.CanonicalKey("mod1", "<3> [svc] something entirely new")]; !ok {
 		t.Fatal("a suppressed window must still record its templates")
 	}
 }
@@ -540,10 +532,10 @@ func TestBudgetCappedWindowIsRecordedAndCostsNothing(t *testing.T) {
 // call, so a test can assert what Process fed it without a real prometheus
 // registry.
 type recordingAnalyzerMetrics struct {
-	budgetRejections    []string
-	triggerSuppressions []string
-	windows             []string
-	llmCalls            []struct {
+	budgetRejections []string
+	windows          []string
+	templates        map[string]int
+	llmCalls         []struct {
 		result string
 		cost   int64
 	}
@@ -552,10 +544,13 @@ type recordingAnalyzerMetrics struct {
 func (r *recordingAnalyzerMetrics) hooks() *Metrics {
 	return &Metrics{
 		BudgetRejected: func(reason string) { r.budgetRejections = append(r.budgetRejections, reason) },
-		TriggerSuppressed: func(reason string) {
-			r.triggerSuppressions = append(r.triggerSuppressions, reason)
+		Window:         func(result string) { r.windows = append(r.windows, result) },
+		Templates: func(result string, n int) {
+			if r.templates == nil {
+				r.templates = map[string]int{}
+			}
+			r.templates[result] += n
 		},
-		Window: func(result string) { r.windows = append(r.windows, result) },
 		LLMCall: func(result string, cost int64) {
 			r.llmCalls = append(r.llmCalls, struct {
 				result string
@@ -603,7 +598,7 @@ func TestProcessReportsLLMCallOutcomesAndBudgetRejections(t *testing.T) {
 		}
 		a := New(s, stub, testBudget(s), Config{
 			Gate:          testConfig().Gate,
-			PromptAmbient: 100, StaleAfter: 24 * time.Hour, EWMAAlpha: 0.3, Model: "test-model",
+			PromptAmbient: 100, StaleAfter: 24 * time.Hour, Model: "test-model",
 			InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000,
 		}, func() int64 { return 1000 })
 		rec := &recordingAnalyzerMetrics{}
@@ -722,7 +717,6 @@ func TestSecondInstanceOfAModuleIsNotNovel(t *testing.T) {
 		Template: `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`,
 		Count:    5, ModuleID: "nethvoice5", Priority: 6,
 	}}
-	first.Digest = []model.DigestEntry{{ModuleID: "nethvoice5", Priority: 6, Observed: 5}}
 	if err := a.Process(ctx, first); err != nil {
 		t.Fatalf("first window: %v", err)
 	}
@@ -737,7 +731,6 @@ func TestSecondInstanceOfAModuleIsNotNovel(t *testing.T) {
 		Template: `<6> [CRON] pam_unix(cron:session): session closed for user <USER>`,
 		Count:    5, ModuleID: "nethvoice39", Priority: 6,
 	}}
-	second.Digest = []model.DigestEntry{{ModuleID: "nethvoice39", Priority: 6, Observed: 5}}
 	if err := a.Process(ctx, second); err != nil {
 		t.Fatalf("second window: %v", err)
 	}
@@ -901,5 +894,34 @@ func TestSecurityFindingIsTaggedAndPending(t *testing.T) {
 	}
 	if len(delivered) != 0 {
 		t.Fatalf("expected a pending class withheld from the customer, got %d", len(delivered))
+	}
+}
+
+// Cached input has its own price: half on gpt-4o-mini, a tenth on
+// gpt-6-luna, so a fixed discount would misprice every cached call on one of
+// them.
+func TestCachedInputIsPricedAtItsOwnRate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	stub := &llm.Stub{
+		Content:      `{"window_assessment":"nominal","findings":[]}`,
+		InputTokens:  1000,
+		CachedTokens: 600,
+		OutputTokens: 100,
+	}
+	cfg := testConfig()
+	cfg.InputPerMTok, cfg.CachedInputPerMTok, cfg.OutputPerMTok = 0.10, 0.01, 0.50
+	a := New(s, stub, testBudget(s), cfg, func() int64 { return 1000 })
+
+	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	rows, err := s.ListAnalyses(ctx, "sys1", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListAnalyses: %+v %v", rows, err)
+	}
+	// 400 uncached x $0.10 + 600 cached x $0.01 + 100 out x $0.50, per million.
+	if rows[0].CostMicros != 96 || rows[0].CachedTokens != 600 {
+		t.Fatalf("cost = %d micros, cached = %d; want 96 and 600", rows[0].CostMicros, rows[0].CachedTokens)
 	}
 }

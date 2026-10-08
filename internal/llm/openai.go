@@ -18,16 +18,23 @@ import (
 )
 
 type OpenAI struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL     string
+	apiKey      string
+	serviceTier string
+	client      *http.Client
 }
 
-func NewOpenAI(baseURL, apiKey string, timeout time.Duration) *OpenAI {
+// NewOpenAI returns a client for an OpenAI-compatible chat completions
+// endpoint. serviceTier is sent as `service_tier` when non-empty; "flex"
+// halves OpenAI's price in exchange for slower answers and occasional 429s
+// when capacity is short. Analysis is asynchronous, so the latency costs
+// nothing, and a flex 429 is retried once at the default tier (see Complete).
+func NewOpenAI(baseURL, apiKey, serviceTier string, timeout time.Duration) *OpenAI {
 	return &OpenAI{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: timeout},
+		baseURL:     baseURL,
+		apiKey:      apiKey,
+		serviceTier: serviceTier,
+		client:      &http.Client{Timeout: timeout},
 	}
 }
 
@@ -53,6 +60,7 @@ type chatRequest struct {
 	Model          string         `json:"model"`
 	Messages       []chatMessage  `json:"messages"`
 	ResponseFormat responseFormat `json:"response_format"`
+	ServiceTier    string         `json:"service_tier,omitempty"`
 }
 
 type chatChoice struct {
@@ -75,7 +83,24 @@ type chatResponse struct {
 	Usage   chatUsage    `json:"usage"`
 }
 
+// Complete sends one chat completion. When a service tier is configured and
+// the provider answers 429 -- for flex, "resource unavailable" as often as a
+// rate limit -- the request is repeated once without the tier rather than
+// handed back as a transient error: a window whose call failed is analysed
+// again only if the edge happens to resend it, so a lost flex slot would
+// otherwise usually be a lost window.
 func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
+	resp, err := o.complete(ctx, req, o.serviceTier)
+	var httpErr *HTTPError
+	if o.serviceTier != "" && errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests {
+		slog.Debug("llm service tier unavailable, retrying at default tier",
+			"service_tier", o.serviceTier, "model", req.Model)
+		return o.complete(ctx, req, "")
+	}
+	return resp, err
+}
+
+func (o *OpenAI) complete(ctx context.Context, req Request, serviceTier string) (Response, error) {
 	body := chatRequest{
 		Model: req.Model,
 		Messages: []chatMessage{
@@ -90,6 +115,7 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 				Schema: prompt.Schema,
 			},
 		},
+		ServiceTier: serviceTier,
 	}
 
 	payload, err := json.Marshal(body)

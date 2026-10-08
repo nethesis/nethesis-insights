@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,10 +262,6 @@ func TestIngestExcludesConfiguredModules(t *testing.T) {
 			{Template: "keep", ModuleID: "loki1"},
 			{Template: "drop", ModuleID: "crowdsec1"},
 		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "loki1", Priority: 6, Observed: 1},
-			{ModuleID: "crowdsec1", Priority: 3, Observed: 2},
-		},
 		Budget: model.Budget{TruncatedModules: []model.TruncatedModule{{ModuleID: "crowdsec1", Dropped: 1}}},
 	})
 	if err != nil {
@@ -281,9 +278,6 @@ func TestIngestExcludesConfiguredModules(t *testing.T) {
 	got := pub.published[0]
 	if len(got.Templates) != 1 || got.Templates[0].ModuleID != "loki1" {
 		t.Fatalf("excluded module survived in templates: %+v", got.Templates)
-	}
-	if len(got.Digest) != 1 || got.Digest[0].ModuleID != "loki1" {
-		t.Fatalf("excluded module survived in digest: %+v", got.Digest)
 	}
 	if len(got.Budget.TruncatedModules) != 0 {
 		t.Fatalf("excluded module survived in truncated_modules: %+v", got.Budget.TruncatedModules)
@@ -302,7 +296,6 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 			{Template: "keep", ModuleID: "loki1"},
 			{Template: "also-keep", ModuleID: "crowdsec1"},
 		},
-		Digest: []model.DigestEntry{{ModuleID: "crowdsec1", Priority: 3, Observed: 2}},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -314,7 +307,7 @@ func TestIngestWithoutExclusionPassesEverything(t *testing.T) {
 	if len(pub.published) != 1 {
 		t.Fatalf("expected one published bundle, got %d", len(pub.published))
 	}
-	if len(pub.published[0].Templates) != 2 || len(pub.published[0].Digest) != 1 {
+	if len(pub.published[0].Templates) != 2 {
 		t.Fatalf("bundle was filtered with no exclusion configured: %+v", pub.published[0])
 	}
 }
@@ -517,54 +510,31 @@ func TestIngestRejectsTooManySamplesPerTemplate(t *testing.T) {
 	}
 }
 
-// The digest is the other unbounded array on the wire: UpsertBaselines runs
-// one SELECT plus one INSERT per entry inside a single transaction holding
-// the process-wide write mutex on a one-connection database, and prompt
-// renders every entry. Bounded here, at ingest, for the same reason the
-// module exclusions are: one place, so the gate, the prompt,
-// system_templates and module_baselines cannot disagree about what was
-// accepted.
-func TestIngestRejectsTooManyDigestEntries(t *testing.T) {
-	cases := []struct {
-		name    string
-		entries int
-		want    int
-	}{
-		{"at the ceiling", maxDigestEntries, http.StatusAccepted},
-		{"one over the ceiling", maxDigestEntries + 1, http.StatusBadRequest},
+// The collector still sends the per-bucket volume digest the gate used to
+// compare against a baseline. It is no longer decoded, so a bundle carrying
+// one -- however large -- is accepted exactly as one without it.
+func TestIngestIgnoresTheDigest(t *testing.T) {
+	var digest strings.Builder
+	for i := 0; i < 5000; i++ {
+		if i > 0 {
+			digest.WriteString(",")
+		}
+		fmt.Fprintf(&digest, `{"module_id":"loki1","priority":%d,"observed":1,"expected":2.5}`, i)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			digest := make([]model.DigestEntry, tc.entries)
-			for i := range digest {
-				digest[i] = model.DigestEntry{ModuleID: "loki1", Priority: i, Observed: 1}
-			}
-			pub := &fakePublisher{}
-			body, err := json.Marshal(model.Bundle{
-				SchemaVersion: model.SchemaVersion,
-				SystemID:      testSystemID,
-				Window:        testWindow,
-				Digest:        digest,
-			})
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			rec := postBundle(t, testServer(pub), string(body), true)
-			if rec.Code != tc.want {
-				t.Fatalf("status: got %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
-			}
-			gotPublished := len(pub.published) != 0
-			wantPublished := tc.want == http.StatusAccepted
-			if gotPublished != wantPublished {
-				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
-			}
-		})
+	body := fmt.Sprintf(`{"schema_version":%d,"system_id":%q,"window":{"start":%d,"end":%d},"digest":[%s],"templates":[{"template":"t","module_id":"loki1"}]}`,
+		model.SchemaVersion, testSystemID, testWindow.Start, testWindow.End, digest.String())
+
+	pub := &fakePublisher{}
+	if rec := postBundle(t, testServer(pub), body, true); rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(pub.published) != 1 || len(pub.published[0].Templates) != 1 {
+		t.Fatalf("bundle with a digest was not published intact: %+v", pub.published)
 	}
 }
 
-// Truncation records are the third such array, and the gate reads them
-// (a module both truncated and deviating is a gate reason), so an
-// unbounded list is unbounded work in gate.Evaluate as well as in prompt.
+// Truncation records are the other unbounded array on the wire, and the
+// prompt renders every one of them.
 func TestIngestRejectsTooManyTruncationRecords(t *testing.T) {
 	cases := []struct {
 		name    string

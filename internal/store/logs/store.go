@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package logs is insightsd's storage: the ingest bookkeeping (systems,
-// templates, baselines), the analyses cost ledger, the findings table, and
+// templates, nodes), the analyses cost ledger, the findings table, and
 // the cross-system reads the operator UI needs (see ui.go). It is
 // insightsd's only store package -- a separate SQLite file from the threat
 // and sizing pipelines, sharing nothing with them but the sqlitex runtime
@@ -14,11 +14,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/oklog/ulid/v2"
 
-	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/sqlitex"
 )
@@ -57,17 +55,10 @@ type Analysis struct {
 	// inferred so the cost column stays arithmetic anyone can check.
 	CachedTokens int
 
-	// SuppressedBy names what stopped this window from being paid for,
-	// when something did: a budget limit (budget.Suppressed*), in which
-	// case the gate never ran and the row carries no gate reasons, or the
-	// trigger memory (analyzer.SuppressedTrigger*), in which case the gate
-	// fired, the reasons are kept -- they are what the saving is measured
-	// against -- and llm_called stays 0.
+	// SuppressedBy names the budget limit (budget.Suppressed*) that stopped
+	// this window from being paid for, when one did. The gate never ran for
+	// such a window, so the row carries no gate reasons.
 	SuppressedBy string
-
-	// TriggerKey is the trigger key (internal/trigger) of a window the gate
-	// fired on, resolved to its root; empty for a window it did not.
-	TriggerKey string
 }
 
 // Store is insightsd's SQLite-backed store: ingest bookkeeping, the analyses
@@ -150,14 +141,6 @@ func (s *Store) Init(ctx context.Context) error {
 			last_seen INTEGER,
 			PRIMARY KEY (system_id, node_id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS module_baselines (
-			system_id TEXT,
-			module_id TEXT,
-			priority INTEGER,
-			ewma_rate REAL,
-			updated_at INTEGER,
-			PRIMARY KEY (system_id, module_id, priority)
-		)`,
 		`CREATE TABLE IF NOT EXISTS findings (
 			id TEXT PRIMARY KEY,
 			system_id TEXT,
@@ -176,7 +159,6 @@ func (s *Store) Init(ctx context.Context) error {
 			llm_model TEXT,
 			prompt_version TEXT,
 			nodes TEXT,
-			trigger_key TEXT,
 			class_key TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_system_fingerprint ON findings(system_id, fingerprint)`,
@@ -204,33 +186,13 @@ func (s *Store) Init(ctx context.Context) error {
 			cached_tokens INTEGER,
 			suppressed_by TEXT,
 			completed INTEGER NOT NULL DEFAULT 0,
-			created_at INTEGER,
-			trigger_key TEXT
+			created_at INTEGER
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_analyses_system_window ON analyses(system_id, window_start)`,
 		// Supports PruneAnalyses' `created_at < ?` scan, and also
 		// DailySpendMicros/SystemCallsSince/CostRollup/GateRollup, all of
 		// which already filter or group on this column.
 		`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at)`,
-		// Trigger memory: see triggers.go. system_triggers is per-system
-		// reuse memory only -- when this system last paid for a trigger key,
-		// and how many times it has seen it -- with nothing an operator
-		// decides stored against it; that lives in finding_classes below.
-		`CREATE TABLE IF NOT EXISTS system_triggers (
-			system_id TEXT,
-			trigger_key TEXT,
-			first_seen INTEGER,
-			last_seen INTEGER,
-			last_called_at INTEGER,
-			count INTEGER NOT NULL DEFAULT 0,
-			PRIMARY KEY (system_id, trigger_key)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_system_triggers_last_seen ON system_triggers(last_seen)`,
-		`CREATE INDEX IF NOT EXISTS idx_system_triggers_key ON system_triggers(trigger_key)`,
-		// The reuse check counts the findings one trigger raised on one
-		// system; trigger_key leads so a lookup for one system's trigger is
-		// a seek, not a scan.
-		`CREATE INDEX IF NOT EXISTS idx_findings_trigger ON findings(trigger_key, system_id)`,
 		// Finding classes: see classes.go. One row per class, fleet-wide,
 		// carrying every review decision's current effect; class_decisions
 		// is the append-only audit trail -- an UPDATE destroys the value
@@ -287,9 +249,12 @@ func (s *Store) UpsertSystem(ctx context.Context, sys System) error {
 	return nil
 }
 
-func (s *Store) KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error) {
+// KnownTemplates maps every template the system has sent, by
+// model.CanonicalKey, to when it was last seen: the gate's novelty memory,
+// and the input to its silence rule.
+func (s *Store) KnownTemplates(ctx context.Context, systemID string) (map[string]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT module_id, template_key FROM system_templates WHERE system_id = ?`, systemID)
+		`SELECT module_id, template_key, last_seen FROM system_templates WHERE system_id = ?`, systemID)
 	if err != nil {
 		return nil, fmt.Errorf("store: known templates: %w", err)
 	}
@@ -299,13 +264,17 @@ func (s *Store) KnownTemplates(ctx context.Context, systemID string) (map[string
 	// two are stored in separate columns and joined here rather than stored
 	// pre-joined, so no separator byte has to survive a round trip through
 	// the database.
-	result := map[string]bool{}
+	result := map[string]int64{}
 	for rows.Next() {
 		var moduleID, key string
-		if err := rows.Scan(&moduleID, &key); err != nil {
+		var lastSeen int64
+		if err := rows.Scan(&moduleID, &key, &lastSeen); err != nil {
 			return nil, fmt.Errorf("store: scan template: %w", err)
 		}
-		result[model.CanonicalKey(moduleID, key)] = true
+		k := model.CanonicalKey(moduleID, key)
+		if lastSeen > result[k] {
+			result[k] = lastSeen
+		}
 	}
 	return result, rows.Err()
 }
@@ -336,74 +305,15 @@ func (s *Store) UpsertTemplates(ctx context.Context, systemID string, ts []model
 				template = excluded.template,
 				priority = excluded.priority,
 				category = excluded.category,
-				last_seen = excluded.last_seen,
+				-- Never backwards: a late retry of an older window must not
+				-- make a template look silent to the gate.
+				last_seen = CASE WHEN excluded.last_seen > system_templates.last_seen
+					THEN excluded.last_seen ELSE system_templates.last_seen END,
 				total_count = system_templates.total_count + excluded.total_count
 		`, systemID, model.CanonicalTemplate(t.Template), t.Template, model.ModuleFamily(t.ModuleID),
 			t.Priority, t.Category, firstSeen, lastSeen, t.Count)
 		if err != nil {
 			return fmt.Errorf("store: upsert template: %w", err)
-		}
-	}
-
-	return tx.Commit()
-}
-
-func (s *Store) Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT module_id, priority, ewma_rate FROM module_baselines WHERE system_id = ?`, systemID)
-	if err != nil {
-		return nil, fmt.Errorf("store: baselines: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	result := map[gate.BaselineKey]float64{}
-	for rows.Next() {
-		var moduleID string
-		var priority int
-		var rate float64
-		if err := rows.Scan(&moduleID, &priority, &rate); err != nil {
-			return nil, fmt.Errorf("store: scan baseline: %w", err)
-		}
-		result[gate.BaselineKey{ModuleID: moduleID, Priority: priority}] = rate
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error {
-	s.db.Lock()
-	defer s.db.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	now := nowMillis()
-
-	for _, e := range d {
-		var prev sql.NullFloat64
-		err := tx.QueryRowContext(ctx, `SELECT ewma_rate FROM module_baselines WHERE system_id = ? AND module_id = ? AND priority = ?`,
-			systemID, e.ModuleID, e.Priority).Scan(&prev)
-		if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("store: read baseline: %w", err)
-		}
-
-		var newRate float64
-		if !prev.Valid {
-			newRate = float64(e.Observed)
-		} else {
-			newRate = alpha*float64(e.Observed) + (1-alpha)*prev.Float64
-		}
-
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO module_baselines (system_id, module_id, priority, ewma_rate, updated_at)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(system_id, module_id, priority) DO UPDATE SET
-				ewma_rate = excluded.ewma_rate,
-				updated_at = excluded.updated_at
-		`, systemID, e.ModuleID, e.Priority, newRate, now)
-		if err != nil {
-			return fmt.Errorf("store: upsert baseline: %w", err)
 		}
 	}
 
@@ -479,10 +389,10 @@ func (s *Store) FinalizeAnalysis(ctx context.Context, a Analysis) error {
 		UPDATE analyses SET
 			gated = ?, gate_reasons = ?, llm_called = ?, input_tokens = ?, output_tokens = ?,
 			cached_tokens = ?, cost_micros = ?, model = ?, duration_ms = ?, error = ?,
-			suppressed_by = ?, trigger_key = ?, completed = 1
+			suppressed_by = ?, completed = 1
 		WHERE system_id = ? AND window_start = ?
 	`, boolToInt(a.Gated), string(reasonsJSON), boolToInt(a.LLMCalled), a.InputTokens, a.OutputTokens,
-		a.CachedTokens, a.CostMicros, a.Model, a.DurationMs, a.Error, a.SuppressedBy, a.TriggerKey,
+		a.CachedTokens, a.CostMicros, a.Model, a.DurationMs, a.Error, a.SuppressedBy,
 		a.SystemID, a.WindowStart)
 	if err != nil {
 		return fmt.Errorf("store: finalize analysis: %w", err)
@@ -522,7 +432,7 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 // does not join finding_classes.
 const findingColumns = `f.id, f.system_id, f.fingerprint, f.severity, f.title, f.summary, f.suggested_action,
 	f.modules, f.evidence, f.status, f.occurrence_count, f.first_seen, f.last_seen, f.reopened_at,
-	f.llm_model, f.prompt_version, f.nodes, f.trigger_key, f.class_key`
+	f.llm_model, f.prompt_version, f.nodes, f.class_key`
 
 // findingClassJoin reaches a finding's class. It is a LEFT JOIN; ListFindings
 // makes it an inner one by requiring a visibility.
@@ -595,8 +505,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 	// stamped when actually reopening -- a plain bump must leave whatever
 	// reopened_at value the row already has untouched.
 	baseSQL := `
-		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, trigger_key, class_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?, ?)
+		INSERT INTO findings (id, system_id, fingerprint, severity, title, summary, suggested_action, modules, evidence, status, occurrence_count, first_seen, last_seen, reopened_at, llm_model, prompt_version, nodes, class_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?, ?)
 		ON CONFLICT(system_id, fingerprint) DO UPDATE SET
 			severity = excluded.severity,
 			title = excluded.title,
@@ -608,10 +518,9 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 			occurrence_count = findings.occurrence_count + 1,
 			last_seen = ?,
 			nodes = excluded.nodes,
-			trigger_key = excluded.trigger_key,
 			class_key = excluded.class_key%s
 	`
-	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.TriggerKey), nullIfEmpty(f.ClassKey), model.StatusOpen, now}
+	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.ClassKey), model.StatusOpen, now}
 
 	var extraSet string
 	if outcome == OutcomeReopened {
@@ -705,16 +614,15 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
-		var nodesJSON, triggerKey, classKey, visibility, severityOverride, docRef sql.NullString
+		var nodesJSON, classKey, visibility, severityOverride, docRef sql.NullString
 		var reopenedAt sql.NullInt64
 		var security sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
-			&f.LLMModel, &f.PromptVersion, &nodesJSON, &triggerKey, &classKey,
+			&f.LLMModel, &f.PromptVersion, &nodesJSON, &classKey,
 			&visibility, &severityOverride, &docRef, &security); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
 		}
-		f.TriggerKey = triggerKey.String
 		f.ClassKey = classKey.String
 		f.Visibility = visibility.String
 		f.SeverityOverride = severityOverride.String
@@ -825,8 +733,4 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-func nowMillis() int64 {
-	return time.Now().UnixMilli()
 }

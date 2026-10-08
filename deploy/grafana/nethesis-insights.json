@@ -1314,7 +1314,7 @@
       "type": "timeseries",
       "id": 35,
       "title": "Windows per hour, by gate decision",
-      "description": "What the gate decided for each new 15-minute window. called cost an AI call; gated_out, reused (answered from trigger memory) and budget did not.",
+      "description": "What the gate decided for each new 15-minute window. called cost an AI call; gated_out and budget did not.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1405,21 +1405,6 @@
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "green"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "reused"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#1F60C4"
                 }
               }
             ]

@@ -32,7 +32,6 @@ type fakeReader struct {
 	cost       []logsstore.CostRow
 	findings   []model.Finding
 	templates  []logsstore.TemplateRow
-	baselines  []logsstore.BaselineRow
 	roster     map[string]map[int]string
 	classes    []logsstore.ClassRow
 	classStats []logsstore.ClassStatsRow
@@ -131,20 +130,6 @@ func (f *fakeReader) ListTemplates(ctx context.Context, systemID string, limit i
 	return out, nil
 }
 
-func (f *fakeReader) ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	var out []logsstore.BaselineRow
-	for _, b := range f.baselines {
-		if systemID != "" && b.SystemID != systemID {
-			continue
-		}
-		out = append(out, b)
-	}
-	return out, nil
-}
-
 func (f *fakeReader) ListClasses(_ context.Context, filter logsstore.ClassFilter) ([]logsstore.ClassRow, error) {
 	f.classSeen = filter
 	if f.err != nil {
@@ -182,7 +167,7 @@ func (f fakeRuntime) Workers() int { return f.workers }
 func seededReader() *fakeReader {
 	reopenedAt := int64(1700000200000)
 	return &fakeReader{
-		counts: logsstore.Counts{Systems: 2, Templates: 5, Baselines: 3, Findings: 4, Analyses: 7},
+		counts: logsstore.Counts{Systems: 2, Templates: 5, Findings: 4, Analyses: 7},
 		systems: []logsstore.SystemRow{
 			{
 				SystemID: "sys-1", CollectorVersion: "1.2.3",
@@ -226,9 +211,6 @@ func seededReader() *fakeReader {
 		templates: []logsstore.TemplateRow{
 			{SystemID: "sys-1", Template: "sshd: Failed password for USER from IP", ModuleID: "sshd", Category: "security", Priority: 5, TotalCount: 42, FirstSeen: 1700000000000, LastSeen: 1700000100000},
 			{SystemID: "sys-1", Template: "runagent: heartbeat", ModuleID: "", Category: "", Priority: 1, TotalCount: 99, FirstSeen: 1700000000000, LastSeen: 1700000100000},
-		},
-		baselines: []logsstore.BaselineRow{
-			{SystemID: "sys-1", ModuleID: "sshd", Priority: 5, EWMARate: 3.14159, UpdatedAt: 1700000100000},
 		},
 		classes: []logsstore.ClassRow{
 			{
@@ -299,7 +281,6 @@ var routes = []struct {
 	{"/gate", "<h1>Gate</h1>"},
 	{"/cost", "<h1>Cost</h1>"},
 	{"/templates", "<h1>Templates</h1>"},
-	{"/baselines", "<h1>Baselines</h1>"},
 	{"/status", "<h1>Status</h1>"},
 	{"/review", "<h1>Review</h1>"},
 	{"/review/stats", "<h1>Review stats</h1>"},

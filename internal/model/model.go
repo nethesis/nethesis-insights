@@ -15,13 +15,6 @@ type Window struct {
 	End   int64 `json:"end"`
 }
 
-type DigestEntry struct {
-	ModuleID string   `json:"module_id"`
-	Priority int      `json:"priority"`
-	Observed int64    `json:"observed"`
-	Expected *float64 `json:"expected,omitempty"`
-}
-
 type Template struct {
 	Template  string   `json:"template"`
 	Count     int64    `json:"count"`
@@ -53,14 +46,13 @@ type Budget struct {
 }
 
 type Bundle struct {
-	SchemaVersion    int           `json:"schema_version"`
-	SystemID         string        `json:"system_id"`
-	CollectorVersion string        `json:"collector_version"`
-	MaskingVersion   int           `json:"masking_version"`
-	Window           Window        `json:"window"`
-	Digest           []DigestEntry `json:"digest"`
-	Templates        []Template    `json:"templates"`
-	Budget           Budget        `json:"budget"`
+	SchemaVersion    int        `json:"schema_version"`
+	SystemID         string     `json:"system_id"`
+	CollectorVersion string     `json:"collector_version"`
+	MaskingVersion   int        `json:"masking_version"`
+	Window           Window     `json:"window"`
+	Templates        []Template `json:"templates"`
+	Budget           Budget     `json:"budget"`
 	// Nodes is the reporting cluster's node roster, resent every window so
 	// a rename propagates on its own. Optional: a collector that cannot
 	// reach a node's exporter sends what it has.
@@ -92,14 +84,9 @@ type Finding struct {
 	// is never stored: names live in one place (system_nodes) so a rename is
 	// not frozen into every finding that ever cited the machine.
 	NodeRefs []NodeInfo `json:"node_refs,omitempty"`
-	// TriggerKey is the trigger (internal/trigger) of the LLM call that
-	// last raised this finding. Server-internal: it is the join the trigger
-	// memory's reuse check goes through, never part of the read API. Review
-	// decisions go through ClassKey instead.
-	TriggerKey string `json:"-"`
 	// ClassKey is the finding's class (fingerprint.Class): its fingerprint
-	// without the system. Server-internal, like TriggerKey: it is the join
-	// every review decision goes through, never part of the read API.
+	// without the system. Server-internal: it is the join every review
+	// decision goes through, never part of the read API.
 	ClassKey string `json:"-"`
 	// Security is the class's security tag as read for the customer. On a
 	// write it says whether the edge classified a cited template as
@@ -198,11 +185,8 @@ func ServiceTag(template string) string {
 // kept: dropping an unparsed line would silently discard evidence, and failing
 // open toward analysis is the safe direction for a cost control.
 //
-// Only Templates are filtered. Digest entries and truncation records are keyed
-// by (module_id, priority) and carry no service dimension, so an excluded
-// service still contributes to its bucket's volume — a service that floods the
-// journal can therefore still trip the deviation condition for the host bucket.
-// Fixing that needs a per-service digest from the collector.
+// Only Templates are filtered. Truncation records are keyed by module and
+// carry no service dimension, so they pass through.
 func (b Bundle) ExcludeServices(excluded map[string]bool) Bundle {
 	if len(excluded) == 0 {
 		return b
@@ -253,8 +237,8 @@ func moduleExcluded(excluded map[string]bool, moduleID string) bool {
 	return excluded[moduleID] || excluded[ModuleFamily(moduleID)]
 }
 
-// ExcludeModules returns a copy of b with every template, digest entry and
-// truncation record whose module is in excluded removed.
+// ExcludeModules returns a copy of b with every template and truncation
+// record whose module is in excluded removed.
 //
 // A module that owns a dedicated pipeline must not also be analysed by the LLM
 // one. CrowdSec is the case this exists for: its decisions already travel
@@ -276,9 +260,8 @@ func moduleExcluded(excluded map[string]bool, moduleID string) bool {
 // because two that disagreed would exclude a record from the prompt while
 // still counting it as novel.
 //
-// All three collections are filtered together. Dropping only Templates would
-// leave the digest firing deviation reasons for a module the prompt never
-// mentions, which is a gate decision nobody can explain from the stored data.
+// Both collections are filtered together, so the prompt's SAMPLING section
+// never names a module whose lines it does not show.
 //
 // An empty or nil excluded set returns b unchanged. The empty module id is the
 // host bucket (sshd, systemd, runagent) and is an ordinary module here: it is
@@ -295,13 +278,6 @@ func (b Bundle) ExcludeModules(excluded map[string]bool) Bundle {
 	for _, t := range b.Templates {
 		if !moduleExcluded(excluded, t.ModuleID) {
 			out.Templates = append(out.Templates, t)
-		}
-	}
-
-	out.Digest = make([]DigestEntry, 0, len(b.Digest))
-	for _, e := range b.Digest {
-		if !moduleExcluded(excluded, e.ModuleID) {
-			out.Digest = append(out.Digest, e)
 		}
 	}
 

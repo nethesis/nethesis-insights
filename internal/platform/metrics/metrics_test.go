@@ -173,17 +173,6 @@ func TestBudgetRejectedRecordsReason(t *testing.T) {
 	}
 }
 
-func TestTriggerSuppressedRecordsReason(t *testing.T) {
-	reg := NewRegistry(testService)
-	tr := NewTrigger(reg, "trigger_hit")
-	tr.Suppressed("trigger_hit")
-
-	body := scrapeRegistry(t, Handler(reg))
-	if !strings.Contains(body, `svc_trigger_suppressions_total{reason="trigger_hit"} 1`) {
-		t.Errorf("scrape body missing the expected counter\nbody:\n%s", body)
-	}
-}
-
 func TestPassObserveRecordsRunsDurationAndLastSuccess(t *testing.T) {
 	reg := NewRegistry(testService)
 	p := NewPass(reg, "blocklist consensus")

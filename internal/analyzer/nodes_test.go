@@ -25,9 +25,6 @@ func nodeBundle(systemID string, windowStart int64, templateNodes []int, roster 
 		Templates: []model.Template{
 			{Template: "tpl1", Count: 5, ModuleID: "mod1", Priority: 1, Nodes: templateNodes},
 		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "mod1", Priority: 1, Observed: 5},
-		},
 		Nodes: roster,
 	}
 }
@@ -85,10 +82,11 @@ func TestRecurrenceReplacesTheNodeSetRatherThanAccumulating(t *testing.T) {
 	if err := a.Process(ctx, nodeBundle("sys1", 100, []int{1}, roster)); err != nil {
 		t.Fatalf("first process: %v", err)
 	}
-	// The second window must reach the LLM for the finding to recur, so make
-	// it deviate: a steady window is gated out and would never re-upsert.
+	// The second window must reach the LLM for the finding to recur, so give
+	// it a new line: a steady window is gated out and would never re-upsert.
+	// tpl2 sorts after tpl1, so T1 still cites tpl1.
 	second := nodeBundle("sys1", 300, []int{3}, roster)
-	second.Digest[0].Observed = 500
+	second.Templates = append(second.Templates, model.Template{Template: "tpl2", Count: 1, ModuleID: "mod1", Priority: 1})
 	if err := a.Process(ctx, second); err != nil {
 		t.Fatalf("second process: %v", err)
 	}

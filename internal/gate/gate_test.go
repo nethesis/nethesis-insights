@@ -10,119 +10,78 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-func f(v float64) *float64 { return &v }
+const day = int64(24 * 60 * 60 * 1000)
+
+// windowStart is where every test window starts: far enough from zero that a
+// last_seen a few weeks earlier is still positive.
+const windowStart = 100 * day
 
 // testCfg keeps the thresholds these cases were written against: one novel
-// template fires, and the deviation floors are effectively off. The floors and
-// the novelty quorum have their own cases below, run at the production
-// defaults.
+// template fires, and neither novelty refinement is on. The quorum, the
+// similarity check and the silence rule have their own cases below.
 func testCfg() Config {
-	return Config{Tolerance: 3.0, MinExpected: 1, MinObserved: 1, MinNewTemplates: 1}
+	return Config{MinNewTemplates: 1, Similarity: 1}
 }
 
-// knownIn builds a KnownTemplates set the way the store does: canonical keys,
-// not raw template text.
-func knownIn(moduleID string, templates ...string) map[string]bool {
-	known := make(map[string]bool, len(templates))
+// prodCfg is the shipped defaults.
+func prodCfg() Config {
+	return Config{MinNewTemplates: 3, Similarity: 0.9, Silence: 8 * day}
+}
+
+// knownIn builds a KnownTemplates map the way the store does: canonical
+// keys, not raw template text, each last seen just before the window.
+func knownIn(moduleID string, templates ...string) map[string]int64 {
+	return knownAt(windowStart-1, moduleID, templates...)
+}
+
+func knownAt(lastSeen int64, moduleID string, templates ...string) map[string]int64 {
+	known := make(map[string]int64, len(templates))
 	for _, t := range templates {
-		known[model.CanonicalKey(moduleID, t)] = true
+		known[model.CanonicalKey(moduleID, t)] = lastSeen
 	}
 	return known
 }
 
 func baseBundle() model.Bundle {
 	return model.Bundle{
+		Window: model.Window{Start: windowStart, End: windowStart + 15*60*1000},
 		Templates: []model.Template{
 			{Template: "t1", ModuleID: "mod1", Priority: 3, Category: ""},
-		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "mod1", Priority: 3, Observed: 10},
 		},
 	}
 }
 
-func TestSteadyStateNoCall(t *testing.T) {
+func bundleOf(ts ...model.Template) model.Bundle {
 	b := baseBundle()
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-	}
-	d := Evaluate(b, s, testCfg())
+	b.Templates = ts
+	return b
+}
+
+func TestSteadyStateNoCall(t *testing.T) {
+	d := Evaluate(baseBundle(), SystemState{KnownTemplates: knownIn("mod1", "t1")}, testCfg())
 	if d.Call {
 		t.Fatalf("expected no call in steady state, got reasons %v", d.Reasons)
 	}
 }
 
 func TestNewTemplateCalls(t *testing.T) {
-	b := baseBundle()
-	s := SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-	}
-	d := Evaluate(b, s, testCfg())
+	d := Evaluate(baseBundle(), SystemState{KnownTemplates: map[string]int64{}}, testCfg())
 	if !d.Call {
 		t.Fatalf("expected call for new template")
 	}
-	if d.Reasons[0] != ReasonNewTemplates {
-		t.Fatalf("expected %s, got %v", ReasonNewTemplates, d.Reasons)
+	if !reflect.DeepEqual(d.Reasons, []string{ReasonNewTemplates}) {
+		t.Fatalf("expected [%s], got %v", ReasonNewTemplates, d.Reasons)
 	}
 }
 
-func TestDeviationViaExpectedCalls(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Expected = f(1)
-	b.Digest[0].Observed = 100
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{},
-	}
-	d := Evaluate(b, s, testCfg())
-	if !d.Call {
-		t.Fatalf("expected call for deviation, got %v", d.Reasons)
-	}
-}
-
-func TestDeviationFallsBackToBaseline(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Observed = 100
-	b.Digest[0].Expected = nil
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
-	}
-	d := Evaluate(b, s, testCfg())
-	if !d.Call {
-		t.Fatalf("expected call via baseline fallback, got %v", d.Reasons)
-	}
-}
-
-func TestExpectedZeroNeverPanicsNoCall(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Observed = 1000
-	b.Digest[0].Expected = f(0)
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{}, // also zero/missing
-	}
-	d := Evaluate(b, s, testCfg())
-	if d.Call {
-		t.Fatalf("expected no call when expected<=0, got %v", d.Reasons)
-	}
-}
-
-// A steady-state security template must NOT fire the gate. This is the whole
-// point of the security condition being novelty-scoped: sshd auth failures
+// A security template that is already known must NOT fire. Failed SSH logins
 // arrive continuously on any internet-facing node, so the previous
 // "any security template calls" rule made the gate a no-op -- 352 LLM calls
 // out of 352 windows on the dev fleet.
 func TestKnownSecurityTemplateAloneNoCall(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-	}
-	d := Evaluate(b, s, testCfg())
+	d := Evaluate(b, SystemState{KnownTemplates: knownIn("mod1", "t1")}, testCfg())
 	if d.Call {
 		t.Fatalf("expected steady-state security template to not call, got %v", d.Reasons)
 	}
@@ -131,11 +90,7 @@ func TestKnownSecurityTemplateAloneNoCall(t *testing.T) {
 func TestNewSecurityTemplateCalls(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	s := SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-	}
-	d := Evaluate(b, s, testCfg())
+	d := Evaluate(b, SystemState{KnownTemplates: map[string]int64{}}, testCfg())
 	if !d.Call {
 		t.Fatalf("expected call for new security template")
 	}
@@ -144,251 +99,69 @@ func TestNewSecurityTemplateCalls(t *testing.T) {
 	}
 }
 
-// A known security template still fires when its bucket surges -- that is the
-// brute-force-spike case the security condition exists to catch.
-func TestKnownSecurityTemplateSurgeCalls(t *testing.T) {
-	b := baseBundle()
-	b.Templates[0].Category = "security"
-	b.Digest[0].Observed = 100
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
-	}
-	d := Evaluate(b, s, testCfg())
-	if !d.Call {
-		t.Fatalf("expected call for surging security template")
-	}
-	found := false
-	for _, r := range d.Reasons {
-		if r == ReasonSecuritySurge {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected %s reason, got %v", ReasonSecuritySurge, d.Reasons)
-	}
-}
-
-// A security template surging in a DIFFERENT module than the one deviating
-// must not be credited with that module's surge.
-func TestSecuritySurgeIsPerModule(t *testing.T) {
-	b := model.Bundle{
-		Templates: []model.Template{
-			{Template: "t1", ModuleID: "quiet", Priority: 3, Category: "security"},
-		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "quiet", Priority: 3, Observed: 10},
-			{ModuleID: "loud", Priority: 3, Observed: 100},
-		},
-	}
-	s := SystemState{
-		KnownTemplates: knownIn("quiet", "t1"),
-		Baselines: map[BaselineKey]float64{
-			{ModuleID: "quiet", Priority: 3}: 10,
-			{ModuleID: "loud", Priority: 3}:  1,
-		},
-	}
-	d := Evaluate(b, s, testCfg())
-	for _, r := range d.Reasons {
-		if r == ReasonSecuritySurge {
-			t.Fatalf("security_surge credited across modules: %v", d.Reasons)
-		}
-	}
-}
-
-// An empty bundle is what CrowdSec exclusion produces on a window that carried
-// nothing else. It must gate out cleanly rather than panic or fire.
 func TestEmptyBundleNoCall(t *testing.T) {
-	d := Evaluate(model.Bundle{}, SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines:      map[BaselineKey]float64{},
-	}, testCfg())
+	d := Evaluate(model.Bundle{}, SystemState{KnownTemplates: map[string]int64{}}, testCfg())
 	if d.Call {
-		t.Fatalf("expected empty bundle to gate out, got %v", d.Reasons)
-	}
-	if len(d.Reasons) != 0 {
-		t.Fatalf("expected no reasons for empty bundle, got %v", d.Reasons)
+		t.Fatalf("expected no call for an empty bundle, got %v", d.Reasons)
 	}
 }
 
+// Truncation is reported to the model as context, never as a reason to call.
 func TestTruncationAloneNoCall(t *testing.T) {
 	b := baseBundle()
-	b.Budget.TruncatedModules = []model.TruncatedModule{{ModuleID: "mod1", Dropped: 5, Truncated: true}}
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-	}
-	d := Evaluate(b, s, testCfg())
+	b.Budget.TruncatedModules = []model.TruncatedModule{{ModuleID: "mod1", Dropped: 1000, Truncated: true}}
+	d := Evaluate(b, SystemState{KnownTemplates: knownIn("mod1", "t1")}, testCfg())
 	if d.Call {
-		t.Fatalf("expected truncation alone to not call, got %v", d.Reasons)
+		t.Fatalf("expected truncation alone not to call, got %v", d.Reasons)
 	}
 }
 
-func TestTruncationPlusDeviationCalls(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Observed = 100
-	b.Budget.TruncatedModules = []model.TruncatedModule{{ModuleID: "mod1", Dropped: 5, Truncated: true}}
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
-	}
-	d := Evaluate(b, s, testCfg())
-	if !d.Call {
-		t.Fatalf("expected call for truncation+deviation")
-	}
-	found := false
-	for _, r := range d.Reasons {
-		if r == "truncated_deviating:mod1" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected truncated_deviating reason, got %v", d.Reasons)
-	}
-}
-
-func TestSecurityOnlySuppressesNoveltyAndDeviation(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Observed = 1000
-	b.Digest[0].Expected = f(1)
-	s := SystemState{
-		KnownTemplates: map[string]bool{}, // everything novel
-		Baselines:      map[BaselineKey]float64{},
-		SecurityOnly:   true,
-	}
-	d := Evaluate(b, s, testCfg())
+func TestSecurityOnlySuppressesNovelty(t *testing.T) {
+	d := Evaluate(baseBundle(), SystemState{KnownTemplates: map[string]int64{}, SecurityOnly: true}, testCfg())
 	if d.Call {
-		t.Fatalf("expected SecurityOnly to suppress novelty/deviation, got %v", d.Reasons)
+		t.Fatalf("security-only mode must decline non-security novelty, got %v", d.Reasons)
 	}
 }
 
 func TestSecurityOnlyStillCallsForNewSecurity(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	s := SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines:      map[BaselineKey]float64{},
-		SecurityOnly:   true,
-	}
-	d := Evaluate(b, s, testCfg())
-	if !d.Call {
-		t.Fatalf("expected SecurityOnly to still call for a new security template")
-	}
-	if !reflect.DeepEqual(d.Reasons, []string{ReasonSecurityNew}) {
-		t.Fatalf("expected only %s, got %v", ReasonSecurityNew, d.Reasons)
+	d := Evaluate(b, SystemState{KnownTemplates: map[string]int64{}, SecurityOnly: true}, testCfg())
+	if !d.Call || !reflect.DeepEqual(d.Reasons, []string{ReasonSecurityNew}) {
+		t.Fatalf("expected a security_new call in security-only mode, got call=%v %v", d.Call, d.Reasons)
 	}
 }
 
-// The spend-cap degrade path (spec section 9.4) only saves money if it declines
-// steady-state security traffic. Under the old unconditional rule it fired on
-// ~100% of windows, making the lever a no-op.
 func TestSecurityOnlyDeclinesSteadyStateSecurity(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-		SecurityOnly:   true,
-	}
-	d := Evaluate(b, s, testCfg())
+	d := Evaluate(b, SystemState{KnownTemplates: knownIn("mod1", "t1"), SecurityOnly: true}, testCfg())
 	if d.Call {
-		t.Fatalf("expected SecurityOnly to decline steady-state security, got %v", d.Reasons)
+		t.Fatalf("a known security template must not call in security-only mode, got %v", d.Reasons)
 	}
 }
 
 func TestReasonsDeterministicAcrossRepeats(t *testing.T) {
-	b := model.Bundle{
-		Templates: []model.Template{
-			{Template: "t1", ModuleID: "modZ", Priority: 1},
-			{Template: "t2", ModuleID: "modA", Priority: 2},
-			{Template: "t3", ModuleID: "modB", Priority: 1, Category: "security"},
-		},
-		Digest: []model.DigestEntry{
-			{ModuleID: "modZ", Priority: 1, Observed: 100},
-			{ModuleID: "modA", Priority: 2, Observed: 200},
-		},
-		Budget: model.Budget{
-			TruncatedModules: []model.TruncatedModule{
-				{ModuleID: "modA", Truncated: true},
-				{ModuleID: "modZ", Truncated: true},
-			},
-		},
-	}
-	s := SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines: map[BaselineKey]float64{
-			{ModuleID: "modZ", Priority: 1}: 1,
-			{ModuleID: "modA", Priority: 2}: 1,
-		},
-	}
-	var first Decision
-	for i := 0; i < 20; i++ {
-		d := Evaluate(b, s, testCfg())
-		if i == 0 {
-			first = d
-		} else if !reflect.DeepEqual(first, d) {
-			t.Fatalf("non-deterministic reasons across repeats: %v vs %v", first, d)
+	b := bundleOf(
+		model.Template{Template: "z", ModuleID: "b", Priority: 3, Category: "security"},
+		model.Template{Template: "a", ModuleID: "a", Priority: 3},
+	)
+	s := SystemState{KnownTemplates: map[string]int64{}}
+	first := Evaluate(b, s, testCfg()).Reasons
+	for i := 0; i < 50; i++ {
+		if got := Evaluate(b, s, testCfg()).Reasons; !reflect.DeepEqual(got, first) {
+			t.Fatalf("reasons changed between runs: %v vs %v", first, got)
 		}
 	}
-}
-
-// prodCfg is what cmd/insightsd wires by default.
-func prodCfg() Config {
-	return Config{Tolerance: 3.0, MinExpected: 10, MinObserved: 20, MinNewTemplates: 3}
-}
-
-// The measured failure: <host>/5 with a baseline of 2.0 lines per window fired
-// the gate at 7 lines, 28 times in 24 hours, every one of them noise.
-func TestDeviationFloorsTable(t *testing.T) {
-	cases := []struct {
-		name     string
-		expected float64
-		observed int64
-		wantCall bool
-	}{
-		{name: "tiny bucket, ratio over tolerance", expected: 2, observed: 7, wantCall: false},
-		{name: "tiny bucket, huge ratio, few lines", expected: 1, observed: 15, wantCall: false},
-		{name: "baseline under MinExpected, plenty of lines", expected: 5, observed: 100, wantCall: false},
-		{name: "at both floors but ratio under tolerance", expected: 10, observed: 25, wantCall: false},
-		{name: "over both floors and over tolerance", expected: 10, observed: 40, wantCall: true},
-		{name: "large bucket surging", expected: 200, observed: 900, wantCall: true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := baseBundle()
-			b.Digest[0].Observed = tc.observed
-			b.Digest[0].Expected = f(tc.expected)
-			s := SystemState{
-				KnownTemplates: knownIn("mod1", "t1"),
-				Baselines:      map[BaselineKey]float64{},
-			}
-			d := Evaluate(b, s, prodCfg())
-			if d.Call != tc.wantCall {
-				t.Fatalf("call=%v want %v (reasons %v)", d.Call, tc.wantCall, d.Reasons)
-			}
-		})
-	}
-}
-
-// The floors apply to the EWMA fallback exactly as they do to edge `expected`;
-// a bucket with no edge baseline must not become the cheap way past them.
-func TestDeviationFloorsApplyToEWMAFallback(t *testing.T) {
-	b := baseBundle()
-	b.Digest[0].Observed = 7
-	b.Digest[0].Expected = nil
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 2},
-	}
-	if d := Evaluate(b, s, prodCfg()); d.Call {
-		t.Fatalf("expected floors to apply to the EWMA fallback, got %v", d.Reasons)
+	if !reflect.DeepEqual(first, []string{ReasonSecurityNew, ReasonNewTemplates}) {
+		t.Fatalf("unexpected reasons %v", first)
 	}
 }
 
 func TestNoveltyQuorum(t *testing.T) {
 	mk := func(n int) model.Bundle {
-		b := model.Bundle{}
+		b := baseBundle()
+		b.Templates = nil
 		for i := 0; i < n; i++ {
 			b.Templates = append(b.Templates, model.Template{
 				Template: "<3> [svc] new line " + string(rune('a'+i)),
@@ -397,7 +170,7 @@ func TestNoveltyQuorum(t *testing.T) {
 		}
 		return b
 	}
-	empty := SystemState{KnownTemplates: map[string]bool{}, Baselines: map[BaselineKey]float64{}}
+	empty := SystemState{KnownTemplates: map[string]int64{}}
 
 	for _, tc := range []struct {
 		n        int
@@ -415,9 +188,7 @@ func TestNoveltyQuorum(t *testing.T) {
 func TestNoveltyQuorumNeverSuppressesNewSecurity(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	s := SystemState{KnownTemplates: map[string]bool{}, Baselines: map[BaselineKey]float64{}}
-
-	d := Evaluate(b, s, prodCfg())
+	d := Evaluate(b, SystemState{KnownTemplates: map[string]int64{}}, prodCfg())
 	if !d.Call {
 		t.Fatal("a single new security template must still fire")
 	}
@@ -429,125 +200,196 @@ func TestNoveltyQuorumNeverSuppressesNewSecurity(t *testing.T) {
 // Novelty counts canonical keys. Ten spellings of one leaked field are one
 // condition, and the gate must not read them as a quorum.
 func TestNoveltyCountsCanonicalKeysNotSpellings(t *testing.T) {
-	b := model.Bundle{
-		Templates: []model.Template{
-			{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.3%); 0 recycled`, ModuleID: "mod1", Priority: 3},
-			{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (1.1%); 1 recycled`, ModuleID: "mod1", Priority: 3},
-			{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (2.7%); 4 recycled`, ModuleID: "mod1", Priority: 3},
-		},
-	}
-	s := SystemState{KnownTemplates: map[string]bool{}, Baselines: map[BaselineKey]float64{}}
-	if d := Evaluate(b, s, prodCfg()); d.Call {
+	b := bundleOf(
+		model.Template{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.3%); 0 recycled`, ModuleID: "mod1", Priority: 3},
+		model.Template{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (1.1%); 1 recycled`, ModuleID: "mod1", Priority: 3},
+		model.Template{Template: `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (2.7%); 4 recycled`, ModuleID: "mod1", Priority: 3},
+	)
+	if d := Evaluate(b, SystemState{KnownTemplates: map[string]int64{}}, prodCfg()); d.Call {
 		t.Fatalf("three spellings of one condition must not reach the quorum: %v", d.Reasons)
 	}
 
 	// And a template already known under one spelling is not novel under another.
 	b2 := baseBundle()
 	b2.Templates[0].Template = `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (9.9%); 7 recycled`
-	s2 := SystemState{
-		KnownTemplates: knownIn("mod1", `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.1%); 0 recycled`),
-		Baselines:      map[BaselineKey]float64{},
-	}
+	s2 := SystemState{KnownTemplates: knownIn("mod1", `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.1%); 0 recycled`)}
 	if d := Evaluate(b2, s2, testCfg()); d.Call {
 		t.Fatalf("a known line in a new spelling must not be novel: %v", d.Reasons)
 	}
 }
 
-// The trigger key (internal/trigger) is derived from the Decision, so the
-// Decision must say which security condition fired and which buckets
-// deviated. Both used to exist only inside the reason strings, and parsing
-// those back would be a second definition of the gate.
-func TestDecisionExposesTheSecurityConditions(t *testing.T) {
-	cases := []struct {
-		name          string
-		known         bool
-		observed      int64
-		wantNew       bool
-		wantSurge     bool
-		wantNoveltyOn bool
-	}{
-		{name: "new security template", known: false, observed: 10, wantNew: true, wantNoveltyOn: true},
-		{name: "known security template surging", known: true, observed: 100, wantSurge: true},
-		{name: "known security template steady", known: true, observed: 10},
+const (
+	sipKnown = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: fevigort37u6sbhqkm2p9396@<IP> INVITE-<NUM> Malformed SIP request from <IP>:<PORT>`
+	sipNew   = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: 16emkwe6stxzzm2az0fu6n7l@<IP> INVITE-<NUM> Malformed SIP request from <IP>:<PORT>`
+)
+
+// The case the similarity check exists for: a SIP call-id the masking leaves
+// literal makes every window's copy of one known line look new.
+func TestNearKnownTemplateIsNotNovel(t *testing.T) {
+	b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy6", Priority: 3})
+	s := SystemState{KnownTemplates: knownIn("nethvoice-proxy2", sipKnown)}
+
+	d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9})
+	if d.Call {
+		t.Fatalf("a line differing only in an identifier must count as known: %v", d.Reasons)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := baseBundle()
-			b.Templates[0].Category = "security"
-			b.Digest[0].Observed = tc.observed
-			s := SystemState{
-				KnownTemplates: map[string]bool{},
-				Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 10},
-			}
-			if tc.known {
-				s.KnownTemplates = knownIn("mod1", "t1")
-			}
-			d := Evaluate(b, s, testCfg())
-			if d.SecurityNew != tc.wantNew || d.SecuritySurge != tc.wantSurge {
-				t.Fatalf("SecurityNew=%v SecuritySurge=%v, want %v/%v (reasons %v)",
-					d.SecurityNew, d.SecuritySurge, tc.wantNew, tc.wantSurge, d.Reasons)
-			}
-			if d.NoveltyFired != tc.wantNoveltyOn {
-				t.Fatalf("NoveltyFired=%v, want %v (reasons %v)", d.NoveltyFired, tc.wantNoveltyOn, d.Reasons)
-			}
-		})
+	if d.NearKnown != 1 || len(d.Novel) != 0 {
+		t.Fatalf("want NearKnown=1 and nothing novel, got %d and %v", d.NearKnown, d.Novel)
 	}
 }
 
-// Sub-quorum novelty must not read as fired: it did not pay for the call.
-func TestNoveltyFiredOnlyWhenTheQuorumIsMet(t *testing.T) {
+func TestNearKnownNeedsTheSameFamily(t *testing.T) {
+	b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy6", Priority: 3})
+	s := SystemState{KnownTemplates: knownIn("mail1", sipKnown)}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9}); !d.Call {
+		t.Fatal("a known line of another module family must not make this one known")
+	}
+}
+
+// One changed word can be the whole condition. Measured on the dev fleet,
+// "Failed to reconnect" and "Failed to ping" were 90% alike.
+func TestNearKnownRefusesAChangedWord(t *testing.T) {
+	known := `<3> [nethvoice] nethcti-middleware logs.go:<NUM>: [CRITICAL][SATELLITE-DB] Failed to ping database after <NUM> attempts`
+	novel := `<3> [nethvoice] nethcti-middleware logs.go:<NUM>: [CRITICAL][SATELLITE-DB] Failed to reconnect database after <NUM> attempts`
+	b := bundleOf(model.Template{Template: novel, ModuleID: "nethvoice1", Priority: 3})
+	s := SystemState{KnownTemplates: knownIn("nethvoice1", known)}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9}); !d.Call {
+		t.Fatal("a line differing in a plain word must stay novel")
+	}
+}
+
+// At 0.9 a line needs ten tokens before one may differ, so a short line is
+// matched exactly or not at all.
+func TestShortLinesNeverMatch(t *testing.T) {
+	known := `<3> [svc] session abc123 opened`
+	novel := `<3> [svc] session xyz789 opened`
+	b := bundleOf(model.Template{Template: novel, ModuleID: "mod1", Priority: 3})
+	s := SystemState{KnownTemplates: knownIn("mod1", known)}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9}); !d.Call {
+		t.Fatal("a short line with any difference must stay novel")
+	}
+}
+
+func TestNearKnownNeverAppliesToSecurity(t *testing.T) {
+	b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: 3, Category: "security"})
+	s := SystemState{KnownTemplates: knownIn("nethvoice-proxy1", sipKnown)}
+
+	d := Evaluate(b, s, Config{MinNewTemplates: 3, Similarity: 0.9})
+	if !d.Call || d.Reasons[0] != ReasonSecurityNew {
+		t.Fatalf("a new security template must always fire, got call=%v %v", d.Call, d.Reasons)
+	}
+}
+
+func TestNearKnownNeverAppliesToHighPriority(t *testing.T) {
+	for _, prio := range []int{0, 1, 2} {
+		b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: prio})
+		s := SystemState{KnownTemplates: knownIn("nethvoice-proxy1", sipKnown)}
+
+		if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9}); !d.Call {
+			t.Fatalf("priority %d: a critical-or-above line must stay novel", prio)
+		}
+	}
+}
+
+// One template sharing a key with an ineligible one is decided by the
+// ineligible one: a security spelling must not be matched away because a
+// plain spelling of the same key could be.
+func TestIneligibleSpellingWinsTheKey(t *testing.T) {
+	b := bundleOf(
+		model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: 3},
+		model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: 3, Category: "security"},
+	)
+	s := SystemState{KnownTemplates: knownIn("nethvoice-proxy1", sipKnown)}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 3, Similarity: 0.9}); !d.Call {
+		t.Fatal("the security spelling must keep the key novel")
+	}
+}
+
+func TestSimilarityOneDisablesTheCheck(t *testing.T) {
+	b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: 3})
+	s := SystemState{KnownTemplates: knownIn("nethvoice-proxy1", sipKnown)}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 1}); !d.Call {
+		t.Fatal("Similarity 1 must leave every unknown template novel")
+	}
+}
+
+// The case the silence rule exists for: a failure whose lines the system
+// already knows, back after a quiet spell.
+func TestReturningTemplateIsNovel(t *testing.T) {
 	b := baseBundle()
-	b.Digest[0].Observed = 100
-	s := SystemState{
-		KnownTemplates: map[string]bool{},
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
+	s := SystemState{KnownTemplates: knownAt(windowStart-9*day, "mod1", "t1")}
+
+	d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 1, Silence: 8 * day})
+	if !d.Call || !reflect.DeepEqual(d.Reasons, []string{ReasonNewTemplates}) {
+		t.Fatalf("a template back after the silence must count as new, got call=%v %v", d.Call, d.Reasons)
 	}
-	cfg := testCfg()
-	cfg.MinNewTemplates = 3
-	d := Evaluate(b, s, cfg)
-	if !d.Call || len(d.Novel) != 1 {
-		t.Fatalf("expected a deviation call carrying one sub-quorum novel template, got %+v", d)
-	}
-	if d.NoveltyFired {
-		t.Fatalf("sub-quorum novelty reported as fired: %v", d.Reasons)
+	if d.Returning != 1 || !d.Novel[model.CanonicalKey("mod1", "t1")] {
+		t.Fatalf("want Returning=1 and the key novel, got %d and %v", d.Returning, d.Novel)
 	}
 }
 
-func TestDecisionExposesDeviatingBucketsSorted(t *testing.T) {
-	b := model.Bundle{
-		Digest: []model.DigestEntry{
-			{ModuleID: "zeta1", Priority: 3, Observed: 100},
-			{ModuleID: "alpha2", Priority: 6, Observed: 100},
-			{ModuleID: "alpha2", Priority: 3, Observed: 100},
-			{ModuleID: "quiet", Priority: 3, Observed: 10},
-		},
-	}
-	s := SystemState{Baselines: map[BaselineKey]float64{
-		{ModuleID: "zeta1", Priority: 3}:  1,
-		{ModuleID: "alpha2", Priority: 6}: 1,
-		{ModuleID: "alpha2", Priority: 3}: 1,
-		{ModuleID: "quiet", Priority: 3}:  10,
-	}}
-	d := Evaluate(b, s, testCfg())
-	want := []BaselineKey{{"alpha2", 3}, {"alpha2", 6}, {"zeta1", 3}}
-	if !reflect.DeepEqual(d.DeviatingBuckets, want) {
-		t.Fatalf("DeviatingBuckets = %v, want %v", d.DeviatingBuckets, want)
+func TestRecentTemplateIsKnown(t *testing.T) {
+	b := baseBundle()
+	s := SystemState{KnownTemplates: knownAt(windowStart-7*day, "mod1", "t1")}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 1, Silence: 8 * day}); d.Call {
+		t.Fatalf("a template seen inside the silence must stay known, got %v", d.Reasons)
 	}
 }
 
-// Security-only mode drops the deviation REASONS but the buckets still
-// deviate, and a security surge is about exactly those buckets.
-func TestSecurityOnlyStillReportsDeviatingBuckets(t *testing.T) {
+func TestSilenceZeroDisablesTheRule(t *testing.T) {
+	b := baseBundle()
+	s := SystemState{KnownTemplates: knownAt(1, "mod1", "t1")}
+
+	if d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 1}); d.Call {
+		t.Fatalf("Silence 0 must keep a known template known however old, got %v", d.Reasons)
+	}
+}
+
+func TestReturningSecurityTemplateFiresSecurityNew(t *testing.T) {
 	b := baseBundle()
 	b.Templates[0].Category = "security"
-	b.Digest[0].Observed = 100
-	s := SystemState{
-		KnownTemplates: knownIn("mod1", "t1"),
-		Baselines:      map[BaselineKey]float64{{ModuleID: "mod1", Priority: 3}: 1},
-		SecurityOnly:   true,
+	s := SystemState{KnownTemplates: knownAt(windowStart-30*day, "mod1", "t1")}
+
+	d := Evaluate(b, s, prodCfg())
+	if !d.Call || d.Reasons[0] != ReasonSecurityNew {
+		t.Fatalf("a returning security template is a new one, got call=%v %v", d.Call, d.Reasons)
 	}
-	d := Evaluate(b, s, testCfg())
-	if !d.SecuritySurge || !reflect.DeepEqual(d.DeviatingBuckets, []BaselineKey{{"mod1", 3}}) {
-		t.Fatalf("got SecuritySurge=%v DeviatingBuckets=%v", d.SecuritySurge, d.DeviatingBuckets)
+}
+
+// A silent template must not make a variant of itself look known: that
+// would let the variant's return slip past both rules.
+func TestSimilarityIgnoresSilentTemplates(t *testing.T) {
+	b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: 3})
+	s := SystemState{KnownTemplates: knownAt(windowStart-30*day, "nethvoice-proxy1", sipKnown)}
+
+	d := Evaluate(b, s, Config{MinNewTemplates: 1, Similarity: 0.9, Silence: 8 * day})
+	if !d.Call || d.NearKnown != 0 {
+		t.Fatalf("a variant of a silent template must be novel, got call=%v near=%d", d.Call, d.NearKnown)
+	}
+}
+
+func TestPlainWord(t *testing.T) {
+	for tok, want := range map[string]bool{
+		"ping": true, "Error": true, "SRTP": true, "ham": true,
+		"fevigort37u6sbhqkm2p9396": false, "DjhtXUVdMggltcnr": false, "iPvhcMtxdL36C": false,
+		"<HEX>": false, "42": false, "x": false, "/": false,
+	} {
+		if got := plainWord(tok); got != want {
+			t.Errorf("plainWord(%q) = %v, want %v", tok, got, want)
+		}
+	}
+}
+
+func TestTokenize(t *testing.T) {
+	got := tokenize(`<3> [svc] id=ab12@<IP>: done`)
+	want := []string{"<3>", "[", "svc", "]", "id", "=", "ab12", "@", "<IP>", ":", "done"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokenize = %q, want %q", got, want)
 	}
 }

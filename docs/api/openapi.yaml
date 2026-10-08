@@ -108,11 +108,6 @@ paths:
               collector_version: 2.0.0
               masking_version: 1
               window: { start: 1754380800000, end: 1754381700000 }
-              digest:
-                - module_id: traefik1
-                  priority: 3
-                  observed: 42
-                  expected: 3.2
               templates:
                 - template: "<3> [n1:traefik1:traefik] connection refused to <IP>:<NUM>"
                   count: 37
@@ -150,8 +145,8 @@ paths:
             Malformed JSON or gzip body, unsupported `schema_version`, missing
             `system_id`, `window.end` not greater than `window.start`,
             `window.end` in the future, `window.start` older than 6 hours,
-            more than 1000 `templates`, more than 1000 `digest` entries,
-            more than 1000 `budget.truncated_modules` entries, or more than
+            more than 1000 `templates`, more than 1000
+            `budget.truncated_modules` entries, or more than
             2 `samples` on one template.
           content:
             application/json:
@@ -966,17 +961,6 @@ components:
         start: { type: integer, format: int64, description: Unix-millis window start. }
         end: { type: integer, format: int64, description: Unix-millis window end, strictly greater than start. }
 
-    DigestEntry:
-      type: object
-      required: [module_id, priority, observed]
-      properties:
-        module_id: { type: string, description: "Empty string is a real bucket: host-level journal records (sshd, systemd, runagent) with no module." }
-        priority: { type: integer }
-        observed: { type: integer, format: int64 }
-        expected:
-          type: ["number", "null"]
-          description: Edge-computed expectation for this module/priority. Preferred over the server's EWMA baseline when present.
-
     Template:
       type: object
       required: [template, count, module_id, priority, first_seen, last_seen]
@@ -1029,14 +1013,17 @@ components:
 
     Bundle:
       type: object
-      description: One 15-minute window of deduplicated, masked log data from a single edge system.
+      description: >-
+        One 15-minute window of deduplicated, masked log data from a single
+        edge system. A `digest` array (per-bucket line counts) that collectors
+        still send is accepted and ignored: the gate no longer has a volume
+        condition.
       required:
         - schema_version
         - system_id
         - collector_version
         - masking_version
         - window
-        - digest
         - templates
         - budget
       properties:
@@ -1051,10 +1038,6 @@ components:
             text, so a jump in this value explains an otherwise mysterious
             fleet-wide novelty burst.
         window: { $ref: "#/components/schemas/Window" }
-        digest:
-          type: array
-          items: { $ref: "#/components/schemas/DigestEntry" }
-          maxItems: 1000
         templates:
           type: array
           items: { $ref: "#/components/schemas/Template" }

@@ -19,27 +19,11 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/prompt"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
-	"github.com/nethesis/nethesis-insights/internal/trigger"
 )
 
 // ErrPermanent marks failures that a retry cannot fix (e.g. a schema
 // rejection from the LLM, or a non-retryable 4xx).
 var ErrPermanent = errors.New("permanent failure")
-
-// The suppressed_by value the trigger memory writes. A window suppressed
-// this way was one the gate fired on: it keeps its gate reasons, unlike a
-// budget-suppressed window, because they are what the saving is measured
-// against.
-const (
-	// SuppressedTriggerHit: this system paid for this trigger within
-	// Config.TriggerReuseWindow and every finding that call raised is still
-	// open, so the answer is already known.
-	SuppressedTriggerHit = "trigger_hit"
-)
-
-// TriggerSuppressions lists every value above, for the metrics package to
-// pre-create one child per reason.
-var TriggerSuppressions = []string{SuppressedTriggerHit}
 
 // What became of one fresh window, for insightsd_windows_total: the gate's
 // verdict as the fleet's cost profile, in one family. A duplicate window is
@@ -51,18 +35,28 @@ const (
 	WindowCalled = "called"
 	// WindowGatedOut: the gate found nothing worth a call.
 	WindowGatedOut = "gated_out"
-	// WindowReused: the gate fired and the trigger memory answered.
-	WindowReused = "reused"
 	// WindowBudget: the budget stopped the window before the gate ran.
 	WindowBudget = "budget"
 )
 
 // WindowResults lists every value above, for the metrics package to
 // pre-create one child per result.
-var WindowResults = []string{WindowCalled, WindowGatedOut, WindowReused, WindowBudget}
+var WindowResults = []string{WindowCalled, WindowGatedOut, WindowBudget}
+
+// The values Metrics.Templates is called with: templates the gate's
+// similarity check counted as known, and known templates that counted as new
+// because they came back after a silence (gate.Config).
+const (
+	TemplatesNearKnown = "near_known"
+	TemplatesReturning = "returning"
+)
+
+// TemplateResults lists every value above, for the metrics package to
+// pre-create one child per result.
+var TemplateResults = []string{TemplatesNearKnown, TemplatesReturning}
 
 // Store is the slice of logsstore.Store the analyzer needs: the write path
-// that records templates, baselines, findings and the analyses ledger, plus
+// that records templates, findings and the analyses ledger, plus
 // the prior-state reads the gate depends on. Declared here, narrow, rather
 // than importing logsstore.Store itself -- the same idiom as
 // internal/budget's Reader and internal/ui/logs's Reader. *logsstore.Store
@@ -70,52 +64,51 @@ var WindowResults = []string{WindowCalled, WindowGatedOut, WindowReused, WindowB
 type Store interface {
 	UpsertSystem(ctx context.Context, s logsstore.System) error
 	UpsertNodes(ctx context.Context, systemID string, nodes []model.NodeInfo, now int64) error
-	KnownTemplates(ctx context.Context, systemID string) (map[string]bool, error)
+	KnownTemplates(ctx context.Context, systemID string) (map[string]int64, error)
 	UpsertTemplates(ctx context.Context, systemID string, ts []model.Template, now int64) error
-	Baselines(ctx context.Context, systemID string) (map[gate.BaselineKey]float64, error)
-	UpsertBaselines(ctx context.Context, systemID string, d []model.DigestEntry, alpha float64) error
 	BeginAnalysis(ctx context.Context, systemID string, windowStart, windowEnd, now int64) (bool, error)
 	FinalizeAnalysis(ctx context.Context, a logsstore.Analysis) error
 	RecordAttemptError(ctx context.Context, systemID string, windowStart int64, reasons []string, durationMs int, msg string) error
 	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (logsstore.Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
-	LookupTrigger(ctx context.Context, systemID, key string) (logsstore.TriggerLookup, error)
-	RecordTriggerSighting(ctx context.Context, sg logsstore.TriggerSighting) error
 }
 
 type Config struct {
 	Gate          gate.Config
 	PromptAmbient int
 	StaleAfter    time.Duration
-	EWMAAlpha     float64
 	Model         string
 	InputPerMTok  float64
 	OutputPerMTok float64
 
-	// TriggerReuseWindow is how long after a paid call the same trigger on
-	// the same system is answered from memory rather than paid for again.
-	// It counts from the last paid call, never from the last reuse, so a
-	// persistent condition is re-analysed at least this often. Zero
-	// disables reuse.
-	TriggerReuseWindow time.Duration
+	// CachedInputPerMTok prices the input tokens the provider served from
+	// its prompt cache. The discount differs by model -- half on gpt-4o-mini,
+	// a tenth on gpt-6-luna -- so it is configured, not assumed.
+	CachedInputPerMTok float64
 }
 
 // Metrics is the optional counter set Process reports against: one call to
 // BudgetRejected per window the budget suppressed before the gate ran, one
-// call to TriggerSuppressed per window the trigger memory answered (one of
-// TriggerSuppressions), one call to Window per fresh window (one of
-// WindowResults), and one call to LLMCall per attempt -- "success", "transient", "permanent" or
-// "parse" (see the metrics.LLMResult* constants), with costMicros set only
-// on success. Nil fields (or a nil *Metrics, the zero value of Analyzer's
+// call to Window per fresh window (one of WindowResults), one call to
+// Templates per gate decision that moved a template (one of
+// TemplateResults), and one call to LLMCall per attempt -- "success",
+// "transient", "permanent" or "parse" (see the metrics.LLMResult*
+// constants), with costMicros set only on success. Nil fields (or a nil *Metrics, the zero value of Analyzer's
 // Metrics field) are skipped, so every existing caller and test is
 // unaffected by adding this -- the same nil-safe-hook shape
 // internal/platform/auth.ForwardAuth.Metrics uses.
 type Metrics struct {
-	BudgetRejected    func(reason string)
-	TriggerSuppressed func(reason string)
-	LLMCall           func(result string, costMicros int64)
-	Window            func(result string)
+	BudgetRejected func(reason string)
+	LLMCall        func(result string, costMicros int64)
+	Window         func(result string)
+	Templates      func(result string, n int)
+}
+
+func (m *Metrics) templates(result string, n int) {
+	if m != nil && m.Templates != nil && n > 0 {
+		m.Templates(result, n)
+	}
 }
 
 func (m *Metrics) window(result string) {
@@ -127,12 +120,6 @@ func (m *Metrics) window(result string) {
 func (m *Metrics) budgetRejected(reason string) {
 	if m != nil && m.BudgetRejected != nil {
 		m.BudgetRejected(reason)
-	}
-}
-
-func (m *Metrics) triggerSuppressed(reason string) {
-	if m != nil && m.TriggerSuppressed != nil {
-		m.TriggerSuppressed(reason)
 	}
 }
 
@@ -174,11 +161,10 @@ type analysisEntry struct {
 	errMsg       string
 	cachedTokens int
 	suppressedBy string
-	triggerKey   string
 }
 
 // record persists the durable side effects of processing a bundle -- template
-// and baseline bookkeeping plus the analysis row -- in a fixed order. It is
+// bookkeeping plus the analysis row -- in a fixed order. It is
 // the ONLY place templates are recorded, and it must only be called for a
 // gated-out bundle or after a fully successful LLM analysis. If it ran
 // earlier (e.g. before an LLM call), a failed call would make the retry see
@@ -188,9 +174,6 @@ func (a *Analyzer) record(ctx context.Context, b model.Bundle, entry analysisEnt
 
 	if err := a.store.UpsertTemplates(ctx, b.SystemID, b.Templates, now); err != nil {
 		return fmt.Errorf("analyzer: upsert templates: %w", err)
-	}
-	if err := a.store.UpsertBaselines(ctx, b.SystemID, b.Digest, a.cfg.EWMAAlpha); err != nil {
-		return fmt.Errorf("analyzer: upsert baselines: %w", err)
 	}
 	if _, err := a.store.MarkStale(ctx, b.SystemID, now-a.cfg.StaleAfter.Milliseconds()); err != nil {
 		return fmt.Errorf("analyzer: mark stale: %w", err)
@@ -211,7 +194,6 @@ func (a *Analyzer) record(ctx context.Context, b model.Bundle, entry analysisEnt
 		DurationMs:   entry.durationMs,
 		Error:        entry.errMsg,
 		SuppressedBy: entry.suppressedBy,
-		TriggerKey:   entry.triggerKey,
 	}); err != nil {
 		return fmt.Errorf("analyzer: finalize analysis: %w", err)
 	}
@@ -259,17 +241,11 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	if err != nil {
 		return fmt.Errorf("analyzer: known templates: %w", err)
 	}
-	baselines, err := a.store.Baselines(ctx, b.SystemID)
-	if err != nil {
-		return fmt.Errorf("analyzer: baselines: %w", err)
-	}
 
 	slog.Debug("prior state loaded",
 		"system_id", b.SystemID,
 		"known_templates", len(knownTemplates),
-		"baselines", len(baselines),
 		"bundle_templates", len(b.Templates),
-		"bundle_digest_entries", len(b.Digest),
 	)
 
 	// 4. Ask the budget what this system may spend before asking the gate
@@ -298,9 +274,10 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// 5. Decide whether this bundle is worth an LLM call.
 	decision := gate.Evaluate(b, gate.SystemState{
 		KnownTemplates: knownTemplates,
-		Baselines:      baselines,
 		SecurityOnly:   verdict.SecurityOnly,
 	}, a.cfg.Gate)
+	a.Metrics.templates(TemplatesNearKnown, decision.NearKnown)
+	a.Metrics.templates(TemplatesReturning, decision.Returning)
 
 	slog.Debug("gate decision",
 		"system_id", b.SystemID,
@@ -308,7 +285,8 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		"call", decision.Call,
 		"reasons", decision.Reasons,
 		"security_only", verdict.SecurityOnly,
-		"tolerance", a.cfg.Gate.Tolerance,
+		"near_known", decision.NearKnown,
+		"returning", decision.Returning,
 	)
 
 	// 6. Gated out: record bookkeeping, no LLM call.
@@ -324,43 +302,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		})
 	}
 
-	// 7. Trigger memory. The gate says this window is worth money; the
-	// trigger memory asks whether this exact condition has already been
-	// paid for on this system, recently enough that reusing the last
-	// answer is safe. It runs after the gate (the key is derived from the
-	// gate's decision) and before anything is rendered, and it never
-	// changes what is rendered: a reused window makes no call at all, and a
-	// window that does call sees the same prompt it would have without it.
-	key := trigger.Key(decision)
-	look, err := a.store.LookupTrigger(ctx, b.SystemID, key)
-	if err != nil {
-		return fmt.Errorf("analyzer: lookup trigger: %w", err)
-	}
-	if suppressed := a.remembered(look, now); suppressed != "" {
-		slog.Info("window answered from trigger memory",
-			"system_id", b.SystemID, "window_start", b.Window.Start, "suppressed_by", suppressed)
-		if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
-			SystemID: b.SystemID,
-			Key:      key,
-			Reused:   suppressed == SuppressedTriggerHit,
-			Now:      now,
-		}); err != nil {
-			return fmt.Errorf("analyzer: record trigger sighting: %w", err)
-		}
-		a.Metrics.triggerSuppressed(suppressed)
-		a.Metrics.window(WindowReused)
-		return a.record(ctx, b, analysisEntry{
-			windowStart:  b.Window.Start,
-			windowEnd:    b.Window.End,
-			gated:        true,
-			gateReasons:  decision.Reasons,
-			suppressedBy: suppressed,
-			triggerKey:   key,
-			durationMs:   int(time.Since(start).Milliseconds()),
-		})
-	}
-
-	// 8. Call the LLM. The selection is built once and reused for
+	// 7. Call the LLM. The selection is built once and reused for
 	// ResolveEvidence below: prompt.TemplateID numbers whatever Select
 	// returns, so the identifiers the model cites only resolve against the
 	// same list it was shown.
@@ -369,9 +311,8 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		return fmt.Errorf("analyzer: open findings: %w", err)
 	}
 	selection := prompt.Selection{
-		Novel:            decision.Novel,
-		DeviatingModules: decision.DeviatingModules,
-		MaxAmbient:       a.cfg.PromptAmbient,
+		Novel:      decision.Novel,
+		MaxAmbient: a.cfg.PromptAmbient,
 	}
 	rendered := prompt.Render(b, open, selection)
 
@@ -421,7 +362,6 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 				Model:       a.cfg.Model,
 				DurationMs:  durationMs,
 				Error:       err.Error(),
-				TriggerKey:  key,
 			}); finalizeErr != nil {
 				slog.Error("finalize analysis after permanent llm error failed", "error", finalizeErr)
 			}
@@ -447,7 +387,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		"content_bytes", len(resp.Content),
 	)
 
-	// 9. Parse the response.
+	// 8. Parse the response.
 	parsed, _, err := prompt.Parse(resp.Content)
 	if err != nil {
 		a.Metrics.llmCall("parse", 0)
@@ -463,7 +403,6 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Model:        a.cfg.Model,
 			DurationMs:   int(time.Since(start).Milliseconds()),
 			Error:        err.Error(),
-			TriggerKey:   key,
 		})
 		if finalizeErr != nil {
 			slog.Error("finalize analysis after parse error failed", "error", finalizeErr)
@@ -475,7 +414,7 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 
 	slog.Debug("response parsed", "system_id", b.SystemID, "findings", len(parsed))
 
-	// 10. Persist each finding, deduplicated by fingerprint.
+	// 9. Persist each finding, deduplicated by fingerprint.
 	for _, pf := range parsed {
 		// The model cites template identifiers; the server resolves them.
 		// Evidence text, module set and category are all derived here, so no
@@ -536,7 +475,6 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 			Nodes:           nodes,
 			LLMModel:        resp.Model,
 			PromptVersion:   prompt.Version,
-			TriggerKey:      key,
 			ClassKey:        class,
 			Security:        category == "security",
 		}, now)
@@ -548,28 +486,18 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		}
 	}
 
-	// 11. Remember the trigger now that its call succeeded: this is what the
-	// next window's reuse check reads. Only a successful call is recorded --
-	// a failed one answered nothing and must not be reused.
-	if err := a.store.RecordTriggerSighting(ctx, logsstore.TriggerSighting{
-		SystemID: b.SystemID,
-		Key:      key,
-		Called:   true,
-		Now:      now,
-	}); err != nil {
-		return fmt.Errorf("analyzer: record trigger sighting: %w", err)
-	}
-
-	// 12. Record bookkeeping now that the analysis fully succeeded.
-	// Cached input is billed at half rate. Clamp first: a provider that
+	// 10. Record bookkeeping now that the analysis fully succeeded.
+	// Cached input is billed at its own rate. Clamp first: a provider that
 	// reported more cached than prompt tokens would otherwise produce a
 	// negative bill.
 	cached := resp.CachedTokens
 	if cached > resp.InputTokens {
 		cached = resp.InputTokens
 	}
-	billedInput := float64(resp.InputTokens-cached) + 0.5*float64(cached)
-	costMicros := int64(math.Round(((billedInput/1e6)*a.cfg.InputPerMTok + (float64(resp.OutputTokens)/1e6)*a.cfg.OutputPerMTok) * 1e6))
+	usd := float64(resp.InputTokens-cached)/1e6*a.cfg.InputPerMTok +
+		float64(cached)/1e6*a.cfg.CachedInputPerMTok +
+		float64(resp.OutputTokens)/1e6*a.cfg.OutputPerMTok
+	costMicros := int64(math.Round(usd * 1e6))
 	a.Metrics.llmCall("success", costMicros)
 
 	return a.record(ctx, b, analysisEntry{
@@ -583,25 +511,6 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		cachedTokens: cached,
 		costMicros:   costMicros,
 		model:        resp.Model,
-		triggerKey:   key,
 		durationMs:   int(time.Since(start).Milliseconds()),
 	})
-}
-
-// remembered decides whether the trigger memory answers this window, and
-// returns the suppressed_by value if it does.
-//
-// A reuse is per system: the same trigger, paid for on this system within
-// TriggerReuseWindow of the last PAID call, with every finding that call
-// raised still open. A call that raised nothing is reusable too -- the model
-// looked at exactly this and found nothing -- while a finding that went
-// stale means the condition changed shape, and the window is paid for
-// again.
-func (a *Analyzer) remembered(look logsstore.TriggerLookup, now int64) string {
-	window := a.cfg.TriggerReuseWindow.Milliseconds()
-	if window > 0 && look.SystemSeen && look.LastCalledAt > 0 &&
-		now-look.LastCalledAt <= window && look.LinkedNotOpen == 0 {
-		return SuppressedTriggerHit
-	}
-	return ""
 }

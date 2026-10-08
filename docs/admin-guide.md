@@ -49,11 +49,9 @@ see `docs/api/openapi.yaml`.
   - [2. Templates: the shape of a log line, not the line itself](#2-templates-the-shape-of-a-log-line-not-the-line-itself)
   - [3. The gate: deciding if it's worth asking the AI](#3-the-gate-deciding-if-its-worth-asking-the-ai)
   - [3a. The spending ceiling](#3a-the-spending-ceiling)
-  - [3b. Trigger memory: not paying twice for the same thing](#3b-trigger-memory-not-paying-twice-for-the-same-thing)
-  - [4. Baselines: "what's normal" for a module](#4-baselines-whats-normal-for-a-module)
-  - [5. The analysis: when the AI actually looks](#5-the-analysis-when-the-ai-actually-looks)
-  - [6. Findings: the actual output](#6-findings-the-actual-output)
-  - [7. Review: deciding what customers see](#7-review-deciding-what-customers-see)
+  - [4. The analysis: when the AI actually looks](#4-the-analysis-when-the-ai-actually-looks)
+  - [5. Findings: the actual output](#5-findings-the-actual-output)
+  - [6. Review: deciding what customers see](#6-review-deciding-what-customers-see)
 - [Threat Shield](#threat-shield)
   - [How it works, in four steps](#how-it-works-in-four-steps)
   - [The safety net](#the-safety-net)
@@ -371,22 +369,21 @@ depth. It never logs a credential: the model API key appears only as
 | Variable | Purpose |
 |---|---|
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | any OpenAI-compatible provider |
+| `LLM_SERVICE_TIER` | the provider's service tier, sent as `service_tier` (default empty: not sent). `flex` halves OpenAI's price for slower answers; when a flex request is refused for lack of capacity it is repeated once at the normal tier and price. With `flex`, raise `LLM_TIMEOUT` (for example to `10m`) and `ANALYSIS_TIMEOUT` above it |
 | `LLM_TIMEOUT` | request timeout (default `120s`) |
-| `GATE_TOLERANCE` | deviation ratio that counts as a surge (default `3.0`) |
-| `GATE_MIN_EXPECTED` | smallest normal rate a bucket needs before its ratio is trusted (default `10`) |
-| `GATE_MIN_OBSERVED` | smallest line count that can be called a surge (default `20`) |
 | `GATE_MIN_NEW_TEMPLATES` | novel templates required before novelty alone fires (default `3`). A new security template always fires on its own |
-| `PROMPT_MAX_AMBIENT` | templates carried as background context beyond the ones the gate fired on (default `60`) |
+| `GATE_SIMILARITY` | how alike, as a share of words, an unseen log line must be to a known one to count as known (default `0.9`; `1` turns the check off). Only identifier-like words may differ, never a real word. See "What counts as new" below |
+| `GATE_SILENCE` | how long a known log line must have been absent for its return to count as new again (default `8d`, a little over a week so weekly jobs do not count; `0` turns it off) |
+| `PROMPT_MAX_AMBIENT` | templates carried as background context beyond the ones the gate fired on (default `20`) |
 | `LLM_MAX_CONCURRENCY` | model calls in flight at once (default `4`) |
 | `LLM_MAX_CALLS_PER_SYSTEM_PER_DAY` | hard per-machine ceiling, UTC day (default `100`). A machine ships 96 windows a day, so this no longer binds normal operation — it is a backstop against a window being retried in a loop. `LLM_DAILY_SPEND_CAP_USD` is the limit that bounds a day's spend |
 | `LLM_DAILY_SPEND_CAP_USD` | fleet spend ceiling for the UTC day (default `0`, off). On breach the gate narrows to security-only rather than stopping |
 | `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK` | prices for the cost ledger (default `0`). Without them the ledger records zero cost |
+| `LLM_PRICE_CACHED_INPUT_PER_MTOK` | price of the input the provider served from its prompt cache (default: half of `LLM_PRICE_INPUT_PER_MTOK`, which is `gpt-4o-mini`'s discount; `gpt-6-luna`'s cached price is a tenth of its input price) |
 | `PIPELINE_EXCLUDE_MODULES` | modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline). Matches a module **family** or an exact instance id — configure the family, since NS8 numbers instances per cluster and `crowdsec1` excludes nothing on a node running `crowdsec3` |
 | `PIPELINE_EXCLUDE_SERVICES` | syslog identifiers dropped the same way, matched against the `[tag]` on each masked log line (default `insights,alert-proxy`). `insights` stops a co-located server from analysing its own logs; `alert-proxy` stops the fleet re-reporting alerts your monitoring stack has already raised and already sent you. The tag is matched on every line, not only host ones — which is how `alert-proxy` is excluded without excluding the `metrics` module it runs inside. Note `PIPELINE_EXCLUDE_MODULES=alert-proxy` would match nothing: it is not a module |
 | `STALE_AFTER` | how long without a recurrence before a finding is presumed resolved (default `24h`) |
 | `ADMIN_API_KEY` | password for the logs dashboard's review decisions — secret, the same value `threatd` reads. Unset means the review queue is read-only and its routes answer `405` |
-| `TRIGGER_REUSE_WINDOW` | how long after the AI was asked about a trigger on a machine that the same trigger on the same machine is answered from memory instead of asked again, counted from that paid call (default `24h`; `0` turns reuse off). The only setting the trigger memory has. See "Trigger memory" below |
-| `EWMA_ALPHA` | baseline smoothing weight, must be in `(0, 1]` (default `0.3`). Not validated — a value outside that range silently produces a nonsensical baseline |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
 | `ANALYSIS_TIMEOUT` | ceiling for one bundle's analysis (default `5m`) |
@@ -710,8 +707,8 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_queue_depth{queue}`, `_queue_capacity{queue}`, `_queue_workers{queue}` | `insightsd` (`queue="bundle"`), `threatd` (`queue="threat_events"`) | the bundle/ingest queue's live state |
 | `insightsd_llm_calls_total{result}`, `insightsd_llm_cost_micros_total` | `insightsd` | model calls by outcome (`success`, `transient`, `permanent`, `parse`) and running spend in micro-dollars |
 | `insightsd_budget_rejections_total{reason}` | `insightsd` | windows `internal/budget` suppressed before the gate ran |
-| `insightsd_trigger_suppressions_total{reason}` | `insightsd` | windows the gate fired on that were answered without calling the AI: `trigger_hit` (already asked on that machine, answer still current) — the only reason |
-| `insightsd_windows_total{result}` | `insightsd` | every new 15-minute window, by what the gate decided: `called` (an AI call was made — counted per attempt, so a retried window counts again), `gated_out` (nothing worth a call), `reused` (answered from trigger memory) or `budget` (stopped by the spending ceiling before the gate ran). A duplicate window is not counted |
+| `insightsd_windows_total{result}` | `insightsd` | every new 15-minute window, by what the gate decided: `called` (an AI call was made — counted per attempt, so a retried window counts again), `gated_out` (nothing worth a call) or `budget` (stopped by the spending ceiling before the gate ran). A duplicate window is not counted |
+| `insightsd_gate_templates_total{result}` | `insightsd` | log lines the gate's two refinements of "new" moved: `near_known` (unseen, but nearly identical to a known line, so not paid for) and `returning` (known, but back after `GATE_SILENCE`, so paid for as new) |
 | `insightsd_active_systems`, `threatd_active_systems` | both | machines that reported in the last 24 hours: a log bundle for `insightsd`, a threat event for `threatd` |
 | `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
@@ -728,9 +725,9 @@ gate reasons and findings.
 
 **Counters start at 0, not missing.** Every counter above whose labels are a
 known list — the four `insightsd_llm_calls_total` outcomes, the
-`insightsd_budget_rejections_total` reason, the
-`insightsd_trigger_suppressions_total` reason, the four
-`insightsd_windows_total` results, every `threatd_events_total` result, both
+`insightsd_budget_rejections_total` reason, the three
+`insightsd_windows_total` results, both `insightsd_gate_templates_total`
+results, every `threatd_events_total` result, both
 `authd_*` families, `threatd_ingestq_full_total`, and both
 `<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
@@ -871,7 +868,7 @@ sizing dashboard at `/sizing`. Each is **off unless that service's
 
 Unlike the node API, which is per-machine and authenticated, **a dashboard's
 `GET` is unauthenticated and fleet-wide inside the application.** It shows
-every machine's findings, templates, baselines and spend.
+every machine's findings, templates and spend.
 
 So either bind `UI_LISTEN_ADDR` to `127.0.0.1` or a trusted management
 network, or put the proxy in front of it. The service will not refuse a wider
@@ -929,11 +926,10 @@ the effective configuration, lives alongside it.
 | `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. |
 | `/logs/review/audit` | Every review decision, who made it and when. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
-| `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at half price), cost, how long it took, any error, the window's **trigger**, and whether a spending limit or the trigger memory suppressed it. This answers "what did we spend, and on what." |
-| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI except the ones counted under **Suppressed** — answered from trigger memory; the `(none)` row is the free ones. Scoped to the last 7 days by default — see the note below. |
+| `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at a discount), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
+| `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI; the `(none)` row is the free ones, plus any a spending limit refused (**Suppressed**). Scoped to the last 7 days by default — see the note below. |
 | `/logs/cost` | Spend and token usage per day and per model — the trend line version of the ledger. |
 | `/logs/templates` | What the server currently considers "already known" for a machine — i.e., what would *not* by itself trigger a new AI call. One row per condition per module *kind*, so many copies of one application share a row. |
-| `/logs/baselines` | The current EWMA "normal rate" estimate per module per machine — what the gate compares actual volume against when a node doesn't supply its own expectation. |
 | `/logs/status` | Is the server healthy? Queue backlog, uptime, build version, and the full effective configuration it's running with. |
 
 **The blocklist dashboard**, at `/blocklist`:
@@ -974,8 +970,9 @@ Every 15 minutes, each node sends a **bundle**: a compact, already-masked
 summary of that window's logs. It is *not* raw logs — sensitive values are
 already stripped out before it ever leaves the machine. A bundle contains:
 
-- a **digest**: for each log module, how many lines it produced this window,
-  and (if the node can tell) how many it *expected*;
+- a **digest**: for each log module, how many lines it produced this window.
+  The server no longer reads it — see "What counts as new" below for why
+  volume alone is not a reason to call the AI;
 - a list of **templates**: the distinct *shapes* of log lines seen (see
   below), each with a count;
 - bookkeeping about how much the node had to truncate to stay within its own
@@ -1010,9 +1007,9 @@ shape happened 40 times," not about 40 individual log lines.
 The server remembers, per machine, every template it has ever seen. That
 memory is the basis for the single most important cost-saving trick in the
 whole system: **a template the server already knows about is not
-interesting**. Only a template that's genuinely new (or a known one behaving
-very differently — see baselines below) is worth spending money to have an
-AI look at.
+interesting**. Only a template that's genuinely new (or a known one that comes
+back after a long silence — see the gate below) is worth spending money to
+have an AI look at.
 
 ### 3. The gate: deciding if it's worth asking the AI
 
@@ -1025,24 +1022,14 @@ unusual here? It says yes if:
 
 - **several templates have never been seen before** for this machine (three by
   default, not one — see "what counts as new" below);
-- some module's log volume is **way higher than expected** — more than a
-  configurable multiplier over its normal rate (see baselines) *and* enough
-  lines for that to mean anything. A module that normally logs 2 lines per
-  window and logs 7 is not surging; it is a quiet module having a quiet day.
-  Both a minimum normal rate and a minimum line count must be cleared before a
-  ratio counts at all;
-- a template tagged **security**-related is either new for this machine, or is
-  one we already know about whose module is suddenly much noisier than usual
-  (the node applies the security tag, not the server). A single new
-  security-tagged template is enough on its own — it never has to wait for
-  company;
-- a module both **dropped lines** because it hit its own budget *and* is
-  behaving unusually — either one alone is not enough.
+- a template tagged **security**-related is new for this machine (the node
+  applies the security tag, not the server). A single new security-tagged
+  template is enough on its own — it never has to wait for company.
 
-**A window is sent to the AI only if at least one of the four conditions
-above is true.** If none are true, the window is "gated out": the server
-still does the cheap bookkeeping (remembers the templates, updates the
-baselines) and moves on — no AI call, no cost.
+**A window is sent to the AI only if at least one of the two conditions
+above is true.** If neither is, the window is "gated out": the server still
+does the cheap bookkeeping (remembers the templates) and moves on — no AI
+call, no cost.
 
 **What counts as "never seen before".** The node masks variable parts out of
 each log line before sending it — timestamps, IP addresses, process ids — but
@@ -1059,6 +1046,30 @@ collapse is used when a finding's identity is computed, so a leak cannot split
 one problem into ten findings either. The full, unmodified line is still what
 you see in the UI and on the finding — only the comparison is collapsed.
 
+Collapsing needs a rule per kind of leak, and there are always more: a phone
+system's call ids, a mail server's forwarding hashes, the usernames an
+attacker tries. So the gate also treats a line as known when it is **nearly
+identical** to one the machine already sent — same module kind, same number
+of words, at least 90% of them the same and in the same place
+(`GATE_SIMILARITY`) — **as long as every word that differs looks like an id**
+(it contains digits, or mixes upper and lower case oddly) rather than a real
+word. `Failed to reconnect` and `Failed to ping` differ in one real word, so
+they stay different. Lines tagged security, and lines at priority critical or
+above, are never matched this way. On the development fleet this check alone
+avoided 28% of the AI spend.
+
+**A line that comes back after a long silence counts as new.** If a machine
+has not sent a known line for more than `GATE_SILENCE` (eight days by
+default), its return is treated as new. This is how a known failure that
+comes back — a backup that failed in March and fails again in May — still
+gets looked at.
+
+**Log volume alone is not a reason to call the AI.** An earlier version also
+called it when a module logged far more than its running average. That
+average only remembered about the last hour, so a quiet night made every
+morning look like a flood: it fired in 42% of all windows and mostly found
+noise. It was removed.
+
 **Modules are counted by kind, not by copy.** A machine can run many copies of
 one application — a measured hosting node runs 82 `nethvoice` and 71
 `openldap` instances, named `nethvoice1`, `nethvoice2` and so on. Every copy
@@ -1069,22 +1080,20 @@ each of them "never seen before" the first time its copy said it. Measured on
 2026-09-02, grouping by kind and de-numbering the process names inside the line
 took 678 stored templates down to 230 for the same set of real conditions.
 
-The one place the individual copy still matters is volume: baselines and the
-"unusually chatty" comparison are kept per copy, so a single misbehaving
-instance is still visible on the `/baselines` page. The trade is that a finding
-names the kind (`openldap`) and not which of the 71 copies emitted it.
+The trade is that a finding names the kind (`openldap`) and not which of the
+71 copies emitted it.
 
 That is also why novelty needs more than one new template. A genuinely new
 condition arrives as a handful of related lines; a single new line is nearly
 always one more spelling of something the machine has been saying all week.
 
-Note the shape of the security rule: *new or surging*, not merely *present*.
+Note the shape of the security rule: *new*, not merely *present*.
 Any machine reachable from the internet gets a constant trickle of failed SSH
 logins, so "there is a security-tagged line in this window" is true of
 essentially every window forever. Treating that as a reason to call the AI
 made the gate stop gating — measured on a live node, 352 AI calls out of
 352 windows, not one gated out. Steady background noise is not news; a new
-kind of attack, or a sudden spike in a familiar one, is.
+kind of attack is.
 
 Some log sources are skipped before the gate even sees them, because
 something else already handles them properly. CrowdSec is the built-in case:
@@ -1116,18 +1125,17 @@ the fact from stored data — see the `/analyses` and `/gate` pages below.
 Two things to know when reading those reasons. First, **a reason is the trigger,
 not a description**: the gate calls the AI if and only if at least one reason
 fired, so "this window has reasons" and "this window cost money" are the same
-statement — with one exception, marked in `suppressed_by`: a window the trigger
-memory answered (see "Trigger memory" below) keeps the reasons the gate fired
-with, but made no call. The useful numbers are what share of windows had *no*
-reasons, and what share of the rest was suppressed.
+statement. The useful number is what share of windows had *no* reasons.
 
 Second, **reasons are stored spelled the way the gate spelled them at the time**.
 When a gate rule changes, old rows keep the old wording — rows written before the
-security rule became *new-or-surging* say `security_category`, and older ones
+security rule became *new-or-surging* say `security_category`, older ones
 still embed the counts and ratios that were later removed for making every window
-its own group. That is deliberate: a formula change should be visible, not
-silently rewritten. It also means an all-time grouping compares two different
-gates, which is why `/gate` defaults to a recent window.
+its own group, and rows from before the volume check was removed carry
+`deviation:…`, `security_surge` and `truncated_deviating`. That is deliberate:
+a formula change should be visible, not silently rewritten. It also means an
+all-time grouping compares different gates, which is why `/gate` defaults to a
+recent window.
 
 ### 3a. The spending ceiling
 
@@ -1149,84 +1157,17 @@ limits do:
 The counts come from the stored ledger, not from memory, so restarting the
 server does not hand anybody a fresh allowance.
 
-### 3b. Trigger memory: not paying twice for the same thing
-
-The gate decides each window on its own, so it cannot know that it already
-paid to ask about exactly this condition an hour ago. On the development
-fleet that was a quarter of the bill: the same module surging on the same
-machine, asked about again every 15 minutes while the finding from the first
-answer was still open.
-
-So every window the gate fires on gets a **trigger**: a name for *why* the
-gate fired — which new log lines (only when the new lines are what fired it),
-which modules were unusually loud and at what priority, and whether a security
-line was involved. Before asking the AI, the server checks whether **this
-machine** already asked about this exact trigger within
-`TRIGGER_REUSE_WINDOW` (a day, by default) of the last time it actually paid,
-and whether every finding that answer produced is still open — or it
-produced none. If so, the window bumps those findings the way a recurrence
-would, and costs nothing. Otherwise the AI is asked as before.
-
-In short: **the server does not pay twice for the same thing within a day on
-the same machine.** Three details:
-
-- The day counts from the last *paid* answer, so a condition that never goes
-  away is still looked at again at least once a day.
-- It is per machine. The same trigger on another customer's cluster is asked
-  about there too, because the answer may be specific to that cluster.
-- If a finding from the last answer has gone stale, the condition has
-  changed, and the AI is asked again.
-
-There is nothing to configure or decide here beyond `TRIGGER_REUSE_WINDOW`
-(`0` turns it off). No operator action reaches it, and it has no effect on
-what customers see — that is review, in section 7.
-
-A window answered this way is recorded like a gated-out one — its lines are
-learnt and its volumes counted — and shows up in `/analyses` with
-`trigger_hit` in the *Suppressed* column.
-
-### 4. Baselines: "what's normal" for a module
-
-Not every node's log collector knows how many lines it expects to see for a
-given module. When it doesn't say, the server keeps its own running estimate
-per `(machine, module, priority)`, called a **baseline**. The gate compares
-the actual count in a bundle against this baseline (or the node's own stated
-expectation, if it gave one) to decide whether a module is behaving
-unusually. You can see the current baseline for every module of every
-machine on the `/baselines` page.
-
-**What "EWMA" means, in simple words.** EWMA stands for Exponentially
-Weighted Moving Average — a fancy name for a simple idea: "my new estimate of
-normal is mostly my old estimate, nudged a little bit toward whatever just
-happened." Every time a new count comes in, the server blends it with the
-previous baseline:
-
-    new baseline = (a little bit × this window's count) + (mostly × old baseline)
-
-That "a little bit" is `EWMA_ALPHA` (default `0.3`, i.e. 30%). A higher
-`EWMA_ALPHA` makes the baseline react faster to recent changes; a lower one
-makes it more stable and slower to move. The very first time a module is
-seen, there's no "old baseline" yet, so the baseline just starts out equal to
-that first count.
-
-One thing worth being precise about: **`EWMA_ALPHA` itself is always between
-0 and 1** (it's a blending weight — "how much of the new value to mix in").
-The *baseline value it produces* is **not** a 0–1 number — it's a count of
-log lines, so it can be anything from 0 to several thousand, whatever is
-normal for that module on that machine.
-
-### 5. The analysis: when the AI actually looks
+### 4. The analysis: when the AI actually looks
 
 When the gate says yes, the server builds a prompt describing that window
-(the digest, the interesting templates, what got truncated) and sends it
+(the interesting templates, what got truncated) and sends it
 to an LLM, along with a reminder of what's *already* an open problem for this
 machine so the AI doesn't re-report it.
 
 The prompt does **not** carry every template in the bundle. A busy machine
 ships 160-190 of them per window and only a handful are why the call happened,
-so the AI is shown: everything new, everything security-tagged, everything from
-a module that is behaving unusually, and then the busiest of what remains as
-background context. Repeated spellings of one line are folded into a single
+so the AI is shown: everything new, everything security-tagged, and then the
+busiest of what remains (20 lines by default) as background context. Repeated spellings of one line are folded into a single
 entry with the counts added up and a `variants=` marker, so a message the
 machine logged 65 slightly different ways arrives as one thing to consider
 rather than 65. Sending the rest costs money on every call and buries the
@@ -1240,7 +1181,7 @@ to the AI, how many tokens it used, what it cost, how long it took, and any
 error. This is the system's cost ledger — see the `/analyses` and `/cost`
 pages.
 
-### 6. Findings: the actual output
+### 5. Findings: the actual output
 
 A **finding** is one reported problem: a title, a plain-language summary, a
 suggested action, a severity (critical/high/medium/low), which log modules
@@ -1289,7 +1230,7 @@ The same identity with the machine left out is the finding's **class**: what
 an operator reviews before any customer sees the finding. That is the next
 section.
 
-### 7. Review: deciding what customers see
+### 6. Review: deciding what customers see
 
 The AI's findings do not go straight to customers. An operator reviews them
 first, on the logs dashboard's `/review` page, and **every new kind of
@@ -1341,8 +1282,8 @@ none can be taken back to "pending".
   with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
 
 None of this changes what the AI is shown or when the server pays for a
-call: those are the gate's and the trigger memory's business, and nothing an
-operator decides here reaches either.
+call: that is the gate's business, and nothing an operator decides here
+reaches it.
 
 Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
 every decision is written to `/review/audit` with who made it. Without the

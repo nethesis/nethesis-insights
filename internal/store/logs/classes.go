@@ -230,3 +230,8 @@ func scanClassDecisions(rows *sql.Rows) ([]ClassDecision, error) {
 	}
 	return out, rows.Err()
 }
+
+// nullIfEmpty stores an empty string as NULL, so "no value" has one spelling.
+func nullIfEmpty(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}

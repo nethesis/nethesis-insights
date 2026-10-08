@@ -1,20 +1,13 @@
 SECTIONS
-DIGEST     one line per (module, priority) bucket: observed, expected, ratio.
-           Buckets the gate flagged as deviating are marked with *.
 TEMPLATES  the log lines worth your attention this window, each with an
            identifier to cite. count is how many lines matched; variants is
            how many spellings of the same line were folded into it. Templates
-           that are neither new, security-classified nor in a deviating module
-           are shown only as ambient context, most frequent first.
+           that are neither new nor security-classified are shown only as
+           ambient context, most frequent first.
 SAMPLING   how much of the window survived the collector's line budget.
 ALREADY KNOWN  conditions already raised for this system. Do not report them
            again.
 WINDOW     the time range and collector version this bundle covers.
-
-DIGEST (module priority observed expected ratio)
-modA 1 30 10.00 3.00
-modA 3 20 - -
-modB 1 10 5.00 2.00
 
 TEMPLATES (cite these identifiers in evidence)
 [T1] count=2 module=modA priority=1 category=-

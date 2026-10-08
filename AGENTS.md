@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `nethesis-insights` is a central log-anomaly analysis server for NethServer fleets
 (~2700 nodes). Edge nodes ship deduplicated, masked log bundles every 15 minutes;
-the server gates each bundle against novelty and deviation, calls an LLM **only**
+the server gates each bundle against novelty, calls an LLM **only**
 when the gate fires, and stores findings keyed by a server-computed fingerprint so
 the same problem is never re-raised.
 
@@ -358,10 +358,10 @@ against, before assuming a bug:
 | Schema | `CREATE TABLE IF NOT EXISTS` in each pipeline's `store.Init` — **this is now the permanent design**. `golang-migrate` was built and discarded with Postgres (see Backends) |
 | Backends | SQLite only, one file per pipeline — three databases (logs, threat, sizing), nothing shared | **Postgres was dropped as a goal** 2026-09-10. There is no `pgStore` and none is planned; the per-pipeline `Store` interfaces stay because each consumer's narrow interface is what makes the tests run with nothing running, not because a second backend is coming |
 | Cost control | `gate` plus `internal/budget`: `LLM_MAX_CONCURRENCY`, per-system daily call cap, `LLM_DAILY_SPEND_CAP_USD` (`gate.SystemState.SecurityOnly` is the degrade hook) | same |
-| Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings`, undecided `finding_classes`, `analyses`, `system_nodes` and `system_triggers` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
+| Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings`, undecided `finding_classes`, `analyses` and `system_nodes` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
 | Tooling | built: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `scripts/check-license-headers.sh` | — |
 | Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's and insightsd's enumerated `POST` routes (allowlist changes; finding-class review decisions) additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | a *consumer* dashboard is a non-goal; these three are not that |
-| Trigger memory and review | built: `internal/trigger` (pure key: novel canonical keys only when novelty fired, deviating `(family, priority)` buckets, one security bit, no `system_id`), `internal/store/logs/triggers.go` (`system_triggers`, `findings.trigger_key`, `analyses.trigger_key`) — **reuse only**: the lookup in `analyzer.Process` between gate and render answers a window from memory (`trigger_hit`) when this system paid for the same key within `TRIGGER_REUSE_WINDOW` of the last *paid* call and every linked finding is open or there are none; maint pruning, `insightsd_trigger_suppressions_total`. The system alone decides when to pay. Review is per **finding class**: `fingerprint.Class` (the fingerprint without `system_id`), `findings.class_key`, `finding_classes` (visibility `pending`/`customer`/`operator`/`dismissed`, `security` tag, `severity_override`, `doc_ref`, `first_prompt_version`) and append-only `class_decisions`, in `internal/store/logs/{classes,review}.go`. `ListFindings` returns only findings whose class is `visibility = customer` — **pending is withheld, security included**: security is a tag (seeded from the edge's category on first sight, never reset by recurrence, operator-editable, returned as `Finding.security`), and the gate's security conditions are cost, not visibility. It applies `severity_override`/`doc_ref` there and only there (`OpenFindings` never joins `finding_classes`). `dismissed` hides a class from every view, operator ones included, but is **hidden, not dropped**: its findings still upsert and `OpenFindings` still returns them, so it never reaches the prompt and saves no money. Six review routes on `ui/logs` (deliver/internal/dismiss/security/severity/doc-ref) in `writableRoutes`, one `class_decisions` row per decision, `/review`, `/review/stats` per `first_prompt_version`, `/review/audit`; maint prunes an undecided class once no retained finding names it. A decision applies to the whole class on every system, including systems that raise it later. See `docs/architecture.md` § "Cost control: trigger memory" and § "Review: per finding class" | per-finding (per-system) decisions, deliberately — a decision is per class. Trigger ignore, merge and trigger visibility were removed 2026-09-25 (with the `triggers`/`trigger_aliases`/`trigger_decisions` tables and `trigger_ignored`) |
+| Review | built per **finding class**: `fingerprint.Class` (the fingerprint without `system_id`), `findings.class_key`, `finding_classes` (visibility `pending`/`customer`/`operator`/`dismissed`, `security` tag, `severity_override`, `doc_ref`, `first_prompt_version`) and append-only `class_decisions`, in `internal/store/logs/{classes,review}.go`. The system alone decides when to pay. `ListFindings` returns only findings whose class is `visibility = customer` — **pending is withheld, security included**: security is a tag (seeded from the edge's category on first sight, never reset by recurrence, operator-editable, returned as `Finding.security`), and the gate's security condition is cost, not visibility. It applies `severity_override`/`doc_ref` there and only there (`OpenFindings` never joins `finding_classes`). `dismissed` hides a class from every view, operator ones included, but is **hidden, not dropped**: its findings still upsert and `OpenFindings` still returns them, so it never reaches the prompt and saves no money. Six review routes on `ui/logs` (deliver/internal/dismiss/security/severity/doc-ref) in `writableRoutes`, one `class_decisions` row per decision, `/review`, `/review/stats` per `first_prompt_version`, `/review/audit`; maint prunes an undecided class once no retained finding names it. A decision applies to the whole class on every system, including systems that raise it later. See `docs/architecture.md` § "Review: per finding class" | per-finding (per-system) decisions, deliberately — a decision is per class. Trigger ignore, merge and trigger visibility were removed 2026-09-25; the **trigger memory** itself (`internal/trigger`, `system_triggers`, `trigger_key`, `TRIGGER_REUSE_WINDOW`, `trigger_hit`) was removed 2026-10-08 with the volume condition, because every reuse it ever made was a volume-only window and a novelty trigger cannot recur once its templates are recorded |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
 | Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
 | Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
@@ -418,7 +418,7 @@ Traefik-fronted deployment.
 
 To inspect what the server stored, add `UI_LISTEN_ADDR=127.0.0.1:9596` and open
 the operator UI — findings, the cost ledger with its `gate_reasons`, the gate
-rollup, templates and baselines, plus queue depth and effective config. It
+rollup, templates, plus queue depth and effective config. It
 replaces the old `scripts/insights-sql.sh`, which needed `sqlite3`, root on the
 node and the podman volume path (it is still in git history if the deleted
 `sql "SELECT …"` escape hatch is ever needed offline).
@@ -444,7 +444,6 @@ internal/platform/auth  httpx  sqlitex   shared: ForwardAuth+cache, HTTP
 
 model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
-trigger                     PURE — the trigger key, from gate.Decision alone — logs only
 threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohorts
 llm  queue  budget          logs only; interfaces where I/O is needed
@@ -477,7 +476,7 @@ discipline, write authentication, base-path-aware link building — and
 `ui/*` copies another package's logging handler any more; `httpx.Logging`
 removed the reason that copy existed.
 
-The purity of `gate`, `trigger`, `fingerprint`, `prompt`, `threat` and `sizing` is the
+The purity of `gate`, `fingerprint`, `prompt`, `threat` and `sizing` is the
 point: each holds all the correctness and privacy logic for its concern and is
 table-driven-testable with no fixtures. `llm` and every `store/*` package being
 interfaces at the consumer is what lets `analyzer_test.go` and each pipeline's
@@ -492,7 +491,7 @@ two of the steps must not move:
 1. **Read prior state before writing any.** `KnownTemplates` must be read before
    `UpsertTemplates`, or every template looks known and the gate never fires.
 2. **Record templates only after a fully successful analysis.** `record()` is the
-   sole caller of `UpsertTemplates`/`UpsertBaselines`, and it runs only on a
+   sole caller of `UpsertTemplates`, and it runs only on a
    gated-out bundle or after the LLM call succeeded. If templates were written
    before a failed call, the retry would see them as known, the gate would
    decline, and the anomaly would be lost permanently. There is a test asserting
@@ -533,13 +532,29 @@ length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
 
 ### Gate = the cost control, not an optimization
 
-`gate.Evaluate` fires the LLM if any of: a template is new for this system; a
-digest ratio exceeds `GATE_TOLERANCE` (edge `expected` preferred, server EWMA
-baseline as fallback); a security-category template is **new** (`security_new`)
-or **known but in a deviating module** (`security_surge`); or a module is both
-truncated **and** deviating. Every decision writes `gate_reasons` into the
-`analyses` row, so "why did this cost money" and "why was this missed" are both
-answerable from stored data. Ungated, the fleet is ~$16k/month on `gpt-4o-mini`.
+`gate.Evaluate` fires the LLM if either: at least `GATE_MIN_NEW_TEMPLATES`
+templates are new for this system (`new_templates`); or a security-category
+template is **new** (`security_new`). Every decision writes `gate_reasons` into
+the `analyses` row, so "why did this cost money" and "why was this missed" are
+both answerable from stored data. Ungated, the fleet is ~$16k/month on
+`gpt-4o-mini`.
+
+"New" has two refinements, both inside the pure gate. **Near-known is known**
+(`GATE_SIMILARITY`, 0.9): an unknown template matching a known one of the same
+family position by position, with every differing token identifier-shaped and
+never a plain word, does not count — 28% of dev-fleet spend was masking leaks
+(SIP call-ids, SRS hashes, attacker usernames). Security templates and
+priority 0-2 are never matched. **Back after silence is new**
+(`GATE_SILENCE`, 8 days): a known template absent that long counts as novel on
+its return. Neither touches fingerprint identity.
+
+**There is no volume condition — do not restore the EWMA form.** `deviation`,
+`security_surge`, `truncated_deviating`, `module_baselines`, `EWMA_ALPHA` and
+`GATE_TOLERANCE`/`MIN_EXPECTED`/`MIN_OBSERVED` were removed 2026-10-08: a
+running average over 15-minute windows remembered about an hour, so it fired in
+42% of windows (the same buckets 14 days of 14) for 8% of new findings. The
+silence rule keeps the part worth keeping. A future volume signal needs a
+time-of-day baseline. The collector still sends `digest`; it is not decoded.
 
 The server never classifies — `category=security` is assigned by the edge and
 propagated.
@@ -560,11 +575,10 @@ matches either an exact `module_id` or its `model.ModuleFamily`, and the family
 is the spelling that belongs in configuration: NS8 numbers instances per
 cluster, so `crowdsec1` excludes nothing on a node whose instance is
 `crowdsec3` — silently, and that node then pays twice for its CrowdSec signal.
-The exact-id form stays so one misbehaving instance can be singled out. One place, so gate, prompt, `system_templates` and
-`module_baselines` cannot disagree about scope. The filter drops from
-`Templates`, `Digest` **and** `Budget.TruncatedModules` together — filtering
-only templates leaves the digest firing deviation reasons for a module the
-prompt never mentions.
+The exact-id form stays so one misbehaving instance can be singled out. One
+place, so gate, prompt and `system_templates` cannot disagree about scope. The
+filter drops from `Templates` **and** `Budget.TruncatedModules` together, so the
+prompt's SAMPLING section never names a module whose lines it does not show.
 
 **Services are excluded on a second axis**, `PIPELINE_EXCLUDE_SERVICES`
 (default `insights,alert-proxy`) via `model.Bundle.ExcludeServices`. Host
@@ -575,8 +589,7 @@ deployment analyses its own log output: on the dev machine 452 of 564 host
 templates were `insights` lines, 204 of them its own `gate decision` messages,
 each new template re-firing the gate that produced it. A line `ServiceTag`
 cannot parse is **kept** — failing open toward analysis is the safe direction.
-Digest and truncation records have no service dimension and are passed through,
-so an excluded service still contributes to its bucket's volume.
+Truncation records have no service dimension and are passed through.
 
 **The service axis is not host-only, and `alert-proxy` is why.** `ServiceTag`
 is read off every masked record, whatever its `module_id`, and that is what
@@ -593,22 +606,17 @@ specifically. Insights is for what monitoring has **no** rule for. Note that
 module id and no family — so if you find one in a deployed env file, it never
 did anything.
 
-**Gate reasons carry no computed values** — `new_templates` has no count,
-`deviation:<module>/<priority>` no ratio. The UI's `/gate` rollup groups on the
-stored string, and embedded floats made every deviating window a group of one.
-The ratio is not kept anywhere: per-window numbers live in the prompt the
-analyzer built, and per-bucket normals on the UI's `/baselines`.
+**Gate reasons carry no computed values** — `new_templates` has no count. The
+UI's `/gate` rollup groups on the stored string, and embedded numbers made
+every window a group of one.
 
 **A gate reason is the trigger, not a description**: `gate.Evaluate` returns
 `Call: len(reasons) > 0`, and every analyzer path that stores a non-empty
 `gate_reasons` **and an empty `suppressed_by`** also stores `llm_called = 1`.
-So "windows" and "LLM calls" are the same number for any reasoned,
-unsuppressed row — never present them as independent columns. The one
-reasoned row without a call is a window the trigger memory answered
-(`suppressed_by = trigger_hit`): it keeps its reasons, because
-they are what the saving is measured against, and `/gate` counts it in its own
-**Suppressed** column (`store.GateRow.Suppressed`). Budget-suppressed windows
-still store **no** reasons — the gate never ran for them.
+So "windows" and "LLM calls" are the same number for any reasoned row — never
+present them as independent columns. Budget-suppressed windows store **no**
+reasons — the gate never ran for them — and `/gate` counts them in its own
+**Suppressed** column (`store.GateRow.Suppressed`).
 `llm_called` counts *attempts*: the transient-, permanent- and parse-error paths
 set it with `cost_micros = 0`. And because reasons are stored as the formula that
 produced them spelled them, **any rollup over them must be time-bounded**
@@ -619,7 +627,7 @@ grouping mixes eras and is dominated by pre-fix spellings.
 
 Host-level journal records (`sshd`, `systemd`, `runagent`) carry no `module_id`.
 Verified on a live cluster: that stream dominates the security signal. Treat the
-empty string as an ordinary module for baselines, gating and findings; never
+empty string as an ordinary module for gating and findings; never
 reject or skip it.
 
 ## Invariants
@@ -677,8 +685,8 @@ must never touch the `Authorization` header). Raw `samples` live only in the
 bundle in flight and are **never** persisted.
 
 **Determinism**: identical bundle input must produce byte-identical prompts.
-Templates sorted `(module_id, priority, template)`, digest sorted
-`(module_id, priority)`. Gate reasons are sorted for the same reason.
+Templates sorted `(module_id, priority, template)`. Gate reasons are appended
+in a fixed order for the same reason.
 
 **Findings ordering**: severity-descending (`critical > high > medium > low`), then
 `last_seen` descending — `model.SortFindings`.
@@ -689,8 +697,9 @@ successful no-op, not an error.
 ## Testing expectations
 
 - `gate` and `fingerprint`: table-driven, every condition alone and in
-  combination; absent `expected` falling back to EWMA; truncation with and without
-  deviation; fingerprint stability under evidence reordering and distinctness
+  combination; truncation alone never firing; the similarity rule refusing a
+  changed word, a short line, another family, a security template and priority
+  0-2; the silence rule at both sides of `GATE_SILENCE`; fingerprint stability under evidence reordering and distinctness
   across systems/modules/categories.
 - `prompt`: golden files proving byte-identical output for identical input.
 - `analyzer`: stub `llm`, temp-file SQLite. The load-bearing cases are — gated-out
@@ -710,8 +719,7 @@ successful no-op, not an error.
   timestamps, the metadata allowlist, in-batch duplicate collapse, and the cap
   truncating rather than rejecting. Plus `TestSanitizeAcceptsEveryScenario`, which
   is the executable form of "never add a scenario allowlist".
-- `trigger`, the trigger memory and class review:
-  `TestTriggerKeyIsStableUnderReordering`, `TestStaleFindingIsNotReused`,
+- class review:
   `TestFindingClassIgnoresSystem`, `TestSecurityFindingsWaitForReview`,
   `TestSecurityTagReachesTheReadAPI`, `TestSecurityTagSurvivesRecurrence`,
   `TestDecisionsNeverReachThePrompt`,
@@ -722,9 +730,7 @@ successful no-op, not an error.
   `TestSecurityClassesCanBeDismissed`, `TestDismissedClassKeepsItsFindings`,
   `TestDismissedClassesLeaveTheQueue` and
   `TestListAllFindingsHidesDismissedClasses` are
-  named so deleting one is visible. The reuse window counts from the last
-  paid call (`TestReuseWindowCountsFromTheLastPaidCall`), and a call that
-  raised nothing is reusable (`TestAnEmptyVerdictIsReused`).
+  named so deleting one is visible.
 - `sizing`: table-driven, no fixtures. `TestSanitizeAcceptsEveryMetricKey` and
   `TestSanitizeRejectsEveryNonNumericValue` are the executable form of the
   open-vocabulary and privacy rules, following the

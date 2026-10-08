@@ -35,9 +35,8 @@ import (
 //
 // The trade this makes: a genuinely new condition that differs from a known
 // line only in a canonicalized field no longer fires the novelty condition.
-// It still fires on deviation, on truncation, and -- if the edge classified it
-// -- on security_new, which is checked against the same canonical key and is
-// not weakened by this.
+// If the edge classified it, security_new is checked against the same
+// canonical key and is not weakened by this.
 var (
 	// A CrowdSec scenario keeps the GeoIP country code and the ban duration
 	// literal, so one scenario mints a template per country and per duration:

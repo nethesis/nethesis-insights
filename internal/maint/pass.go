@@ -4,8 +4,6 @@
 // Package maint runs insightsd's housekeeping pass: pruning the tables that
 // would otherwise grow monotonically forever now that the fleet feeds the
 // pipeline every 15 minutes -- system_templates, findings and analyses.
-// module_baselines is deliberately not pruned here; see
-// internal/store/logs/prune.go's PruneTemplates doc for why.
 //
 // It mirrors internal/blocklist and internal/baseline -- a narrow Reader, a
 // Config, a Runner.Run(ctx, now) error -- because it is the same shape of
@@ -38,7 +36,6 @@ type Reader interface {
 	PruneNodes(ctx context.Context, olderThan int64) (int, error)
 	PruneFindings(ctx context.Context, olderThan int64) (int, error)
 	PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
-	PruneSystemTriggers(ctx context.Context, olderThan int64) (int, error)
 	PruneClasses(ctx context.Context, olderThan int64) (int, error)
 }
 
@@ -46,14 +43,12 @@ type Reader interface {
 // justified, in detail, next to its environment variable in
 // cmd/insightsd/main.go; the short version:
 //
-//   - TemplateRetention must comfortably outlive the longest natural gap
-//     between occurrences of a real recurring line, or a resurrected
-//     template manufactures a new_templates gate firing -- and therefore an
-//     LLM call -- for a line that was never actually new. Default 400 days:
-//     past a full year, since an annual job (a New Year's cron, a yearly
-//     license check) is exactly the kind of "longest gap" this needs to
-//     survive, with margin over the quarterly-certificate-renewal case that
-//     is the usual worst case named when this kind of retention is reviewed.
+//   - TemplateRetention is the gate's novelty memory. A template silent for
+//     longer than the gate's GATE_SILENCE already counts as new when it
+//     returns, so past that this no longer changes what is paid for; it
+//     keeps the Templates page's history and, through PruneNodes, the node
+//     roster findings cite. Default 400 days, which must stay above both
+//     GATE_SILENCE and FindingRetention.
 //   - FindingRetention only affects continuity (occurrence_count, whether a
 //     recurrence reads as reopened or brand new) -- see PruneFindings' doc
 //     for why that is a display cost, not a financial one, and so is allowed
@@ -99,19 +94,13 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	// The node roster shares the template cutoff -- see PruneNodes for why
 	// it has no retention knob of its own.
 	nodesPruned := r.prune(ctx, "nodes", r.store.PruneNodes, now-r.cfg.TemplateRetention.Milliseconds())
-	// The trigger memory's per-system rows have no knob of their own either:
-	// they link a trigger key to the findings its last call raised, so they
-	// share FindingRetention the same way classes does.
-	systemTriggersPruned := r.prune(ctx, "system_triggers", r.store.PruneSystemTriggers,
-		now-r.cfg.FindingRetention.Milliseconds())
 
 	slog.Info("log maintenance pass",
 		"templates_pruned", templatesPruned,
 		"findings_pruned", findingsPruned,
 		"classes_pruned", classesPruned,
 		"analyses_pruned", analysesPruned,
-		"nodes_pruned", nodesPruned,
-		"system_triggers_pruned", systemTriggersPruned)
+		"nodes_pruned", nodesPruned)
 	return nil
 }
 

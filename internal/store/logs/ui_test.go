@@ -72,14 +72,6 @@ func TestUIMethodsOnEmptyDatabase(t *testing.T) {
 	if len(templates) != 0 {
 		t.Fatalf("ListTemplates: expected empty, got %d", len(templates))
 	}
-
-	baselines, err := s.ListBaselines(ctx, "")
-	if err != nil {
-		t.Fatalf("ListBaselines: %v", err)
-	}
-	if len(baselines) != 0 {
-		t.Fatalf("ListBaselines: expected empty, got %d", len(baselines))
-	}
 }
 
 // --- Counts ---
@@ -97,9 +89,6 @@ func TestCountsPerTable(t *testing.T) {
 	if err := s.UpsertTemplates(ctx, "sys1", []model.Template{{Template: "t1", Count: 1, ModuleID: "m1"}}, 1000); err != nil {
 		t.Fatalf("upsert templates: %v", err)
 	}
-	if err := s.UpsertBaselines(ctx, "sys1", []model.DigestEntry{{ModuleID: "m1", Priority: 1, Observed: 10}}, 0.3); err != nil {
-		t.Fatalf("upsert baselines: %v", err)
-	}
 	if _, err := s.UpsertFinding(ctx, model.Finding{SystemID: "sys1", Fingerprint: "fp1", Severity: "high", Title: "t", Modules: []string{"m1"}, Evidence: []string{"e1"}}, 1000); err != nil {
 		t.Fatalf("upsert finding: %v", err)
 	}
@@ -111,7 +100,7 @@ func TestCountsPerTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Counts: %v", err)
 	}
-	want := Counts{Systems: 2, Templates: 1, Baselines: 1, Findings: 1, Analyses: 1}
+	want := Counts{Systems: 2, Templates: 1, Findings: 1, Analyses: 1}
 	if counts != want {
 		t.Fatalf("Counts: got %+v, want %+v", counts, want)
 	}
@@ -683,46 +672,15 @@ func TestListTemplatesHonoursLimitAndFilter(t *testing.T) {
 	}
 }
 
-// --- ListBaselines ---
-
-func TestListBaselinesFilter(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-
-	if err := s.UpsertBaselines(ctx, "sys1", []model.DigestEntry{{ModuleID: "m1", Priority: 1, Observed: 5}}, 0.3); err != nil {
-		t.Fatalf("upsert baseline sys1: %v", err)
-	}
-	if err := s.UpsertBaselines(ctx, "sys2", []model.DigestEntry{{ModuleID: "m1", Priority: 1, Observed: 7}}, 0.3); err != nil {
-		t.Fatalf("upsert baseline sys2: %v", err)
-	}
-
-	all, err := s.ListBaselines(ctx, "")
-	if err != nil {
-		t.Fatalf("ListBaselines all: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("expected 2 baselines, got %d", len(all))
-	}
-
-	sys1Only, err := s.ListBaselines(ctx, "sys1")
-	if err != nil {
-		t.Fatalf("ListBaselines sys1: %v", err)
-	}
-	if len(sys1Only) != 1 || sys1Only[0].SystemID != "sys1" {
-		t.Fatalf("expected only sys1 baseline, got %+v", sys1Only)
-	}
-}
-
-// A window the trigger memory answered keeps its gate reasons but made no
-// call. The rollup must count it apart, or /gate reads it as a call that
-// cost nothing.
+// A window a budget limit refused made no call and carries no reasons. The
+// rollup must count it apart, or /gate reads it as gated out for free.
 func TestGateRollupCountsSuppressedWindowsApart(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	for i, a := range []Analysis{
-		{GateReasons: []string{"deviation:mod1/3"}, LLMCalled: true, CostMicros: 10, TriggerKey: "t1:k"},
-		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_hit", TriggerKey: "t1:k"},
-		{GateReasons: []string{"deviation:mod1/3"}, Gated: true, SuppressedBy: "trigger_hit", TriggerKey: "t1:k"},
+		{Gated: true},
+		{Gated: true, SuppressedBy: "system_call_cap"},
+		{Gated: true, SuppressedBy: "system_call_cap"},
 	} {
 		start := int64(100 * (i + 1))
 		if _, err := s.BeginAnalysis(ctx, "sys1", start, start+50, 1000); err != nil {
@@ -738,8 +696,8 @@ func TestGateRollupCountsSuppressedWindowsApart(t *testing.T) {
 		t.Fatalf("GateRollup: %+v %v", rows, err)
 	}
 	r := rows[0]
-	if r.Windows != 3 || r.LLMCalls != 1 || r.Suppressed != 2 {
-		t.Fatalf("windows=%d calls=%d suppressed=%d, want 3/1/2", r.Windows, r.LLMCalls, r.Suppressed)
+	if r.Windows != 3 || r.LLMCalls != 0 || r.Suppressed != 2 {
+		t.Fatalf("windows=%d calls=%d suppressed=%d, want 3/0/2", r.Windows, r.LLMCalls, r.Suppressed)
 	}
 }
 

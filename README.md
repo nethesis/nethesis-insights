@@ -2,7 +2,7 @@
 
 Central log-anomaly analysis, threat-intelligence sharing and hardware sizing
 for NethServer fleets. Nodes ship deduplicated, masked log bundles; the server
-gates each one against novelty and deviation, calls an LLM **only** when the
+gates each one against novelty, calls an LLM **only** when the
 gate fires, and stores findings under a server-computed identity so the same
 problem is never raised twice.
 
@@ -81,7 +81,7 @@ grants.
 
 `UI_LISTEN_ADDR` turns on the operator dashboard, which is the fastest way to
 see what the server actually stored — findings, the cost ledger with its gate
-reasons, templates, baselines, queue depth and the effective configuration.
+reasons, templates, queue depth and the effective configuration.
 
 `scripts/insights-api.sh` wraps the same calls for all three pipelines
 (`health`, `findings`, `open`, `post <bundle.json>`, `events`, `feed`,

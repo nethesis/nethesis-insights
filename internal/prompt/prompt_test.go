@@ -15,10 +15,8 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
-func f(v float64) *float64 { return &v }
-
-// sel is the selection these cases render under: nothing novel, nothing
-// deviating, and room for every ambient template. The selection rules have
+// sel is the selection these cases render under: nothing novel and room for
+// every ambient template. The selection rules have
 // their own cases below.
 func sel() Selection {
 	return Selection{MaxAmbient: 100}
@@ -29,11 +27,6 @@ func sampleBundle() model.Bundle {
 		CollectorVersion: "1.2.3",
 		MaskingVersion:   2,
 		Window:           model.Window{Start: 100, End: 200},
-		Digest: []model.DigestEntry{
-			{ModuleID: "modB", Priority: 1, Observed: 10, Expected: f(5)},
-			{ModuleID: "modA", Priority: 3, Observed: 20},
-			{ModuleID: "modA", Priority: 1, Observed: 30, Expected: f(10)},
-		},
 		Templates: []model.Template{
 			{Template: "tpl-z", Count: 5, ModuleID: "modA", Priority: 1, Category: "security", Samples: []string{"SECRET-SAMPLE-1"}},
 			{Template: "tpl-a", Count: 2, ModuleID: "modA", Priority: 1, Samples: []string{"SECRET-SAMPLE-2"}},
@@ -67,7 +60,6 @@ func TestRenderDeterministicUnderShuffle(t *testing.T) {
 	out1 := Render(b1, open1, sel())
 
 	b2 := sampleBundle()
-	rand.Shuffle(len(b2.Digest), func(i, j int) { b2.Digest[i], b2.Digest[j] = b2.Digest[j], b2.Digest[i] })
 	rand.Shuffle(len(b2.Templates), func(i, j int) { b2.Templates[i], b2.Templates[j] = b2.Templates[j], b2.Templates[i] })
 	rand.Shuffle(len(b2.Budget.TruncatedModules), func(i, j int) {
 		b2.Budget.TruncatedModules[i], b2.Budget.TruncatedModules[j] = b2.Budget.TruncatedModules[j], b2.Budget.TruncatedModules[i]
@@ -232,15 +224,13 @@ func TestSelectKeepsWhatPaidForTheCall(t *testing.T) {
 		Templates: []model.Template{
 			{Template: "<3> [a] novel line", Count: 1, ModuleID: "modA", Priority: 3},
 			{Template: "<3> [b] security line", Count: 2, ModuleID: "modB", Priority: 3, Category: "security"},
-			{Template: "<3> [c] deviating module line", Count: 3, ModuleID: "modC", Priority: 3},
 			{Template: "<3> [d] loud ambient", Count: 99, ModuleID: "modD", Priority: 3},
 			{Template: "<3> [e] quiet ambient", Count: 1, ModuleID: "modE", Priority: 3},
 		},
 	}
 	s := Selection{
-		Novel:            map[string]bool{model.CanonicalKey("modA", "<3> [a] novel line"): true},
-		DeviatingModules: map[string]bool{"modC": true},
-		MaxAmbient:       1,
+		Novel:      map[string]bool{model.CanonicalKey("modA", "<3> [a] novel line"): true},
+		MaxAmbient: 1,
 	}
 
 	var got []string
@@ -248,9 +238,9 @@ func TestSelectKeepsWhatPaidForTheCall(t *testing.T) {
 		got = append(got, l.Template.ModuleID)
 	}
 
-	// modA (novel), modB (security), modC (deviating) unconditionally, plus
-	// the loudest single ambient line. modE loses the ambient slot to modD.
-	want := []string{"modA", "modB", "modC", "modD"}
+	// modA (novel) and modB (security) unconditionally, plus the loudest
+	// single ambient line. modE loses the ambient slot to modD.
+	want := []string{"modA", "modB", "modD"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selected %v, want %v", got, want)
 	}
@@ -375,29 +365,6 @@ func TestSelectCollapsesModuleInstances(t *testing.T) {
 	}
 	if _, ok := byModule["nethvoice-proxy"]; !ok {
 		t.Fatalf("nethvoice-proxy is its own image and must stay separate, got %v", byModule)
-	}
-}
-
-// The gate reports deviation per instance because module_baselines is keyed
-// that way, while lines are grouped per family. Without collapsing the set,
-// the line that paid for the call lands in the ambient pool and MaxAmbient
-// can drop it.
-func TestSelectKeepsLinesFromADeviatingInstance(t *testing.T) {
-	b := model.Bundle{
-		Templates: []model.Template{
-			{Template: `<3> [nethvoice] phonebook failed`, Count: 1, ModuleID: "nethvoice39", Priority: 3},
-			{Template: `<3> [mail] quiet line`, Count: 500, ModuleID: "mail1", Priority: 3},
-		},
-	}
-	lines := Select(b, Selection{
-		DeviatingModules: map[string]bool{"nethvoice39": true},
-		MaxAmbient:       0,
-	})
-	if len(lines) != 1 {
-		t.Fatalf("expected only the deviating family's line, got %d: %+v", len(lines), lines)
-	}
-	if lines[0].Template.ModuleID != "nethvoice" {
-		t.Fatalf("the deviating instance's line was dropped, kept %q", lines[0].Template.ModuleID)
 	}
 }
 

@@ -3,7 +3,7 @@
 
 // Package logs serves insightsd's operator dashboard: findings, systems, the
 // analyses cost ledger, the gate rollup, per-day spend, the stored
-// templates and baselines, and the finding-class review queue. It replaces
+// templates, and the finding-class review queue. It replaces
 // the shell helper that used to need sqlite3, root on the node and the
 // podman volume path, and adds the live process state a query over the
 // database could never see: queue depth and worker count, uptime, and the
@@ -14,7 +14,7 @@
 // discipline. What is specific here:
 //
 //   - Reads are unauthenticated and fleet-wide -- every GET shows every
-//     system's findings, templates, baselines and spend, for every customer.
+//     system's findings, templates and spend, for every customer.
 //     That is why most of the constraints below are not optional.
 //   - Zero JavaScript. Interactions are <meta refresh>, <form>, <details>
 //     and <dialog> opened by a command/commandfor invoker button, never a
@@ -66,7 +66,6 @@ type Reader interface {
 	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
 	ResolveNodesFleet(ctx context.Context, findings []model.Finding) error
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
-	ListBaselines(ctx context.Context, systemID string) ([]logsstore.BaselineRow, error)
 	ListClasses(ctx context.Context, f logsstore.ClassFilter) ([]logsstore.ClassRow, error)
 	ClassStats(ctx context.Context) ([]logsstore.ClassStatsRow, error)
 	ListClassDecisions(ctx context.Context, limit int) ([]logsstore.ClassDecision, error)
@@ -148,7 +147,6 @@ var nav = []chrome.NavGroup{
 		{Key: "gate", Path: "/gate", Label: "Gate"},
 		{Key: "cost", Path: "/cost", Label: "Cost"},
 		{Key: "templates", Path: "/templates", Label: "Templates"},
-		{Key: "baselines", Path: "/baselines", Label: "Baselines"},
 		{Key: "status", Path: "/status", Label: "Status"},
 	}},
 }
@@ -157,7 +155,7 @@ var nav = []chrome.NavGroup{
 // into its own *template.Template -- see chrome.ParseTemplates.
 var pages = []string{
 	"index.html", "systems.html", "analyses.html",
-	"gate.html", "cost.html", "templates.html", "baselines.html", "status.html",
+	"gate.html", "cost.html", "templates.html", "status.html",
 	"review.html", "review-stats.html", "review-audit.html",
 }
 
@@ -258,8 +256,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleCost(w, r)
 	case "/templates":
 		s.handleTemplates(w, r)
-	case "/baselines":
-		s.handleBaselines(w, r)
 	case "/status":
 		s.handleStatus(w, r)
 	case "/review":
@@ -514,8 +510,7 @@ type gateSummary struct {
 // summarizeGate folds the rollup into the headline. GatedOut is derived as
 // Windows-Called-Suppressed rather than read off the nil-Reasons row: the
 // two agree by the gate's invariant (a non-empty reason set is what makes
-// the call, unless a budget limit or the trigger memory stopped it, which
-// suppressed_by records), and deriving it means legacy rows written by an
+// the call, unless a budget limit stopped it, which suppressed_by records), and deriving it means legacy rows written by an
 // older formula cannot make the summary contradict the table.
 func summarizeGate(rows []logsstore.GateRow) gateSummary {
 	var g gateSummary
@@ -615,26 +610,6 @@ func (s *server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	s.chrome.Render(w, "templates.html", templatesPageData{
 		PageData:  s.chrome.PageData(r, "templates"),
 		Templates: templates,
-		System:    systemID,
-	})
-}
-
-type baselinesPageData struct {
-	chrome.PageData
-	Baselines []logsstore.BaselineRow
-	System    string
-}
-
-func (s *server) handleBaselines(w http.ResponseWriter, r *http.Request) {
-	systemID := r.URL.Query().Get("system")
-	baselines, err := s.reader.ListBaselines(r.Context(), systemID)
-	if err != nil {
-		s.chrome.StoreError(w, "baselines", err)
-		return
-	}
-	s.chrome.Render(w, "baselines.html", baselinesPageData{
-		PageData:  s.chrome.PageData(r, "baselines"),
-		Baselines: baselines,
 		System:    systemID,
 	})
 }

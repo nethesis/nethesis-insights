@@ -24,17 +24,11 @@ import (
 type recordingReader struct {
 	calls []string
 
-	templatesErr, findingsErr, analysesErr, nodesErr, systemTriggersErr, classesErr error
+	templatesErr, findingsErr, analysesErr, nodesErr, classesErr error
 	// olderThan captures what each call was asked to prune before, so a test
 	// can assert Run derived it from `now` and the right Config field.
 	templatesOlderThan, findingsOlderThan, analysesOlderThan, nodesOlderThan int64
-	systemTriggersOlderThan, classesOlderThan                                int64
-}
-
-func (r *recordingReader) PruneSystemTriggers(_ context.Context, olderThan int64) (int, error) {
-	r.calls = append(r.calls, "system_triggers")
-	r.systemTriggersOlderThan = olderThan
-	return 5, r.systemTriggersErr
+	classesOlderThan                                                         int64
 }
 
 func (r *recordingReader) PruneClasses(_ context.Context, olderThan int64) (int, error) {
@@ -100,7 +94,7 @@ func TestOnePruneFailingDoesNotSkipTheOthers(t *testing.T) {
 	if err := New(r, testConfig()).Run(context.Background(), 0); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	for _, want := range []string{"templates", "findings", "analyses", "system_triggers", "classes"} {
+	for _, want := range []string{"templates", "findings", "analyses", "classes"} {
 		found := false
 		for _, c := range r.calls {
 			if c == want {
@@ -136,12 +130,8 @@ func TestEachTableUsesItsOwnRetention(t *testing.T) {
 	if r.analysesOlderThan != wantAnalyses {
 		t.Errorf("analyses olderThan = %d, want %d", r.analysesOlderThan, wantAnalyses)
 	}
-	// The per-system trigger memory lives as long as the findings it links;
-	// classes go once their findings are gone and no decision names them, so
+	// Classes go once their findings are gone and no decision names them, so
 	// they share the same cutoff.
-	if r.systemTriggersOlderThan != wantFindings {
-		t.Errorf("system_triggers olderThan = %d, want %d", r.systemTriggersOlderThan, wantFindings)
-	}
 	if r.classesOlderThan != wantFindings {
 		t.Errorf("classes olderThan = %d, want %d", r.classesOlderThan, wantFindings)
 	}
@@ -248,10 +238,10 @@ func TestPassPrunesEachTableIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("known templates: %v", err)
 	}
-	if known[model.CanonicalKey("m1", "old")] {
+	if _, ok := known[model.CanonicalKey("m1", "old")]; ok {
 		t.Error("old template survived pruning")
 	}
-	if !known[model.CanonicalKey("m1", "recent")] {
+	if _, ok := known[model.CanonicalKey("m1", "recent")]; !ok {
 		t.Error("recent template was pruned")
 	}
 

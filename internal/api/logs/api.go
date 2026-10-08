@@ -48,9 +48,9 @@ type Store interface {
 // excludeModules names modules dropped from every bundle before it is
 // queued, and excludeServices names syslog identifiers dropped the same way.
 // See model.Bundle.ExcludeModules for why this is applied here, in the
-// handler, and not deeper in the pipeline: the gate, the prompt,
-// system_templates and module_baselines all read from what is queued, so
-// none of them can disagree about which modules are in scope.
+// handler, and not deeper in the pipeline: the gate, the prompt and
+// system_templates all read from what is queued, so none of them can
+// disagree about which modules are in scope.
 type Config struct {
 	ExcludeModules  map[string]bool
 	ExcludeServices map[string]bool
@@ -115,22 +115,21 @@ const (
 )
 
 // The per-array ceilings. The byte caps above bound the body but not the
-// work a body implies: ~700k digest entries fit inside 30 MiB of JSON and
-// compress to well under 8 MiB, and each one costs UpsertBaselines a SELECT
-// plus an INSERT inside a single transaction holding the process-wide write
-// mutex on a one-connection database, plus a line in the prompt. So every
-// repeated array is capped by count as well.
+// work a body implies: hundreds of thousands of entries fit inside 30 MiB of
+// JSON and compress to well under 8 MiB, and each template costs an upsert
+// inside a single transaction holding the process-wide write mutex on a
+// one-connection database. So every repeated array is capped by count as
+// well.
 //
-// All three share one number because there is no reason for them to differ:
-// a real multi-module node was measured at 587 digest buckets, so 1000 is
-// ample for each, and one ceiling is one thing to remember. A bundle over
-// any of them is rejected rather than truncated -- unlike threat and sizing
+// Both share one number because there is no reason for them to differ, and
+// one ceiling is one thing to remember. The `digest` array the collector
+// still sends is no longer decoded, so it needs no cap of its own. A bundle
+// over either is rejected rather than truncated -- unlike threat and sizing
 // ingest, which truncate, because a rejected bundle is re-sent by an edge
 // that still holds the window, while a silently trimmed one would make the
 // gate reason about a window the server only partly received.
 const (
 	maxTemplates        = 1000
-	maxDigestEntries    = 1000
 	maxTruncatedModules = 1000
 )
 
@@ -224,10 +223,6 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 		reject(w, r, http.StatusBadRequest, "too many templates", "templates", len(b.Templates))
 		return
 	}
-	if len(b.Digest) > maxDigestEntries {
-		reject(w, r, http.StatusBadRequest, "too many digest entries", "digest_entries", len(b.Digest))
-		return
-	}
 	if len(b.Budget.TruncatedModules) > maxTruncatedModules {
 		reject(w, r, http.StatusBadRequest, "too many truncation records",
 			"truncated_modules", len(b.Budget.TruncatedModules))
@@ -243,10 +238,9 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 
 	// Strip modules that own a dedicated pipeline before anything else sees
 	// the bundle. Doing it here rather than in the analyzer keeps it to one
-	// place: the gate, the prompt, system_templates and module_baselines all
-	// read from what is queued, so none of them can disagree about which
-	// modules are in scope.
-	receivedTemplates, receivedDigest := len(b.Templates), len(b.Digest)
+	// place: the gate, the prompt and system_templates all read from what is
+	// queued, so none of them can disagree about which modules are in scope.
+	receivedTemplates := len(b.Templates)
 	b = b.ExcludeModules(s.cfg.ExcludeModules)
 	b = b.ExcludeServices(s.cfg.ExcludeServices)
 	// Validate node attribution here, in front of the queue, for the same
@@ -261,9 +255,7 @@ func (s *server) handleBundles(w http.ResponseWriter, r *http.Request) {
 		"window_start", b.Window.Start,
 		"window_end", b.Window.End,
 		"templates", len(b.Templates),
-		"digest_entries", len(b.Digest),
 		"templates_received", receivedTemplates,
-		"digest_entries_received", receivedDigest,
 		"collector_version", b.CollectorVersion,
 		"lines_seen", b.Budget.LinesSeen,
 		"lines_kept", b.Budget.LinesKept,

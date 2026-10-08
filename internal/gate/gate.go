@@ -4,34 +4,24 @@
 package gate
 
 import (
-	"fmt"
-	"sort"
-
 	"github.com/nethesis/nethesis-insights/internal/model"
 )
 
 const (
-	ReasonNewTemplates       = "new_templates"
-	ReasonDeviation          = "deviation"
-	ReasonSecurityNew        = "security_new"
-	ReasonSecuritySurge      = "security_surge"
-	ReasonTruncatedDeviating = "truncated_deviating"
+	ReasonNewTemplates = "new_templates"
+	ReasonSecurityNew  = "security_new"
 )
 
-type BaselineKey struct {
-	ModuleID string
-	Priority int
-}
-
 type SystemState struct {
-	// KnownTemplates is keyed by model.CanonicalKey, not by raw template
-	// text. The collector's masking leaks whatever it has no rule for -- a
-	// percentage, a customer domain, a single-digit counter -- and every
-	// leaked variant of a known line otherwise reads as novel and buys an LLM
-	// call. See model.CanonicalTemplate for what is collapsed and why the
-	// rules are narrow.
-	KnownTemplates map[string]bool
-	Baselines      map[BaselineKey]float64
+	// KnownTemplates maps every template this system has sent, keyed by
+	// model.CanonicalKey, to the unix-millis it was last seen. Keyed on the
+	// canonical form, not the raw text: the collector's masking leaks
+	// whatever it has no rule for -- a percentage, a customer domain, a
+	// single-digit counter -- and every leaked variant of a known line
+	// otherwise reads as novel and buys an LLM call. See
+	// model.CanonicalTemplate for what is collapsed and why the rules are
+	// narrow; Config.Similarity catches what they miss.
+	KnownTemplates map[string]int64
 	SecurityOnly   bool
 }
 
@@ -39,25 +29,25 @@ type SystemState struct {
 // constants because the fleet's shape is not known in advance, and they are
 // grouped so that adding one does not churn every call site.
 type Config struct {
-	// Tolerance is the digest ratio above which a bucket is deviating.
-	Tolerance float64
-
-	// MinExpected and MinObserved are the absolute floors under the deviation
-	// condition. A ratio is not evidence when the denominator is 2: measured
-	// on the dev fleet, the median module_baselines ewma_rate was 3.1 lines
-	// per window and 207 of 587 buckets were below 2, so a bucket that
-	// normally emits two lines fired the gate at seven. The three buckets that
-	// fired most often (<host>/5, metrics1/3, loki1/6) all had a baseline
-	// under 5, and every one of those calls was noise.
-	MinExpected float64
-	MinObserved float64
-
 	// MinNewTemplates is how many novel templates a window needs before
 	// novelty alone fires. A real new condition arrives as a cluster of lines,
 	// not one. A single new template that carries category=security still
 	// fires unconditionally through securityNew, which is evaluated before
 	// this and is deliberately not subject to the quorum.
 	MinNewTemplates int
+
+	// Similarity is the share of tokens an unknown template must have in
+	// common, position by position, with a known one for it to count as
+	// known. 1 disables the check. See nearKnown for what may differ.
+	Similarity float64
+
+	// Silence, in milliseconds, is how long a known template must have been
+	// absent before the window for its return to count as novel. 0 disables
+	// it. This is what replaced the volume baseline: a failure whose lines
+	// the system already knows -- a backup that failed in March and again in
+	// May -- is caught when it comes back, without keeping a per-bucket
+	// average whose idea of "normal" was the last hour.
+	Silence int64
 }
 
 type Decision struct {
@@ -65,48 +55,86 @@ type Decision struct {
 	Reasons []string
 
 	// Novel holds the canonical keys (model.CanonicalKey) of the templates
-	// this bundle carries that the system has not sent before, and
-	// DeviatingModules the modules whose volume is over tolerance.
+	// that count as new for this system: never sent, not near a known one,
+	// or back after Config.Silence.
 	//
-	// They are returned rather than recomputed by the caller because the
+	// It is returned rather than recomputed by the caller because the
 	// prompt decides which templates are worth an LLM's attention from
-	// exactly these two sets: whatever paid for the call is what gets shown.
-	// Recomputing them elsewhere would be a second definition of novelty, and
+	// exactly this set: whatever paid for the call is what gets shown.
+	// Recomputing it elsewhere would be a second definition of novelty, and
 	// the two would eventually disagree.
-	Novel            map[string]bool
-	DeviatingModules map[string]bool
+	Novel map[string]bool
 
-	// NoveltyFired, SecurityNew and SecuritySurge say which conditions
-	// fired, and DeviatingBuckets which (module, priority) buckets were over
-	// tolerance, sorted. internal/trigger derives a window's trigger key from
-	// them. They are returned rather than read back out of Reasons because
-	// parsing the reason strings would be a second definition of the gate.
-	//
-	// NoveltyFired is true only when novelty paid for the call -- the quorum
-	// was met, or a novel template was security-classified -- so a
-	// sub-quorum novel template riding along a deviation window does not
-	// count. DeviatingBuckets is populated in security-only mode too: the
-	// deviation reasons are dropped there, but a security surge is about
-	// exactly those buckets.
-	NoveltyFired     bool
-	SecurityNew      bool
-	SecuritySurge    bool
-	DeviatingBuckets []BaselineKey
+	// NearKnown counts the canonical keys Config.Similarity kept out of
+	// Novel, and Returning those Config.Silence put into it. Both are
+	// reported as metrics, so the two rules' effect is measured rather than
+	// assumed.
+	NearKnown int
+	Returning int
 }
 
 // Evaluate decides whether an LLM call is warranted for this bundle. This is
-// the cost control: every reason must be deterministic (sorted) since it may
-// end up in logs/metrics compared across runs.
+// the cost control: every reason must be deterministic (constant order)
+// since it may end up in logs/metrics compared across runs.
+//
+// The gate answers one question: did this window bring something the system
+// has not shown recently. There is no volume condition. A per-bucket EWMA
+// baseline used to fire on a burst of known lines; it remembered roughly the
+// last hour, so a quiet night made every morning a surge, it fired in 42% of
+// the dev fleet's windows, and it cost a table, five settings and three
+// reasons for 8% of new findings. Config.Silence catches the part of that
+// worth keeping.
 func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 	var reasons []string
 
-	// Deviation is computed first because the security condition below needs
-	// to know which buckets are deviating.
-	deviatingModules, deviatingBuckets, deviationReasons := deviations(b, s, cfg)
+	silentBefore := int64(-1 << 63)
+	if cfg.Silence > 0 {
+		silentBefore = b.Window.Start - cfg.Silence
+	}
+
+	// Novelty is computed over canonical keys, so ten spellings of one leaked
+	// field count once. A key is decided once even when several templates
+	// share it; eligible records whether any of them may be matched by
+	// similarity, and one that may not wins.
+	novel := map[string]bool{}
+	returning := map[string]bool{}
+	unknown := map[string]bool{}
+	var unknownOrder []string
+	for _, t := range b.Templates {
+		key := model.CanonicalKey(t.ModuleID, t.Template)
+		lastSeen, known := s.KnownTemplates[key]
+		switch {
+		case !known:
+			if _, seen := unknown[key]; !seen {
+				unknown[key] = true
+				unknownOrder = append(unknownOrder, key)
+			}
+			if !similarityEligible(t) {
+				unknown[key] = false
+			}
+		case lastSeen < silentBefore:
+			novel[key] = true
+			returning[key] = true
+		}
+	}
+
+	nearKnown := 0
+	if len(unknownOrder) > 0 {
+		var idx *knownIndex
+		if cfg.Similarity < 1 {
+			idx = newKnownIndex(s.KnownTemplates, silentBefore)
+		}
+		for _, key := range unknownOrder {
+			if unknown[key] && idx != nil && idx.near(key, cfg.Similarity) {
+				nearKnown++
+				continue
+			}
+			novel[key] = true
+		}
+	}
 
 	// Security condition. A security-category template fires the gate when it
-	// is NEW for this system, or when its bucket is deviating -- never merely
-	// because it is present.
+	// is NEW for this system -- never merely because it is present.
 	//
 	// The unconditional form this replaces made the gate a no-op on any
 	// internet-facing node: failed SSH auth arrives continuously, every window
@@ -114,54 +142,20 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 	// 352 times out of 352 on the dev fleet. It also made the spend-cap
 	// degrade path (SecurityOnly, spec section 9.4) cost exactly as much as
 	// not degrading, which is the opposite of what that lever is for.
-	// Novelty is computed over canonical keys, so ten spellings of one leaked
-	// field count once. It is computed before the security branch because
-	// both conditions ask the same question of the same set.
-	novel := map[string]bool{}
+	securityNew := false
 	for _, t := range b.Templates {
-		key := model.CanonicalKey(t.ModuleID, t.Template)
-		if !s.KnownTemplates[key] {
-			novel[key] = true
-		}
-	}
-
-	securityNew, securitySurge := false, false
-	for _, t := range b.Templates {
-		if t.Category != "security" {
-			continue
-		}
-		if novel[model.CanonicalKey(t.ModuleID, t.Template)] {
+		if t.Category == "security" && novel[model.CanonicalKey(t.ModuleID, t.Template)] {
 			securityNew = true
-			continue
-		}
-		if deviatingModules[t.ModuleID] {
-			securitySurge = true
+			break
 		}
 	}
-	// Reasons are appended in constant order so the stored set is
-	// deterministic; see the sort note on Decision.
 	if securityNew {
 		reasons = append(reasons, ReasonSecurityNew)
 	}
-	if securitySurge {
-		reasons = append(reasons, ReasonSecuritySurge)
-	}
 
-	if s.SecurityOnly {
-		return Decision{
-			Call:             securityNew || securitySurge,
-			Reasons:          reasons,
-			Novel:            novel,
-			DeviatingModules: deviatingModules,
-			NoveltyFired:     securityNew,
-			SecurityNew:      securityNew,
-			SecuritySurge:    securitySurge,
-			DeviatingBuckets: deviatingBuckets,
-		}
-	}
-
-	noveltyQuorum := len(novel) >= cfg.MinNewTemplates && cfg.MinNewTemplates > 0
-	if noveltyQuorum {
+	// In security-only mode (the spend cap's degrade path) only the security
+	// condition may pay.
+	if !s.SecurityOnly && len(novel) >= cfg.MinNewTemplates && cfg.MinNewTemplates > 0 {
 		// The reason carries no count. The /gate rollup groups on the stored
 		// string, and an embedded number made every window a group of one --
 		// the "new_templates=3" spellings still in the database are the
@@ -169,88 +163,11 @@ func Evaluate(b model.Bundle, s SystemState, cfg Config) Decision {
 		reasons = append(reasons, ReasonNewTemplates)
 	}
 
-	reasons = append(reasons, deviationReasons...)
-
-	// Truncation alone never fires; only in combination with deviation on
-	// the same module.
-	truncatedModules := make([]model.TruncatedModule, len(b.Budget.TruncatedModules))
-	copy(truncatedModules, b.Budget.TruncatedModules)
-	sort.Slice(truncatedModules, func(i, j int) bool {
-		return truncatedModules[i].ModuleID < truncatedModules[j].ModuleID
-	})
-	for _, tm := range truncatedModules {
-		if deviatingModules[tm.ModuleID] {
-			reasons = append(reasons, fmt.Sprintf("%s:%s", ReasonTruncatedDeviating, tm.ModuleID))
-		}
-	}
-
 	return Decision{
-		Call:             len(reasons) > 0,
-		Reasons:          reasons,
-		Novel:            novel,
-		DeviatingModules: deviatingModules,
-		NoveltyFired:     securityNew || noveltyQuorum,
-		SecurityNew:      securityNew,
-		SecuritySurge:    securitySurge,
-		DeviatingBuckets: deviatingBuckets,
+		Call:      len(reasons) > 0,
+		Reasons:   reasons,
+		Novel:     novel,
+		NearKnown: nearKnown,
+		Returning: len(returning),
 	}
-}
-
-// deviations returns the set of modules whose observed volume exceeds
-// tolerance, the deviating buckets themselves in (module, priority) order,
-// plus one reason string per deviating bucket.
-//
-// Reasons carry the bucket but NOT the computed ratio. The ratio made every
-// deviating window a group of one in the operator UI's gate rollup, which
-// groups on the stored gate_reasons string -- so the page that exists to answer
-// "why are we paying" answered nothing.
-//
-// The ratio itself is deliberately not kept anywhere: it is a property of one
-// window, and the two questions it gets asked are answered better elsewhere.
-// "What was unusual in this window" is in the prompt body the analyzer built
-// (internal/prompt), and "what does this bucket normally do" is the /baselines
-// page. Do not put it back into a reason string.
-func deviations(b model.Bundle, s SystemState, cfg Config) (map[string]bool, []BaselineKey, []string) {
-	deviating := map[string]bool{}
-	var buckets []BaselineKey
-	var reasons []string
-
-	// Sort digest entries by (ModuleID, Priority) so reason ordering is
-	// deterministic regardless of input order.
-	digest := make([]model.DigestEntry, len(b.Digest))
-	copy(digest, b.Digest)
-	sort.Slice(digest, func(i, j int) bool {
-		if digest[i].ModuleID != digest[j].ModuleID {
-			return digest[i].ModuleID < digest[j].ModuleID
-		}
-		return digest[i].Priority < digest[j].Priority
-	})
-
-	for _, e := range digest {
-		var expected float64
-		if e.Expected != nil && *e.Expected > 0 {
-			expected = *e.Expected
-		} else {
-			key := BaselineKey{ModuleID: e.ModuleID, Priority: e.Priority}
-			expected = s.Baselines[key]
-		}
-		if expected <= 0 {
-			// Never divide by zero; skip entries with no usable baseline.
-			continue
-		}
-		// Both floors are conjunctive with the ratio, and both are needed:
-		// MinExpected refuses to judge a bucket too small to have a normal,
-		// MinObserved refuses to call a handful of lines a surge however
-		// quiet the bucket usually is.
-		if expected < cfg.MinExpected || float64(e.Observed) < cfg.MinObserved {
-			continue
-		}
-		if float64(e.Observed)/expected > cfg.Tolerance {
-			reasons = append(reasons, fmt.Sprintf("%s:%s/%d", ReasonDeviation, e.ModuleID, e.Priority))
-			deviating[e.ModuleID] = true
-			buckets = append(buckets, BaselineKey{ModuleID: e.ModuleID, Priority: e.Priority})
-		}
-	}
-
-	return deviating, buckets, reasons
 }
