@@ -1554,6 +1554,120 @@
       }
     },
     {
+      "type": "timeseries",
+      "id": 40,
+      "title": "Log lines the gate re-judged, per hour",
+      "description": "How often the gate's two refinements of \"new\" took effect. near_known: an unseen line nearly identical to a known one (GATE_SIMILARITY), counted as known, so it bought no AI call. returning: a known line back after GATE_SILENCE, counted as new, so it can buy one.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(insightsd_gate_templates_total{system=\"insights\", instance=\"$instance\"}[$__rate_interval]) * 3600)",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "spanNulls": false,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisBorderShow": false,
+            "axisGridShow": true,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "near_known"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "returning"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "id": 14,
       "title": "Threat Shield (threatd)",
@@ -1562,7 +1676,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "panels": []
     },
@@ -1579,7 +1693,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 33
+        "y": 41
       },
       "targets": [
         {
@@ -1748,7 +1862,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 33
+        "y": 41
       },
       "targets": [
         {
@@ -1848,7 +1962,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 41
+        "y": 49
       },
       "targets": [
         {
@@ -1947,7 +2061,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 41
+        "y": 49
       },
       "targets": [
         {
@@ -2046,7 +2160,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 41
+        "y": 49
       },
       "targets": [
         {
@@ -2141,7 +2255,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "panels": []
     },
@@ -2158,7 +2272,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -2272,7 +2386,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -2397,7 +2511,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "panels": []
     },
@@ -2414,7 +2528,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 59
+        "y": 67
       },
       "targets": [
         {
@@ -2487,7 +2601,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 59
+        "y": 67
       },
       "targets": [
         {
@@ -2601,7 +2715,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 59
+        "y": 67
       },
       "targets": [
         {
@@ -2726,7 +2840,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "panels": []
     },
@@ -2743,7 +2857,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -2887,7 +3001,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -2954,7 +3068,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -3027,7 +3141,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -3092,7 +3206,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 70
+        "y": 78
       },
       "targets": [
         {
@@ -3217,7 +3331,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "panels": []
     },
@@ -3234,7 +3348,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 75
+        "y": 83
       },
       "targets": [
         {
@@ -3378,7 +3492,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 75
+        "y": 83
       },
       "targets": [
         {
@@ -3522,7 +3636,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 75
+        "y": 83
       },
       "targets": [
         {

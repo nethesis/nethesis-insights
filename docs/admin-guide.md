@@ -840,7 +840,7 @@ resolved when the dashboard opens, not when it is imported. It appears as
 **Nethesis Insights** (uid `nethesis-insights`) already pointing at your
 default Prometheus, and the **Data source** picker at its top left switches
 it to another one if you have more than one. The **Server** picker next to it
-chooses which Nethesis Insights server the panels show. Thirty-one panels
+chooses which Nethesis Insights server the panels show. Thirty-two panels
 in eight rows: overview, HTTP, the log pipeline, Threat Shield, forward auth,
 background passes, the proxy, and the Go runtime. Nothing in it writes anywhere or needs
 a plugin. The host's own `node_*` metrics are not on it; any standard
