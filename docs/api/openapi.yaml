@@ -13,10 +13,10 @@ info:
 
     - **Log pipeline** (`insightsd`, prefix `/logs`: `/logs/v1/bundles`,
       `/logs/v1/findings`): each cluster's `ns8-insights` module ships
-      deduplicated, masked log bundles every 15 minutes; the server gates each one against novelty and
-      deviation, calls an LLM only when the gate fires, and stores findings
-      keyed by a server-computed fingerprint so the same problem is never
-      re-raised.
+      deduplicated, masked log bundles every 15 minutes; the server gates
+      each one against novelty, calls an LLM only when the gate fires, and
+      stores findings keyed by a server-computed fingerprint so the same
+      problem is never re-raised.
     - **Threat Shield** (`threatd`, prefix `/blocklist`:
       `/blocklist/v1/events`, `/blocklist/v1/feed`,
       `/blocklist/v1/allowlist-requests`): a separate pipeline with no LLM
@@ -81,9 +81,9 @@ paths:
       summary: Submit a masked log bundle for analysis
       description: |
         Accepts one 15-minute bundle of deduplicated, masked log templates
-        from an edge node and hands it to the ingest queue. The response
-        answers only whether the bundle was **taken**, never how the
-        analysis went: an LLM call can outlive the client's HTTP timeout,
+        from a cluster's `ns8-insights` collector and hands it to the
+        ingest queue. The response answers only whether the bundle was
+        **taken**, never how the analysis went: an LLM call can outlive the client's HTTP timeout,
         and that must never decide the fate of a window. Poll
         `GET /logs/v1/findings` for results.
 
@@ -105,8 +105,8 @@ paths:
             example:
               schema_version: 1
               system_id: abc123
-              collector_version: 2.0.0
-              masking_version: 1
+              collector_version: 2.1.0
+              masking_version: 6
               window: { start: 1754380800000, end: 1754381700000 }
               templates:
                 - template: "<3> [n1:traefik1:traefik] connection refused to <IP>:<NUM>"
@@ -1015,7 +1015,7 @@ components:
       type: object
       description: >-
         One 15-minute window of deduplicated, masked log data from a single
-        edge system. A `digest` array (per-bucket line counts) that collectors
+        NS8 cluster. A `digest` array (per-bucket line counts) that collectors
         still send is accepted and ignored: the gate no longer has a volume
         condition.
       required:
