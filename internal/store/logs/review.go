@@ -40,8 +40,9 @@ func buildSeverityRankSQL() string {
 }
 
 // ClassFilter selects ListClasses' rows. Visibility "" means every
-// visibility but dismissed, unless Key is set: a dismissed class leaves the
-// "all" queue, yet a link to it by key must still find it. Key is a LIKE
+// visibility but dismissed, unless Key or Group is set: a dismissed class
+// leaves the "all" queue, yet a link to it by key, or to the group it belongs
+// to, must still find it. Key is a LIKE
 // prefix, as on the findings page. Sort is one of the ClassSort* keys and Dir
 // is SortAsc or SortDesc; anything else in either leaves the default order.
 type ClassFilter struct {
@@ -145,7 +146,7 @@ type ClassRow struct {
 // they cannot drift from what is actually retained.
 func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, error) {
 	order, orderArgs := classOrder(f)
-	args := []any{f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key), f.Group, f.Group}
+	args := []any{f.Visibility, f.Visibility, f.Key, f.Group, VisibilityDismissed, f.Key, likePattern(f.Key), f.Group, f.Group}
 	args = append(append(args, orderArgs...), clampLimit(f.Limit))
 	// order is one of classOrder's fixed clauses, never request text.
 	rows, err := s.db.QueryContext(ctx, `
@@ -154,7 +155,7 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		       (SELECT count(DISTINCT x.system_id) FROM findings x WHERE x.class_key = c.class_key) AS systems,
 		       (SELECT count(*) FROM findings x WHERE x.class_key = c.class_key) AS findings
 		FROM finding_classes c
-		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR c.visibility != ?)))
+		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR ? != '' OR c.visibility != ?)))
 		  AND (? = '' OR c.class_key LIKE ?)
 		  AND (? = '' OR c.class_key IN (SELECT g.class_key FROM class_groups g WHERE g.anchor_key = ?))
 		ORDER BY `+order+`

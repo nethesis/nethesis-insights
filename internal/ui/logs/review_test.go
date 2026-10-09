@@ -50,6 +50,10 @@ func (f *fakeWriter) SetClassDocRef(_ context.Context, key, docRef, actor string
 	return f.record("doc_ref", key, docRef, actor)
 }
 
+func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor, visibility, actor string, _ int64) (int, error) {
+	return 2, f.record("group", anchor, visibility, actor)
+}
+
 const testAdminKey = "dev-admin-key"
 
 func newWriteTestServer(t *testing.T, r Reader, w Writer) http.Handler {
@@ -145,6 +149,8 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 		{"/review/deliver", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa customer alice"},
 		{"/review/internal", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa operator alice"},
 		{"/review/dismiss", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa dismissed alice"},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}}, "group v3:aaaa customer alice"},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}}, "group v3:aaaa dismissed alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"on"}}, "security v3:aaaa on alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"off"}}, "security v3:aaaa off alice"},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"high"}}, "severity v3:aaaa high alice"},
@@ -189,6 +195,10 @@ func TestReviewRejectsBadInput(t *testing.T) {
 	}{
 		{"/review/deliver", url.Values{}},
 		{"/review/deliver", url.Values{"key": {strings.Repeat("k", maxClassKeyLen+1)}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"pending"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"bogus"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}}},
+		{"/review/group", url.Values{"visibility": {"customer"}}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"maybe"}}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {""}}},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"urgent"}}},
@@ -496,5 +506,83 @@ func TestReviewDecisionFormsCarryTheSort(t *testing.T) {
 		if n := strings.Count(body, want); n != forms {
 			t.Errorf("%d of %d forms carry %s", n, forms, want)
 		}
+	}
+}
+
+func groupedReader() *fakeReader {
+	r := seededReader()
+	r.classes = append([]logsstore.ClassRow(nil), r.classes...)
+	for i := range r.classes {
+		r.classes[i].GroupAnchor, r.classes[i].GroupSize = "v3:anchor", 3
+	}
+	return r
+}
+
+func TestReviewShowsGroupLinkAndSuggestion(t *testing.T) {
+	r := groupedReader()
+	for i := range r.classes {
+		if r.classes[i].Visibility == logsstore.VisibilityPending {
+			r.classes[i].Suggestion, r.classes[i].SuggestionVotes = logsstore.VisibilityDismissed, 2
+		}
+	}
+	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
+	for _, want := range []string{
+		`group of 3`, `?group=v3%3aanchor`, `Suggested: Dismiss`, `2 similar class(es) decided`,
+		`class="suggested"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	// only the dismiss button of a pending row is marked, and decided rows
+	// carry no suggestion text
+	if n := strings.Count(body, "Suggested: "); n != 1 {
+		t.Errorf("%d suggestion lines, want 1 (one pending row)", n)
+	}
+	if n := strings.Count(body, `class="suggested"`); n != 1 {
+		t.Errorf("%d marked buttons, want 1", n)
+	}
+}
+
+func TestReviewWithoutSuggestionOrGroupShowsNeither(t *testing.T) {
+	body := get(t, newWriteTestServer(t, seededReader(), &fakeWriter{}), "/review?view=all").Body.String()
+	for _, bad := range []string{"group of", "Suggested:", `class="suggested"`} {
+		if strings.Contains(body, bad) {
+			t.Errorf("page shows %q with no group", bad)
+		}
+	}
+}
+
+func TestReviewGroupViewFiltersAndOffersGroupForms(t *testing.T) {
+	r := groupedReader()
+	h := newWriteTestServer(t, r, &fakeWriter{})
+	body := get(t, h, "/review?group=v3:anchor").Body.String()
+	if r.classSeen.Group != "v3:anchor" || r.classSeen.Visibility != "" {
+		t.Fatalf("group link filtered on %+v, want group with every visibility", r.classSeen)
+	}
+	for _, want := range []string{`action="/review/group"`, `name="anchor" value="v3:anchor"`, `name="visibility" value="customer"`, `Deliver all pending`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("group view lacks %q", want)
+		}
+	}
+	if strings.Contains(get(t, h, "/review").Body.String(), `action="/review/group"`) {
+		t.Error("the plain queue offers group forms")
+	}
+	get(t, h, "/review?group=v3:anchor&view=pending")
+	if r.classSeen.Visibility != logsstore.VisibilityPending {
+		t.Errorf("explicit view ignored: %+v", r.classSeen)
+	}
+	ro := get(t, newTestServer(t, groupedReader(), nil), "/review?group=v3:anchor").Body.String()
+	if strings.Contains(ro, `/review/group`) {
+		t.Error("read-only server offers group forms")
+	}
+}
+
+func TestReviewGroupDecisionKeepsTheGroupFilter(t *testing.T) {
+	h := newWriteTestServer(t, seededReader(), &fakeWriter{})
+	form := url.Values{"anchor": {"v3:anchor"}, "visibility": {"operator"}, "group": {"v3:anchor"}, "view": {"all"}}
+	rec := do(h, writeReq("/review/group", form))
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/review?group=v3%3Aanchor&view=all" {
+		t.Fatalf("got %d %q", rec.Code, loc)
 	}
 }

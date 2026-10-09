@@ -211,6 +211,26 @@ func TestListClassesGroupFilter(t *testing.T) {
 	}
 }
 
+// A group view lists every member, dismissed ones included, so it agrees with
+// GroupSize.
+func TestListClassesGroupViewIncludesDismissed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedGroup(t, s)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 1600))
+	rows, err := s.ListClasses(ctx, ClassFilter{Group: "v3:a"})
+	mustDo(t, err)
+	if len(rows) != 3 || rows[0].GroupSize != 3 {
+		t.Fatalf("group view: %d rows, want 3: %+v", len(rows), rows)
+	}
+	rows, _ = s.ListClasses(ctx, ClassFilter{})
+	for _, r := range rows {
+		if r.Key == "v3:a" {
+			t.Fatal("the plain all view shows a dismissed class")
+		}
+	}
+}
+
 func TestPruneClassesRemovesOrphanGroupRows(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

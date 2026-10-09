@@ -15,10 +15,30 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 {{range .Views}}<option value="{{.Key}}"{{if eq $view .Key}} selected{{end}}>{{.Label}}</option>{{end}}
 </select>
 <input type="text" name="key" value="{{.Key}}" placeholder="class key, partial ok">
+{{if .Group}}<input type="hidden" name="group" value="{{.Group}}">{{end}}
 {{if .Sort}}<input type="hidden" name="sort" value="{{.Sort}}"><input type="hidden" name="dir" value="{{.Dir}}">{{end}}
 <button type="submit">Filter</button>
 </fieldset>
 </form>
+
+{{if and .Group $.CanWrite}}
+<p><small>These forms decide only the classes of this group that are still pending, each recorded
+separately in the audit trail.</small></p>
+{{$g := .Group}}
+<div class="grid">
+{{range $v := .GroupActions}}
+<form method="post" action="{{$.Base}}/review/group">
+<input type="hidden" name="anchor" value="{{$g}}">
+<input type="hidden" name="visibility" value="{{$v.Visibility}}">
+<input type="hidden" name="group" value="{{$g}}">
+<input type="hidden" name="view" value="{{$.View}}">
+<input type="hidden" name="sort" value="{{$.Sort}}">
+<input type="hidden" name="dir" value="{{$.Dir}}">
+<button type="submit" class="secondary">{{$v.Label}}</button>
+</form>
+{{end}}
+</div>
+{{end}}
 
 <figure class="overflow-auto">
 <table class="striped">
@@ -33,6 +53,8 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <td>
 <button type="button" class="linklike" title="{{if .Titles}}{{index .Titles 0}}{{else}}{{.Key}}{{end}}" commandfor="class-{{.Key}}" command="show-modal"><span>{{if .Titles}}{{index .Titles 0}}{{else}}{{short .Key 16}}{{end}}</span></button>
 {{if .Security}} <span class="chip" data-severity="critical">security</span>{{end}}
+{{if gt .GroupSize 1}}<br><small><a href="{{$.Base}}/review?group={{.GroupAnchor}}">group of {{.GroupSize}}</a></small>{{end}}
+{{if .Suggestion}}<br><small>Suggested: {{suggestionLabel .Suggestion}} &mdash; {{.SuggestionVotes}} similar class(es) decided</small>{{end}}
 <dialog id="class-{{.Key}}" closedby="any">
 <article>
 <header>
@@ -62,12 +84,13 @@ customers until someone delivers them &mdash; security ones too.</small></p>
 <input type="hidden" name="key" value="{{.Key}}">
 <input type="hidden" name="view" value="{{$.View}}">
 <input type="hidden" name="filter" value="{{$.Key}}">
+<input type="hidden" name="group" value="{{$.Group}}">
 <input type="hidden" name="sort" value="{{$.Sort}}">
 <input type="hidden" name="dir" value="{{$.Dir}}">
 <fieldset role="group">
-<button type="submit">Deliver to customers</button>
-<button type="submit" class="secondary" formaction="{{$.Base}}/review/internal">Keep internal</button>
-<button type="submit" class="secondary" formaction="{{$.Base}}/review/dismiss">Dismiss</button>
+<button type="submit"{{if eq .Suggestion "customer"}} class="suggested"{{else if .Suggestion}} class="secondary"{{end}}>Deliver to customers</button>
+<button type="submit" class="{{if eq .Suggestion "operator"}}suggested{{else}}secondary{{end}}" formaction="{{$.Base}}/review/internal">Keep internal</button>
+<button type="submit" class="{{if eq .Suggestion "dismissed"}}suggested{{else}}secondary{{end}}" formaction="{{$.Base}}/review/dismiss">Dismiss</button>
 </fieldset>
 </form>
 <p><small>Dismiss hides this class from every page, including this queue, for good. It saves no
@@ -79,6 +102,7 @@ module and priority.{{end}}</small></p>
 <input type="hidden" name="key" value="{{.Key}}">
 <input type="hidden" name="view" value="{{$.View}}">
 <input type="hidden" name="filter" value="{{$.Key}}">
+<input type="hidden" name="group" value="{{$.Group}}">
 <input type="hidden" name="sort" value="{{$.Sort}}">
 <input type="hidden" name="dir" value="{{$.Dir}}">
 {{if .Security}}
@@ -93,6 +117,7 @@ module and priority.{{end}}</small></p>
 <input type="hidden" name="key" value="{{.Key}}">
 <input type="hidden" name="view" value="{{$.View}}">
 <input type="hidden" name="filter" value="{{$.Key}}">
+<input type="hidden" name="group" value="{{$.Group}}">
 <input type="hidden" name="sort" value="{{$.Sort}}">
 <input type="hidden" name="dir" value="{{$.Dir}}">
 <fieldset role="group">
@@ -108,6 +133,7 @@ module and priority.{{end}}</small></p>
 <input type="hidden" name="key" value="{{.Key}}">
 <input type="hidden" name="view" value="{{$.View}}">
 <input type="hidden" name="filter" value="{{$.Key}}">
+<input type="hidden" name="group" value="{{$.Group}}">
 <input type="hidden" name="sort" value="{{$.Sort}}">
 <input type="hidden" name="dir" value="{{$.Dir}}">
 <fieldset role="group">

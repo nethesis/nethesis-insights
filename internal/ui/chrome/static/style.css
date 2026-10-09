@@ -193,3 +193,10 @@ nav details.dropdown > summary.active {
 .pill[data-basis="guess"]      { color: var(--sev-high); }
 .pill[data-basis="convention"] { color: var(--pico-muted-color); }
 .pill[data-basis="physical"]   { color: var(--pico-ins-color); }
+
+/* The decision button a group's earlier decisions suggest. Only a mark:
+   nothing is submitted for the operator. */
+button.suggested {
+  outline: 3px solid var(--pico-primary);
+  outline-offset: 2px;
+}

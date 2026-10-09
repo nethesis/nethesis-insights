@@ -82,6 +82,9 @@ type Writer interface {
 	SetClassSecurity(ctx context.Context, key string, security bool, actor string, now int64) error
 	SetClassSeverity(ctx context.Context, key, severity, actor string, now int64) error
 	SetClassDocRef(ctx context.Context, key, docRef, actor string, now int64) error
+	// SetGroupVisibility decides every pending class of a group at once and
+	// returns how many it changed.
+	SetGroupVisibility(ctx context.Context, anchor, visibility, actor string, now int64) (int, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -127,6 +130,7 @@ var writableRoutes = map[string]bool{
 	"/review/security": true,
 	"/review/severity": true,
 	"/review/doc-ref":  true,
+	"/review/group":    true,
 }
 
 // nav is this dashboard's nav bar structure. A single group with no label
@@ -186,9 +190,10 @@ func NewServer(r Reader, w Writer, rt Runtime, cfg chrome.Config) (http.Handler,
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
 	cfg.Funcs = template.FuncMap{
-		"headNodes":   headNodes,
-		"moreNodes":   moreNodes,
-		"moreModules": moreModules,
+		"headNodes":       headNodes,
+		"moreNodes":       moreNodes,
+		"moreModules":     moreModules,
+		"suggestionLabel": suggestionLabel,
 	}
 
 	base, err := chrome.New(cfg)

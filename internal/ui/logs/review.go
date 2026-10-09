@@ -91,8 +91,8 @@ type reviewHeader struct {
 
 // reviewHeaders builds the header links in Go, so the template only prints
 // them. Each carries the current view and key filter, so sorting never
-// drops the filter the operator is looking at.
-func (s *server) reviewHeaders(view, key, sort, dir string) []reviewHeader {
+// drops the filter the operator is looking at. group is the same kind of filter.
+func (s *server) reviewHeaders(view, key, group, sort, dir string) []reviewHeader {
 	out := make([]reviewHeader, 0, len(reviewColumns))
 	for _, c := range reviewColumns {
 		h := reviewHeader{Label: c.Label, Num: c.Num}
@@ -108,23 +108,54 @@ func (s *server) reviewHeaders(view, key, sort, dir string) []reviewHeader {
 		if key != "" {
 			q.Set("key", key)
 		}
+		if group != "" {
+			q.Set("group", group)
+		}
 		h.Href = s.chrome.Link("/review") + "?" + q.Encode()
 		out = append(out, h)
 	}
 	return out
 }
 
+// groupAction is one "decide the whole group" form of the group view.
+type groupAction struct {
+	Visibility string
+	Label      string
+}
+
+var groupActions = []groupAction{
+	{logsstore.VisibilityCustomer, "Deliver all pending in this group"},
+	{logsstore.VisibilityOperator, "Keep all pending in this group internal"},
+	{logsstore.VisibilityDismissed, "Dismiss all pending in this group"},
+}
+
+// suggestionLabel names a suggested visibility in the words of the per-class
+// buttons.
+func suggestionLabel(v string) string {
+	switch v {
+	case logsstore.VisibilityCustomer:
+		return "Deliver"
+	case logsstore.VisibilityOperator:
+		return "Keep internal"
+	case logsstore.VisibilityDismissed:
+		return "Dismiss"
+	}
+	return v
+}
+
 type reviewPageData struct {
 	chrome.PageData
-	Rows       []logsstore.ClassRow
-	View       string
-	Views      []reviewView
-	Key        string
-	Sort       string
-	Dir        string
-	Headers    []reviewHeader
-	CanWrite   bool
-	Severities []string
+	Rows         []logsstore.ClassRow
+	View         string
+	Views        []reviewView
+	Key          string
+	Group        string
+	GroupActions []groupAction
+	Sort         string
+	Dir          string
+	Headers      []reviewHeader
+	CanWrite     bool
+	Severities   []string
 }
 
 // handleReview shows the class queue: finding classes ranked by how many
@@ -135,30 +166,36 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	view := lookupReviewView(q.Get("view"))
 	key := q.Get("key")
-	if key != "" && q.Get("view") == "" {
-		// A link to one class (from a finding) must find it whatever it was
-		// decided, not only while it is pending.
+	group := strings.TrimSpace(q.Get("group"))
+	if len(group) > maxClassKeyLen {
+		group = ""
+	}
+	if (key != "" || group != "") && q.Get("view") == "" {
+		// A link to one class (from a finding) or to one group must find
+		// every member whatever it was decided, not only while pending.
 		view = lookupReviewView("all")
 	}
 	sort, dir := sanitizeClassSort(q.Get("sort"), q.Get("dir"))
 	rows, err := s.reader.ListClasses(r.Context(), logsstore.ClassFilter{
-		Visibility: view.Visibility, Key: key, Sort: sort, Dir: dir, Limit: reviewLimit,
+		Visibility: view.Visibility, Key: key, Group: group, Sort: sort, Dir: dir, Limit: reviewLimit,
 	})
 	if err != nil {
 		s.chrome.StoreError(w, "review", err)
 		return
 	}
 	s.chrome.Render(w, "review.html", reviewPageData{
-		PageData:   s.chrome.PageData(r, "review"),
-		Rows:       rows,
-		View:       view.Key,
-		Views:      reviewViews,
-		Key:        key,
-		Sort:       sort,
-		Dir:        dir,
-		Headers:    s.reviewHeaders(view.Key, key, sort, dir),
-		CanWrite:   s.canWrite(),
-		Severities: model.Severities,
+		PageData:     s.chrome.PageData(r, "review"),
+		Rows:         rows,
+		View:         view.Key,
+		Views:        reviewViews,
+		Key:          key,
+		Group:        group,
+		GroupActions: groupActions,
+		Sort:         sort,
+		Dir:          dir,
+		Headers:      s.reviewHeaders(view.Key, key, group, sort, dir),
+		CanWrite:     s.canWrite(),
+		Severities:   model.Severities,
 	})
 }
 
@@ -199,7 +236,9 @@ func (s *server) handleReviewAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDecision serves every writableRoutes path, reached only after
-// AuthenticateWrite. Each decision applies to the whole class -- every
+// AuthenticateWrite. /review/group applies one visibility to every pending
+// class of a group, one audit row each; the rest
+// apply to the whole class -- every
 // finding in it, on every system, now and when it recurs -- never to one
 // finding.
 func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor string) {
@@ -210,7 +249,11 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 	}
 	// PostFormValue, never FormValue: a write takes its parameters from the
 	// body it was submitted with, not from the query string.
-	key, ok := formKey(r, "key")
+	field := "key"
+	if r.URL.Path == "/review/group" {
+		field = "anchor"
+	}
+	key, ok := formKey(r, field)
 	if !ok {
 		http.Error(w, "a class key is required", http.StatusBadRequest)
 		return
@@ -225,6 +268,16 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityOperator, actor, now)
 	case "/review/dismiss":
 		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityDismissed, actor, now)
+	case "/review/group":
+		visibility := r.PostFormValue("visibility")
+		switch visibility {
+		case logsstore.VisibilityCustomer, logsstore.VisibilityOperator, logsstore.VisibilityDismissed:
+		default:
+			http.Error(w, "visibility must be customer, operator or dismissed", http.StatusBadRequest)
+			return
+		}
+		// Only the group's pending classes change; the count is not shown.
+		_, err = s.writer.SetGroupVisibility(ctx, key, visibility, actor, now)
 	case "/review/security":
 		security, ok := parseOnOff(r.PostFormValue("security"))
 		if !ok {
@@ -313,6 +366,9 @@ func (s *server) reviewReturn(r *http.Request) string {
 	}
 	if k, ok := formKey(r, "filter"); ok {
 		q.Set("key", k)
+	}
+	if g, ok := formKey(r, "group"); ok {
+		q.Set("group", g)
 	}
 	if sort, dir := sanitizeClassSort(r.PostFormValue("sort"), r.PostFormValue("dir")); sort != "" {
 		q.Set("sort", sort)
