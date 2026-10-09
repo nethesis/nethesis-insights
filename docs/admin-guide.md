@@ -162,11 +162,12 @@ This is host-wide. It is the reason the host must be dedicated.
     done
     podman pull docker.io/library/traefik:v3.7.13
     podman pull quay.io/prometheus/node-exporter:v1.12.1
+    podman pull ghcr.io/ggml-org/llama.cpp:server-b11429
 
 The images are public and multi-arch (`linux/amd64`, `linux/arm64`); no
 registry login is needed. The four `ghcr.io` pulls are a warm-up rather than a
 prerequisite: those units carry `Pull=newer`, so the first `systemctl start`
-fetches them anyway. The `traefik` and `node-exporter` pulls are required —
+fetches them anyway. The `traefik`, `node-exporter` and `llama.cpp` pulls are required —
 those units are pinned to a fixed tag and have no `Pull=` line. To build them on the host instead, use
 `podman build --build-arg SERVICE=<service> -t localhost/insights-<service> .`
 and change each unit's `Image=` line to match.
@@ -177,8 +178,8 @@ and change each unit's `Image=` line to match.
     install -m 644 deploy/quadlet/*.volume    /etc/containers/systemd/
     install -m 644 deploy/quadlet/*.container /etc/containers/systemd/
 
-Eleven units: one pod, four volumes (the three databases and the certificate
-store), and six containers. Five of the containers share **one** pod and
+Thirteen units: one pod, five volumes (the three databases, the certificate
+store and the embedding model), and seven containers. Six of the containers share **one** pod and
 therefore one network namespace. That is not a packaging convenience — it is
 what makes the proxy's connection to a service a real loopback connection with
 no address translation in the path, which is what the default
@@ -188,7 +189,17 @@ The pod publishes ports 80 and 443. No container publishes a port of its own,
 which is what keeps the three operator dashboards reachable only through the
 proxy.
 
-The sixth container, `node-exporter`, reports the host's own CPU, memory, disk
+The sixth container, `embedder`, is a small local model server that lets the
+review queue group look-alike finding classes (see "Review" below). It is
+optional: `insightsd` works without it, and the groups simply stop growing.
+It listens on loopback port 9597 inside the pod, published nowhere, and is
+told where to find it by `EMBED_URL` in `insightsd`'s unit. **Its first
+start needs network access to Hugging Face**: it downloads the 37 MB model
+itself, into the `insights-models` volume, and every later start reads it
+from there. Expect it to report `starting` for a minute on that first start.
+It uses well under 100 MB of memory and needs no secret.
+
+The seventh container, `node-exporter`, reports the host's own CPU, memory, disk
 and network figures. It sits **outside** the pod, on the host's network, and
 listens on port 9100. That is what lets the firewall guard it: unlike a
 published pod port, it is an ordinary host service. It will not start without
@@ -268,6 +279,7 @@ router, service or middleware `dynamic.yaml` already names.
     systemctl daemon-reload
     systemctl start insights-pod.service
     systemctl start authd.service
+    systemctl start embedder.service
     systemctl start insightsd.service threatd.service sizingd.service
     systemctl start traefik.service
     systemctl start node-exporter.service
@@ -278,10 +290,10 @@ inside each unit is what starts them at boot.
 
 ### 8. Verify
 
-    systemctl is-active insights-pod authd insightsd threatd sizingd traefik node-exporter
+    systemctl is-active insights-pod authd embedder insightsd threatd sizingd traefik node-exporter
     podman ps --format '{{.Names}}\t{{.Status}}'
 
-The four services and `node-exporter` report `healthy`. The proxy reports only `Up` — its unit
+The four services, `embedder` and `node-exporter` report `healthy`. The proxy reports only `Up` — its unit
 carries no health check, so that is its correct steady state.
 
 Confirm every container actually joined the pod, because one that did not is a
@@ -390,6 +402,9 @@ depth. It never logs a credential: the model API key appears only as
 | `TEMPLATE_RETENTION` | how long a template survives with no fresh sighting (default `9600h`, 400 days). **The most sensitive of the three retentions** — this table is the gate's memory of what it has seen, so pruning it faster than a real recurring line recurs makes that line pay for a model call as if it were new |
 | `FINDING_RETENTION` | how long a stale finding survives (default `4320h`, 180 days). An open finding is never pruned at any age. Past this window a recurrence reads as a new finding rather than a reopen — a continuity cost only |
 | `ANALYSIS_RETENTION` | how long a cost-ledger row is kept (default `2160h`, 90 days). **This one destroys data permanently**: there is no rollup table, so `/cost` silently truncates its spend history at the cutoff |
+| `EMBED_URL` | base URL of the embedding sidecar that groups similar finding classes on `/review` (default empty: grouping off). The deployed unit sets `http://127.0.0.1:9597`. With it set and the sidecar down, everything else keeps working and `/review` just shows no new groups |
+| `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses anything else). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
+| `GROUP_INTERVAL` | how often the grouping pass runs (default `1m`); each run groups up to 200 ungrouped classes |
 | `MAINT_INTERVAL` | how often the housekeeping pass prunes those three tables (default `10m`). Each prune is internally batched, so running it often is cheap |
 
 ### `threatd`
@@ -594,10 +609,10 @@ generated unit.
 
 Stop everything, then remove the units:
 
-    systemctl stop node-exporter traefik insightsd threatd sizingd authd insights-pod
-    rm -f /etc/containers/systemd/{authd,insightsd,threatd,sizingd,traefik,node-exporter}.container
+    systemctl stop node-exporter traefik insightsd threatd sizingd embedder authd insights-pod
+    rm -f /etc/containers/systemd/{authd,insightsd,threatd,sizingd,traefik,node-exporter,embedder}.container
     rm -f /etc/containers/systemd/insights.pod
-    rm -f /etc/containers/systemd/{insights-logs,insights-threat,insights-sizing,traefik-acme}.volume
+    rm -f /etc/containers/systemd/{insights-logs,insights-threat,insights-sizing,insights-models,traefik-acme}.volume
     systemctl daemon-reload
 
 At this point nothing runs and nothing starts at boot, but the data is still
@@ -608,7 +623,7 @@ cost ledger, the blocklist and its allowlist with its audit trail, and the
 sizing history. None of it is recoverable and nothing else has a copy.
 
     podman pod rm -f insights                    # if the pod outlived its unit
-    podman volume rm insights-logs insights-threat insights-sizing traefik-acme
+    podman volume rm insights-logs insights-threat insights-sizing insights-models traefik-acme
 
 Then the configuration, the secrets and the images:
 
@@ -620,6 +635,7 @@ Then the configuration, the secrets and the images:
     done
     podman rmi docker.io/library/traefik:v3.7.13
     podman rmi quay.io/prometheus/node-exporter:v1.12.1
+    podman rmi ghcr.io/ggml-org/llama.cpp:server-b11429
 
 The firewall stays on and Cockpit stays off; both were changes to the host
 rather than to this deployment. To undo them:
@@ -922,7 +938,7 @@ the effective configuration, lives alongside it.
 | Page | What you're looking at |
 |---|---|
 | `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale) or severity. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here except those of a dismissed class; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
-| `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal or dismissed, or all but the dismissed ones. Click a column name to sort by it, click it again to reverse; the arrow marks the column in use, and the order survives filtering and every decision. The **Module** column shows the module of the class's latest finding, `(host)` for host-level logs, and "+N" when it names more — the class dialog lists them all. A long class name is cut short with "…"; hover for the whole of it. |
+| `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal or dismissed, or all but the dismissed ones. Similar classes are grouped and may carry a suggested decision ("Review" below). Click a column name to sort by it, click it again to reverse; the arrow marks the column in use, and the order survives filtering and every decision. The **Module** column shows the module of the class's latest finding, `(host)` for host-level logs, and "+N" when it names more — the class dialog lists them all. A long class name is cut short with "…"; hover for the whole of it. |
 | `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. |
 | `/logs/review/audit` | Every review decision, who made it and when. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
@@ -1280,6 +1296,34 @@ none can be taken back to "pending".
   The stored severity, and what the AI is told, do not change.
 - **Set docs** — a link to remediation documentation, returned to customers
   with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
+
+**Groups and suggestions.** About half of the classes waiting in the queue
+restate one already seen, worded differently by the AI or citing a slightly
+different log line. When the embedding sidecar is running (`EMBED_URL`), the
+server compares each new class's evidence — the log lines it is based on, never
+the AI's wording — with the first class of every existing group, and a class
+that is nearly identical (`REVIEW_GROUP_SIMILARITY`) joins that group. Groups
+form within about a minute of a class appearing. On `/review`:
+
+- A class in a group of two or more shows **group of N**. Click it to see the
+  group alone, whatever its classes' visibility (dismissed ones included).
+- If exactly one decision has been made among the group's other classes —
+  all delivered, or all kept internal, or all dismissed — a pending class
+  shows **Suggested: …** with how many similar classes were decided that way.
+  If they disagree, or none is decided, nothing is suggested.
+- On a group's page, **Deliver / Keep internal / Dismiss all pending in this
+  group** applies one decision to every class of the group still pending, each
+  recorded on `/review/audit` as its own decision with the detail
+  `group <anchor>`. Classes already decided are left alone.
+
+**A suggestion is only a hint.** Nothing is ever decided without someone
+pressing a button, and a group is formed by similarity, not by identity: in a
+trial on 1,259 real classes, grouping at `0.98` cut the decisions needed by
+about 38%, and roughly 8% of inherited suggestions were a near-miss — a
+related condition in the same component, never an unrelated one (judged by
+an AI proxy, not by operators' own labels). Skim a group before deciding it
+as a whole. Groups are also kept apart by the model that made them: if the
+model is ever replaced, classes are grouped again from scratch.
 
 None of this changes what the AI is shown or when the server pays for a
 call: that is the gate's business, and nothing an operator decides here

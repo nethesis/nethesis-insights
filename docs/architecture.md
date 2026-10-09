@@ -43,6 +43,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
   - [What the prompt carries](#what-the-prompt-carries)
 - [Cost control: the ceiling](#cost-control-the-ceiling)
 - [Review: per finding class](#review-per-finding-class)
+  - [Grouping and suggested decisions](#grouping-and-suggested-decisions)
 - [Degradation and failure modes](#degradation-and-failure-modes)
 - [Determinism](#determinism)
 - [LLM integration](#llm-integration)
@@ -188,12 +189,17 @@ model                       no deps; imported by everything
 fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() — logs only
 threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohort keying
+grouping                    PURE — review grouping: embedded text, cosine, anchor
+                             rule, suggestion rule — logs only
 llm  queue  budget          logs only; interfaces where I/O is needed
+embed                       logs only; client for the embedding sidecar
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 baseline                    fleet-sizing cohort pass; same shape as blocklist
 maint                       insightsd's housekeeping pass; same shape again,
                              depends only on store/logs
+classgroup                  insightsd's review-grouping pass; same shape again,
+                             depends on grouping, embed and store/logs
 
 store/logs  store/threat  store/sizing   one store package per pipeline,
                                           each its own SQLite file
@@ -1011,6 +1017,7 @@ without a goroutine to leak.
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every operator decision. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
 | `class_decisions` | Append-only audit trail of operator actions on classes: actor, action, detail, the class's `first_prompt_version`, time. Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
+| `class_groups` | One row per grouped class: `anchor_key` (the group's first class; the anchor's own row points at itself with similarity 1), the cosine it joined at, the `threshold` in force then, the `model` the sidecar reported, and the `vector` as a JSON array in `TEXT`. Written only by the grouping pass; never read by anything that feeds the prompt. Orphan rows are deleted by `PruneClasses`. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
@@ -1870,6 +1877,80 @@ Rules that are not visible from the code:
   and an undecided class is pruned once its findings are (see "Maintenance
   pass"), so an old version's pending count shrinks.
 
+### Grouping and suggested decisions
+
+Roughly half of the pending classes on the dev fleet restate an earlier one
+(1,259 classes measured), so the queue asks the operator the same question
+repeatedly. Review grouping clusters similar classes on `/review` and shows
+the decision the group already carries. It is **advice to the operator and
+nothing else**; no part of it reaches the gate, the prompt, a fingerprint or
+`OpenFindings`, and `TestDecisionsNeverReachThePrompt` keeps passing unchanged.
+
+The pieces: `internal/grouping` (pure), `internal/embed` (client for
+llama-server's `/v1/embeddings`), `internal/classgroup` (the pass),
+`internal/store/logs/groups.go` (`class_groups`, `UngroupedClasses`,
+`GroupAnchors`, `SetClassGroup`, `SetGroupVisibility`, `attachGroups`), and
+the `deploy/quadlet/embedder.container` sidecar (bge-small, 384-d, port
+9597 in the pod's namespace).
+
+Rules that are not visible from the code:
+
+- **Embed the evidence, never the model's prose.** `grouping.Text` is
+  `modules: <m1>,<m2>` plus the cited evidence lines, cut to `MaxChars` =
+  1500 **bytes** on a UTF-8 rune boundary (llama-server answers an over-long
+  input with HTTP 500 rather than truncating; `embed` additionally retries a
+  non-2xx once at 1000 and then 600 bytes, skipping a cut that would not
+  shorten, and never retries any other error). Embedding the evidence beat
+  embedding the title and summary for every embedder tried (AUC 0.92 vs
+  0.82-0.87), and the model's prose can mislabel a finding the evidence does
+  not. bge-small was as good as the larger models and the sidecar peaked at
+  83 MB, about 40 ms a class on two CPUs. The empty module is kept: it is a
+  real bucket.
+- **Group by anchor, not by nearest member.** A class joins the group whose
+  *anchor* (its first class) has the highest cosine at or above
+  `REVIEW_GROUP_SIMILARITY`; otherwise it becomes a new anchor. Joining the
+  nearest member chains: A resembles B, B resembles C, and a group drifts
+  until its ends have nothing in common. Anchors never move, so a group's
+  extent is fixed by one vector. Ties go to the earlier anchor.
+- **Suggestion rule.** Among a group's classes, take the set of decided
+  visibilities (`customer`, `operator`, `dismissed`). Exactly one distinct
+  value is suggested to the group's `pending` classes, with the count of
+  classes that carry it; none or several suggest nothing. A conflicting group
+  is a signal, not a vote to be settled by majority.
+- **Never applied without a POST.** The pass writes only `class_groups`; it
+  never calls a `SetClass*` method and never touches `finding_classes` or
+  `class_decisions`. `POST /review/group` (in `writableRoutes`, authenticated
+  and cross-site-checked like every write) applies one visibility to every
+  *pending* class of one group in one transaction, one `class_decisions` row
+  per class with detail `group <anchor>`; already-decided classes are not
+  touched.
+- **Models are never mixed.** Every stored vector records the model name the
+  sidecar *reports* (the `--alias` in the unit), not one configured on this
+  side. Anchors are read for the current model only, a class whose row has
+  another model counts as ungrouped and is re-embedded (upsert), and a pass
+  that sees the model change underneath it stops. Cosine between two models'
+  vectors means nothing.
+- **The threshold is recorded per row and not re-applied.** Each row keeps the
+  threshold it was grouped under; changing `REVIEW_GROUP_SIMILARITY` affects
+  classes grouped afterwards only, so an existing group never reshuffles
+  under an operator who has partly decided it.
+- **Degrades, never fails.** Off when `EMBED_URL` is empty. The pass probes the
+  sidecar first; if it is down, or fails mid-pass, it logs and ends, and
+  analysis, ingest and every page carry on. Every routing decision is logged
+  with its signals (best anchor, similarity, threshold, model, text length).
+- **The measured limit.** At 0.98 the offline trial saved about 38% of review
+  decisions, with about 8% of inherited suggestions a near-miss: a related
+  condition in the same component, never an unrelated one. That was judged by
+  an LLM proxy, not by operators' own labels, which is why the suggestion is
+  shown and never applied.
+- **Embeddings are not used for the gate's line similarity, and must not be.**
+  On 129k real template pairs differing in one or two tokens, 60% of the pairs
+  differing by a real word scored 0.98 or higher; nethcti `authorization … in`
+  against `… out` scored 1.000. One changed word barely moves a long line's
+  vector, whereas the gate's rule is exactly "only identifier-shaped tokens
+  may differ" and never a plain word. A wrong merge here costs a review
+  decision; in the gate it would silently swallow a novel line.
+
 ## Degradation and failure modes
 
 Every dependency failure is designed to cost one capability rather than the
@@ -1887,6 +1968,7 @@ run.
 | per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates are still recorded |
 | consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
 | threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
+| embedding sidecar (`EMBED_URL`) down, slow or on a changed model | the grouping pass logs and ends; no new groups form and nothing else changes — existing groups and suggestions still show, and analysis, ingest and every page are unaffected. A changed model leaves old rows ungrouped until they are re-embedded under it |
 | process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |
 
 **The thundering herd is the one failure that is fleet-wide by construction.**
@@ -2106,7 +2188,7 @@ buffered bundles were already acknowledged to an edge that won't resend them
 and must still be processed before exit — and only then cancel and wait for
 that binary's own background pass(es) (the consensus loop in `threatd`, the
 cohort pass in `sizingd`, and in `insightsd` both the queue drain *and* the
-`maint` housekeeping loop, the latter stopped last of everything). Every pass
+`maint` housekeeping loop and the class-grouping loop, the latter stopped last of everything). Every pass
 loop goes last because none of them holds acknowledged work: a cancelled
 consensus or cohort pass simply leaves the previous snapshot in place, and a
 cancelled maintenance pass simply leaves whatever it has not pruned yet for
