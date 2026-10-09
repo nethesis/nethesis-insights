@@ -1,0 +1,53 @@
+#
+# Copyright (C) 2026 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+[Unit]
+Description=Embedding sidecar (review grouping)
+# No Requires=/Wants= on this unit from insightsd.container, and none here on
+# anything else: insightsd degrades without the sidecar (the grouping pass
+# logs and skips, every other path is untouched), so a sidecar that is down
+# or still downloading its model must never hold the pipeline back.
+
+[Container]
+# Pinned, like traefik.container: a third-party image nobody here builds, so
+# it has no Pull= line and install step 3 pulls it. It ships curl, which the
+# health check below relies on.
+Image=ghcr.io/ggml-org/llama.cpp:server-b11429
+ContainerName=embedder
+# No PublishPort: llama-server listens on loopback inside the pod's shared
+# namespace, and only insightsd (EMBED_URL) talks to it. It has no
+# authentication of its own, which is exactly why it must stay unpublished.
+Pod=insights.pod
+# llama-server downloads the model itself on the FIRST start (about 37 MB from
+# Hugging Face, so that start needs outbound network) into LLAMA_CACHE, and
+# every later start reads it from this volume. --alias is the name the
+# /v1/embeddings response reports as "model", and insightsd stores it beside
+# every vector: change the model and the alias together, and the old vectors
+# are then re-embedded rather than compared with the new ones.
+Volume=insights-models.volume:/models
+Environment=LLAMA_CACHE=/models
+# -c/-b/-ub 512 is the model's own context: llama-server refuses a longer
+# input with HTTP 500 instead of truncating, which is why insightsd cuts the
+# text it sends. --pooling cls is what bge models are trained for.
+Exec=--hf-repo ggml-org/bge-small-en-v1.5-Q8_0-GGUF --hf-file bge-small-en-v1.5-q8_0.gguf --alias bge-small-en-v1.5-q8_0 --embeddings --pooling cls -c 512 -b 512 -ub 512 -t 2 --host 127.0.0.1 --port 9597 --no-webui
+# Measured peak is 83 MB; this is a ceiling against a runaway, not a budget.
+PodmanArgs=--memory=512m
+# Each unit's OWN port: 9597 is this container's alone in the shared namespace.
+HealthCmd=curl -fsS http://127.0.0.1:9597/health || exit 1
+HealthInterval=30s
+HealthRetries=3
+# The first start downloads the model before /health answers.
+HealthStartPeriod=60s
+
+[Service]
+Restart=always
+# Without this, Restart=always hits systemd's default 5-in-10s start
+# limit within half a second of any transient failure and the unit enters
+# `failed` permanently -- needing systemctl reset-failed on a remote box
+# nobody is watching.
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
