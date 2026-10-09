@@ -25,6 +25,8 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	logsapi "github.com/nethesis/nethesis-insights/internal/api/logs"
 	"github.com/nethesis/nethesis-insights/internal/budget"
+	"github.com/nethesis/nethesis-insights/internal/classgroup"
+	"github.com/nethesis/nethesis-insights/internal/embed"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/maint"
@@ -202,6 +204,19 @@ func main() {
 	// whole days and cannot answer differently more often.
 	maintInterval := svc.GetenvDuration("MAINT_INTERVAL", 10*time.Minute)
 
+	// Review grouping (internal/classgroup): base URL of the embedding
+	// sidecar. Empty turns grouping off; with it set and the sidecar down,
+	// everything else keeps working.
+	embedURL := svc.Getenv("EMBED_URL", "")
+	// Cosine a class needs to its group's anchor to join that group.
+	reviewGroupSimilarity := svc.GetenvFloat("REVIEW_GROUP_SIMILARITY", 0.98)
+	// How often the grouping pass runs.
+	groupInterval := svc.GetenvDuration("GROUP_INTERVAL", time.Minute)
+	if reviewGroupSimilarity <= 0 || reviewGroupSimilarity > 1 {
+		slog.Error("invalid REVIEW_GROUP_SIMILARITY: must be above 0 and at most 1", "value", reviewGroupSimilarity)
+		os.Exit(1)
+	}
+
 	if gateSimilarity <= 0 || gateSimilarity > 1 {
 		slog.Error("invalid GATE_SIMILARITY: must be above 0 and at most 1", "value", gateSimilarity)
 		os.Exit(1)
@@ -256,7 +271,11 @@ func main() {
 	httpMetrics := metrics.NewHTTP(reg)
 	llmMetrics := metrics.NewLLM(reg)
 	budgetMetrics := metrics.NewBudget(reg, budget.SuppressedSystemCap)
-	passMetrics := metrics.NewPass(reg, maint.PassName)
+	passNames := []string{maint.PassName}
+	if embedURL != "" {
+		passNames = append(passNames, classgroup.PassName)
+	}
+	passMetrics := metrics.NewPass(reg, passNames...)
 	windowMetrics := metrics.NewResults(reg, "windows_total",
 		"Fresh bundle windows, by what the gate decided: called, gated_out or budget.",
 		analyzer.WindowResults...)
@@ -361,6 +380,9 @@ func main() {
 		{Name: "FINDING_RETENTION", Value: findingRetention.String()},
 		{Name: "ANALYSIS_RETENTION", Value: analysisRetention.String()},
 		{Name: "MAINT_INTERVAL", Value: maintInterval.String()},
+		{Name: "EMBED_URL", Value: embedURL},
+		{Name: "REVIEW_GROUP_SIMILARITY", Value: strconv.FormatFloat(reviewGroupSimilarity, 'f', -1, 64)},
+		{Name: "GROUP_INTERVAL", Value: groupInterval.String()},
 	}
 
 	// BuildInfo reads runtime/debug once here, not per request. q satisfies
@@ -387,6 +409,9 @@ func main() {
 		"gate_min_new_templates", gateMinNewTemplates,
 		"gate_similarity", gateSimilarity,
 		"gate_silence", gateSilence.String(),
+		"embed_url_set", embedURL != "",
+		"review_group_similarity", reviewGroupSimilarity,
+		"group_interval", groupInterval.String(),
 		"prompt_max_ambient", promptMaxAmbient,
 		"llm_max_concurrency", llmMaxConcurrency,
 		"llm_max_calls_per_system_per_day", llmMaxCallsPerSystemPerDay,
@@ -423,6 +448,21 @@ func main() {
 	maintDone := svc.RunPassLoop(maintCtx, maint.PassName,
 		svc.Then(maintRunner, logGauges(s, storeGauges)), maintInterval, passMetrics)
 
+	// The grouping loop exists only when an embedding sidecar is configured.
+	// It holds no acknowledged work, so it is stopped and waited on like the
+	// maint loop.
+	stopGroup := func() {}
+	closed := make(chan struct{})
+	close(closed)
+	var groupDone <-chan struct{} = closed
+	if embedURL != "" {
+		groupRunner := classgroup.New(s, embed.New(embedURL, 10*time.Second),
+			classgroup.Config{Threshold: reviewGroupSimilarity, Batch: 200})
+		var groupCtx context.Context
+		groupCtx, stopGroup = context.WithCancel(context.Background())
+		groupDone = svc.RunPassLoop(groupCtx, classgroup.PassName, groupRunner, groupInterval, passMetrics)
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -450,6 +490,8 @@ func main() {
 	// sizingd give their own housekeeping loops.
 	stopMaint()
 	<-maintDone
+	stopGroup()
+	<-groupDone
 	slog.Info("maintenance loop stopped")
 }
 
