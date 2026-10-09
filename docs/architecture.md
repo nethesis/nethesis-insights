@@ -1786,7 +1786,7 @@ nothing is copied onto `findings`.
 | Route | Store method | Effect |
 |---|---|---|
 | `/review/deliver`, `/review/internal`, `/review/dismiss` | `SetClassVisibility` | `visibility = customer`/`operator`/`dismissed`. Never back to `pending` (`ErrInvalidVisibility`) |
-| `/review/group` | `SetGroupVisibility` | one visibility applied to every *pending* class of the group, one `class_decisions` row each (detail `group <anchor>`) |
+| `/review/group` | `SetGroupVisibility` | one visibility applied to the `member` keys the form posted (the pending rows the page showed) that are still `pending` in that group, one `class_decisions` row each (detail `group <anchor>`); 1 to 200 members, a member not in the group or already decided is skipped |
 | `/review/security` | `SetClassSecurity` | the `security` tag, `on`/`off` — nothing else is accepted |
 | `/review/severity` | `SetClassSeverity` | `severity_override`, `""` clears |
 | `/review/doc-ref` | `SetClassDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
@@ -1903,8 +1903,9 @@ Rules that are not visible from the code:
   `modules: <m1>,<m2>` plus the cited evidence lines, cut to `MaxChars` =
   1500 **bytes** on a UTF-8 rune boundary (llama-server answers an over-long
   input with HTTP 500 rather than truncating; `embed` additionally retries a
-  non-2xx once at 1000 and then 600 bytes, skipping a cut that would not
-  shorten, and never retries any other error). Embedding the evidence beat
+  non-2xx at 1000, then 600, then 300 bytes, skipping a cut that would not
+  shorten, and never retries any other error; if all four sizes are refused it
+  returns `embed.ErrRejected`, naming the status and the sizes tried). Embedding the evidence beat
   embedding the title and summary for every embedder tried (AUC 0.92 vs
   0.82-0.87), and the model's prose can mislabel a finding the evidence does
   not. bge-small was as good as the larger models and the sidecar peaked at
@@ -1924,10 +1925,16 @@ Rules that are not visible from the code:
 - **Never applied without a POST.** The pass writes only `class_groups`; it
   never calls a `SetClass*` method and never touches `finding_classes` or
   `class_decisions`. `POST /review/group` (in `writableRoutes`, authenticated
-  and cross-site-checked like every write) applies one visibility to every
-  *pending* class of one group in one transaction, one `class_decisions` row
-  per class with detail `group <anchor>`; already-decided classes are not
-  touched.
+  and cross-site-checked like every write) applies one visibility to the
+  classes **the operator was shown**: the form posts the keys of the pending
+  rows it displays as repeated `member` fields (capped at `reviewLimit`), and
+  the store changes only those that are in the group and still `pending`, in
+  one transaction, one `class_decisions` row per class with detail `group
+  <anchor>`. Deciding "every pending class of the group" at POST time would
+  decide classes that joined after the page rendered (the pass runs every
+  minute, and a security class could be delivered unseen) or that the view
+  hid, so it does not. Already-decided or foreign members are skipped
+  silently.
 - **Models are never mixed.** Every stored vector records the model name the
   sidecar *reports* (the `--alias` in the unit), not one configured on this
   side. Anchors are read for the current model only, a class whose row has
@@ -1940,7 +1947,12 @@ Rules that are not visible from the code:
   under an operator who has partly decided it.
 - **Degrades, never fails.** Off when `EMBED_URL` is empty. The pass probes the
   sidecar first; if it is down, or fails mid-pass, it logs and ends, and
-  analysis, ingest and every page carry on. Every routing decision is logged
+  analysis, ingest and every page carry on. A class the sidecar refuses at
+  every size (`ErrRejected`; 25 of 1,259 in the trial needed a cut) is the
+  exception: the pass logs a warning, skips it and carries on, because
+  `UngroupedClasses` orders oldest first and ending the pass would make one
+  such class block every later one forever. It stays ungrouped and is retried
+  next pass. A cancelled context ends the pass without a warning. Every routing decision is logged
   with its signals (best anchor, similarity, threshold, model, text length).
 - **The measured limit.** At 0.98 the offline trial saved about 38% of review
   decisions, with about 8% of inherited suggestions a near-miss: a related
@@ -1972,7 +1984,7 @@ run.
 | per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates are still recorded |
 | consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
 | threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
-| embedding sidecar (`EMBED_URL`) down, slow or on a changed model | the grouping pass logs and ends; no new groups form and nothing else changes — existing groups and suggestions still show, and analysis, ingest and every page are unaffected. A changed model leaves old rows ungrouped until they are re-embedded under it |
+| embedding sidecar (`EMBED_URL`) down, slow or on a changed model | the grouping pass logs and ends; no new groups form and nothing else changes — existing groups and suggestions still show, and analysis, ingest and every page are unaffected. A changed model does not unlist old rows: they keep displaying their group and voting until re-embedded under the new model, and a decided class whose findings were all pruned cannot be re-embedded, so its old-model row stays and may still vote. This arises only after a deliberate model change, and suggestions are confirm-only. A class the sidecar rejects at every size is skipped and retried next pass |
 | process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |
 
 **The thundering herd is the one failure that is fleet-wide by construction.**

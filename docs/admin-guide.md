@@ -403,8 +403,8 @@ depth. It never logs a credential: the model API key appears only as
 | `FINDING_RETENTION` | how long a stale finding survives (default `4320h`, 180 days). An open finding is never pruned at any age. Past this window a recurrence reads as a new finding rather than a reopen — a continuity cost only |
 | `ANALYSIS_RETENTION` | how long a cost-ledger row is kept (default `2160h`, 90 days). **This one destroys data permanently**: there is no rollup table, so `/cost` silently truncates its spend history at the cutoff |
 | `EMBED_URL` | base URL of the embedding sidecar that groups similar finding classes on `/review` (default empty: grouping off). The deployed unit sets `http://127.0.0.1:9597`. With it set and the sidecar down, everything else keeps working and `/review` just shows no new groups |
-| `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses a number outside that range, but a value that is not a number, such as `0,98`, is silently replaced by the default). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
-| `GROUP_INTERVAL` | how often the grouping pass runs (default `1m`); each run groups up to 200 ungrouped classes |
+| `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses a number outside that range, or `NaN`, but a value that is not a number, such as `0,98`, is silently replaced by the default). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
+| `GROUP_INTERVAL` | how often the grouping pass runs (default `1m`; must be positive when `EMBED_URL` is set, startup refuses otherwise); each run groups up to 200 ungrouped classes |
 | `MAINT_INTERVAL` | how often the housekeeping pass prunes those three tables (default `10m`). Each prune is internally batched, so running it often is cheap |
 
 ### `threatd`
@@ -577,7 +577,19 @@ The fleet-sizing reporter does not exist yet — see "Fleet sizing" below.
 
     systemctl restart authd insightsd threatd sizingd
 
-That is the whole upgrade. The four units carry `Pull=newer`, so each start
+That is the whole upgrade for an install that already has every unit. A
+release that **adds units** needs more. This one adds the embedding sidecar, so
+an existing install does, once:
+
+    podman pull ghcr.io/ggml-org/llama.cpp:server-b11429
+    install -m 644 deploy/quadlet/embedder.container deploy/quadlet/insights-models.volume \
+                   deploy/quadlet/insightsd.container /etc/containers/systemd/
+    systemctl daemon-reload
+    systemctl start embedder.service
+    systemctl restart insightsd.service
+
+The first start of `embedder` needs outbound network to download the model (see
+"Install"). After that the four pipeline units carry `Pull=newer`, so each start
 compares its `:latest` tag against the registry and pulls when the digest has
 moved; when it has not, the check costs about half a second per container.
 When the registry is unreachable the cached image is used, so a boot with no
@@ -734,7 +746,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
 | `threatd_blocklist_entries` | `threatd` | addresses in the published feed — what nodes download, after the allowlist and `BLOCKLIST_MAX_ENTRIES` |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
-| `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs |
+| `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
 | `authd_http_requests_total{route="/auth/service/{service}",status}` | `authd` | entitlement checks by outcome; the `403` share is how much of the fleet is asking for Threat Shield without holding it |
 
@@ -1307,7 +1319,10 @@ different log line. When the embedding sidecar is running (`EMBED_URL`), the
 server compares each new class's evidence — the log lines it is based on, never
 the AI's wording — with the first class of every existing group, and a class
 that is nearly identical (`REVIEW_GROUP_SIMILARITY`) joins that group. Groups
-form within about a minute of a class appearing. On `/review`:
+form within about a minute of a class appearing. If the sidecar refuses a class
+even at the shortest cut (four sizes are tried: the full text, then 1000, 600
+and 300 bytes), the server skips that class, logs a warning and retries it on
+the next run; it never holds up the classes behind it. On `/review`:
 
 - A class in a group of two or more shows **group of N**. Click it to see the
   group alone, whatever its classes' visibility (dismissed ones included).
@@ -1316,9 +1331,11 @@ form within about a minute of a class appearing. On `/review`:
   shows **Suggested: …** with how many similar classes were decided that way.
   If they disagree, or none is decided, nothing is suggested.
 - On a group's page, **Deliver / Keep internal / Dismiss all pending in this
-  group** applies one decision to every class of the group still pending, each
+  group** applies one decision to the pending classes listed on the page, each
   recorded on `/review/audit` as its own decision with the detail
-  `group <anchor>`. Classes already decided are left alone.
+  `group <anchor>`. A class that joined the group after you opened the page,
+  or that is hidden by the current view, is not decided: reload to see it.
+  Classes already decided are left alone.
 
 **A suggestion is only a hint.** Nothing is ever decided without someone
 pressing a button, and a group is formed by similarity, not by identity: in a
