@@ -66,7 +66,7 @@ func TestCanonicalTemplateCollapsesLeaks(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ca, cb := CanonicalTemplate(tc.a), CanonicalTemplate(tc.b)
+			ca, cb := CanonicalTemplate("", tc.a), CanonicalTemplate("", tc.b)
 			if ca != cb {
 				t.Errorf("templates did not collapse:\n a=%q\n b=%q", ca, cb)
 			}
@@ -116,7 +116,7 @@ func TestCanonicalTemplateKeepsDistinctConditionsApart(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if ca, cb := CanonicalTemplate(tc.a), CanonicalTemplate(tc.b); ca == cb {
+			if ca, cb := CanonicalTemplate("", tc.a), CanonicalTemplate("", tc.b); ca == cb {
 				t.Errorf("templates were merged but must stay distinct: %q", ca)
 			}
 		})
@@ -130,21 +130,21 @@ func TestCanonicalTemplateKeepsPriorityMarker(t *testing.T) {
 		`<3> [sshd] failed for user <USER>`,
 		`<6> [systemd] Started something`,
 	} {
-		if got := CanonicalTemplate(in); got[:3] != in[:3] {
+		if got := CanonicalTemplate("", in); got[:3] != in[:3] {
 			t.Errorf("priority marker rewritten: %q -> %q", in, got)
 		}
 	}
 
 	// A line without a marker is canonicalized whole rather than rejected.
-	if got := CanonicalTemplate("plain line with 3 digits"); got != "plain line with <NUM> digits" {
+	if got := CanonicalTemplate("", "plain line with 3 digits"); got != "plain line with <NUM> digits" {
 		t.Errorf("unmarked line: got %q", got)
 	}
 }
 
 func TestCanonicalTemplateIsIdempotent(t *testing.T) {
 	in := `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.3%); 0 removed; write=4.5 s`
-	once := CanonicalTemplate(in)
-	if twice := CanonicalTemplate(once); twice != once {
+	once := CanonicalTemplate("", in)
+	if twice := CanonicalTemplate("", once); twice != once {
 		t.Errorf("not idempotent:\n once=%q\ntwice=%q", once, twice)
 	}
 }
@@ -209,10 +209,10 @@ func TestModuleFamily(t *testing.T) {
 func TestCanonicalTemplateCollapsesBracketedInstances(t *testing.T) {
 	a := `<4> [agent@openldap15] Signal "user <USER> signal <NUM>" caught: shutdown started.`
 	b := `<4> [agent@openldap55] Signal "user <USER> signal <NUM>" caught: shutdown started.`
-	if CanonicalTemplate(a) != CanonicalTemplate(b) {
-		t.Errorf("instances not collapsed:\n%q\n%q", CanonicalTemplate(a), CanonicalTemplate(b))
+	if CanonicalTemplate("", a) != CanonicalTemplate("", b) {
+		t.Errorf("instances not collapsed:\n%q\n%q", CanonicalTemplate("", a), CanonicalTemplate("", b))
 	}
-	if got := CanonicalTemplate(a); !strings.Contains(got, "[agent@openldap]") {
+	if got := CanonicalTemplate("", a); !strings.Contains(got, "[agent@openldap]") {
 		t.Errorf("identifier lost its family: %q", got)
 	}
 
@@ -224,11 +224,88 @@ func TestCanonicalTemplateCollapsesBracketedInstances(t *testing.T) {
 		`<6> [sshd-session] Connection closed by <IP> port <NUM>`,
 		`<6> [systemd-logind] Removed session <NUM>.`,
 	} {
-		if got := CanonicalTemplate(in); got != CanonicalTemplate(got) {
+		if got := CanonicalTemplate("", in); got != CanonicalTemplate("", got) {
 			t.Errorf("not idempotent: %q -> %q", in, got)
 		}
 	}
-	if got := CanonicalTemplate(`<3> [x] [php7:error] boom`); !strings.Contains(got, "[php7:error]") {
+	if got := CanonicalTemplate("", `<3> [x] [php7:error] boom`); !strings.Contains(got, "[php7:error]") {
 		t.Errorf("php7:error was rewritten: %q", got)
+	}
+}
+
+// NS8 writes the instance into the text of many lines, so one warning became
+// one finding class per instance number: 78 classes for this nethvoice line on
+// the dev fleet on 2026-10-09.
+func TestCanonicalTemplateCollapsesOwnInstanceInText(t *testing.T) {
+	cases := []struct{ module, a, b, want string }{
+		{
+			"nethvoice43",
+			`<4> [agent@nethvoice] <HOST>: domain <HOST> should not be used by nethvoice43. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`,
+			`<4> [agent@nethvoice] <HOST>: domain <HOST> should not be used by nethvoice35. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`,
+			"should not be used by nethvoice.",
+		},
+		// The syslog identifier need not name the module: the line's module is
+		// what decides, not its tag.
+		{
+			"openldap14",
+			`<4> [api-moduled] <HOST>: domain <HOST> should not be used by openldap14. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`,
+			`<4> [api-moduled] <HOST>: domain <HOST> should not be used by openldap39. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`,
+			"should not be used by openldap.",
+		},
+		{
+			"ejabberd",
+			`<6> [systemd] session opened for user <USER> by ejabberd2(uid=<NUM>)`,
+			`<6> [systemd] session opened for user <USER> by ejabberd7(uid=<NUM>)`,
+			"by ejabberd(uid=",
+		},
+		{
+			"nethvoice-proxy4",
+			`<3> [agent@nethvoice-proxy] cannot reach nethvoice-proxy4 at <HOST>`,
+			`<3> [agent@nethvoice-proxy] cannot reach nethvoice-proxy<NUM> at <HOST>`,
+			"cannot reach nethvoice-proxy at",
+		},
+	}
+	for _, tc := range cases {
+		ca, cb := CanonicalTemplate(tc.module, tc.a), CanonicalTemplate(tc.module, tc.b)
+		if ca != cb {
+			t.Errorf("instances not collapsed:\n%q\n%q", ca, cb)
+		}
+		if !strings.Contains(ca, tc.want) {
+			t.Errorf("want %q in %q", tc.want, ca)
+		}
+		if again := CanonicalTemplate(tc.module, ca); again != ca {
+			t.Errorf("not idempotent: %q -> %q", ca, again)
+		}
+		// A family is a fixed point of ModuleFamily, and system_templates
+		// stores the family, so the stored key must come out the same.
+		if f := CanonicalTemplate(ModuleFamily(tc.module), tc.a); f != ca {
+			t.Errorf("instance and family disagree:\n%q\n%q", ca, f)
+		}
+	}
+}
+
+// Only the emitting module's own family is rewritten. A word that merely
+// looks like an instance id may be a version or a protocol, and another
+// module's instance cannot be told apart from one without a list of modules.
+func TestCanonicalTemplateKeepsOtherInstanceLikeWords(t *testing.T) {
+	cases := []struct{ module, in string }{
+		// Host bucket: no family to match.
+		{"", `<3> [agent@cluster] Module instance "nethvoice12" update failed with code <NUM>`},
+		// Another module's instance.
+		{"loki1", `<3> [agent@loki] cannot query nethvoice12`},
+		// Words that look like instance ids but are not this module's.
+		{"nethvoice3", `<3> [freepbx] [php7:error] rfc4733 payload on http2`},
+		// The family as a prefix of a longer word is not an instance.
+		{"nethvoice3", `<3> [agent@nethvoice] nethvoice-proxy4 is unreachable`},
+		{"mail1", `<3> [postfix] mailbox2 is full`},
+		{"mail1", `<3> [postfix] mail2x relay`},
+		// A family that still holds a digit is not an image name.
+		{"11", `<3> [x] value 112 seen`},
+	}
+	for _, tc := range cases {
+		want := CanonicalTemplate("", tc.in)
+		if got := CanonicalTemplate(tc.module, tc.in); got != want {
+			t.Errorf("module %q rewrote more than its own instance:\n in: %q\ngot: %q\nwant: %q", tc.module, tc.in, got, want)
+		}
 	}
 }

@@ -162,7 +162,7 @@ func Select(b model.Bundle, sel Selection) []Line {
 	grouped := map[key]*Line{}
 	var order []key
 	for _, t := range b.Templates {
-		k := key{model.ModuleFamily(t.ModuleID), t.Priority, model.CanonicalTemplate(t.Template)}
+		k := key{model.ModuleFamily(t.ModuleID), t.Priority, model.CanonicalTemplate(t.ModuleID, t.Template)}
 		line, ok := grouped[k]
 		if !ok {
 			cp := t
@@ -342,12 +342,15 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 		// match on. Printing only the title left it guessing, and a
 		// differently-worded restatement then arrived as a new finding.
 		//
-		// The lookup is by canonical text, not by exact text: the finding was
+		// The lookup is by canonical key, not by exact text: the finding was
 		// raised from whichever variant the collector shipped that day, and
-		// this window may carry a different spelling of the same line.
+		// this window may carry a different spelling of the same line. The
+		// key carries the module because canonicalization depends on it; a
+		// stored evidence line does not say which of the finding's modules
+		// it came from, so each one is tried.
 		idByText := make(map[string]string, len(lines))
 		for i, l := range lines {
-			canon := model.CanonicalTemplate(l.Template.Template)
+			canon := model.CanonicalKey(l.Template.ModuleID, l.Template.Template)
 			if _, seen := idByText[canon]; !seen {
 				idByText[canon] = TemplateID(i)
 			}
@@ -361,9 +364,11 @@ func Render(b model.Bundle, open []model.Finding, sel Selection) string {
 			ids := make([]string, 0, len(f.Evidence))
 			seen := map[string]bool{}
 			for _, ev := range f.Evidence {
-				if id, ok := idByText[model.CanonicalTemplate(ev)]; ok && !seen[id] {
-					seen[id] = true
-					ids = append(ids, id)
+				for _, m := range f.Modules {
+					if id, ok := idByText[model.CanonicalKey(m, ev)]; ok && !seen[id] {
+						seen[id] = true
+						ids = append(ids, id)
+					}
 				}
 			}
 			if len(ids) > 0 {

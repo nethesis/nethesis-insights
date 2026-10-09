@@ -23,8 +23,8 @@ import (
 //
 // This is applied only on the identity path; the template text stored on the
 // finding and shown to the operator is never rewritten.
-func Normalize(template string) string {
-	return model.CanonicalTemplate(template)
+func Normalize(moduleID, template string) string {
+	return model.CanonicalTemplate(moduleID, template)
 }
 
 // EvidenceKey derives the stable identity input from the templates a model cited.
@@ -60,7 +60,7 @@ func EvidenceKey(cited []model.Template) []string {
 	normalized := make([]model.Template, len(cited))
 	copy(normalized, cited)
 	for i := range normalized {
-		normalized[i].Template = Normalize(normalized[i].Template)
+		normalized[i].Template = Normalize(normalized[i].ModuleID, normalized[i].Template)
 	}
 
 	sort.Slice(normalized, func(i, j int) bool {

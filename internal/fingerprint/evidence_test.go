@@ -115,7 +115,7 @@ func TestNormalizeIsNarrow(t *testing.T) {
 		"connection from (us/<NUM>)",
 		"module (ABC/<NUM>) failed",
 	} {
-		if got := Normalize(s); got != s {
+		if got := Normalize("", s); got != s {
 			t.Fatalf("Normalize over-reached on %q: got %q", s, got)
 		}
 	}
@@ -125,8 +125,8 @@ func TestNormalizeIsNarrow(t *testing.T) {
 // collector left literal no longer splits a finding's identity. This is the
 // behaviour change the version bump exists for.
 func TestNormalizeCollapsesCollectorLeaks(t *testing.T) {
-	a := Normalize("<3> [db] checkpoint complete: wrote <NUM> buffers (0.3%); 0 recycled")
-	b := Normalize("<3> [db] checkpoint complete: wrote <NUM> buffers (2.7%); 4 recycled")
+	a := Normalize("", "<3> [db] checkpoint complete: wrote <NUM> buffers (0.3%); 0 recycled")
+	b := Normalize("", "<3> [db] checkpoint complete: wrote <NUM> buffers (2.7%); 4 recycled")
 	if a != b {
 		t.Fatalf("leaked fields still split identity:\n a=%q\n b=%q", a, b)
 	}
@@ -171,5 +171,20 @@ func TestCountryVariantsUsePrimaryNotBucket(t *testing.T) {
 	other := EvidenceKey([]model.Template{tpl("crowdsec1", 3, "something else on <IP>")})
 	if got[0] == other[0] {
 		t.Fatalf("distinct conditions in one bucket collapsed: %q", got[0])
+	}
+}
+
+// One NS8 warning names its own instance in the text. Keyed on the raw
+// instance number it split into one review class per instance -- 78 on the
+// dev fleet on 2026-10-09 -- each to be decided separately.
+func TestClassIgnoresOwnInstanceInText(t *testing.T) {
+	line := func(n string) []model.Template {
+		return []model.Template{tpl("nethvoice", 4,
+			`<4> [agent@nethvoice] <HOST>: domain <HOST> should not be used by nethvoice`+n+`. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`)}
+	}
+	a := Class([]string{"nethvoice"}, EvidenceKey(line("43")), "")
+	b := Class([]string{"nethvoice"}, EvidenceKey(line("35")), "")
+	if a != b {
+		t.Fatal("one condition on two nethvoice instances became two classes")
 	}
 }

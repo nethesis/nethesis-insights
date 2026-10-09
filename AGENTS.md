@@ -532,7 +532,7 @@ rejected as a duplicate and the window is lost. On a **permanent** error
 
 `fingerprint.Compute(systemID, modules, evidence, category)` — sha256 over
 length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
-(currently `"v3"`). Never a `strings.Join`
+(currently `"v4"`). Never a `strings.Join`
 (a separator is forgeable). Consequences to preserve:
 
 - The LLM cites templates by **ID** (`T1`, `T2`, … from `prompt.TemplateID`); the

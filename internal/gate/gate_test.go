@@ -4,6 +4,7 @@
 package gate
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -215,6 +216,17 @@ func TestNoveltyCountsCanonicalKeysNotSpellings(t *testing.T) {
 	s2 := SystemState{KnownTemplates: knownIn("mod1", `<3> [postgres-app] LOG: checkpoint complete: wrote <NUM> buffers (0.1%); 0 recycled`)}
 	if d := Evaluate(b2, s2, testCfg()); d.Call {
 		t.Fatalf("a known line in a new spelling must not be novel: %v", d.Reasons)
+	}
+}
+
+// A line naming its own instance is the same line on every instance: a
+// nethvoice43 warning known on this system makes the nethvoice35 copy known.
+func TestOwnInstanceInTextIsNotNovel(t *testing.T) {
+	const warn = `<4> [agent@nethvoice] <HOST>: domain <HOST> should not be used by nethvoice%s. Invoke agent.bind_user_domains(["<HOST>"]) to fix this warning.`
+	b := bundleOf(model.Template{Template: fmt.Sprintf(warn, "35"), ModuleID: "nethvoice35", Priority: 4})
+	s := SystemState{KnownTemplates: knownIn("nethvoice43", fmt.Sprintf(warn, "43"))}
+	if d := Evaluate(b, s, testCfg()); d.Call {
+		t.Fatalf("a known line naming another instance of the same module must not be novel: %v", d.Reasons)
 	}
 }
 

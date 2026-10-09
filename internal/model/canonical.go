@@ -76,8 +76,9 @@ var (
 	// and the leading priority marker is protected by splitting it off before
 	// any rule runs. Module instance names (traefik1, nethvoice5) survive this
 	// rule too, but no longer survive canonicalization as a whole: the
-	// bracketInstance rule above runs first and takes the ones that appear as
-	// a syslog identifier.
+	// bracketInstance rule above takes the ones that appear as a syslog
+	// identifier, and replaceOwnInstance the ones the module names itself by
+	// in the message.
 	singleDigit = regexp.MustCompile(`\b\d\b`)
 
 	// Dotted hostnames. The collector has no rule at all for these and says so
@@ -113,14 +114,19 @@ var sourceFileSuffix = map[string]bool{
 	"mount": true, "slice": true, "scope": true, "device": true, "path": true,
 }
 
-// CanonicalTemplate returns the canonical key for a masked template.
+// CanonicalTemplate returns the canonical key for a masked template emitted by
+// moduleID (an instance id or a family; the host bucket is "").
 //
 // The leading priority marker ("<3> ") is split off and restored verbatim: it
 // is part of the grouping key the collector already applied, and the
 // single-digit rule would otherwise rewrite it.
-func CanonicalTemplate(template string) string {
+//
+// The module is an argument, not something read off the text, because one
+// rule needs it: see replaceOwnInstance.
+func CanonicalTemplate(moduleID, template string) string {
 	prefix, rest := splitPriority(template)
 
+	rest = replaceOwnInstance(rest, ModuleFamily(moduleID))
 	rest = countryCode.ReplaceAllString(rest, "(<CC>/")
 	rest = objectName.ReplaceAllString(rest, "$1 <STR>")
 	rest = replaceHostnames(rest)
@@ -150,6 +156,79 @@ func splitPriority(template string) (prefix, rest string) {
 		}
 	}
 	return template[:end+1], template[end+1:]
+}
+
+// replaceOwnInstance rewrites the emitting module's own instance id to its
+// family wherever the message spells it out. NS8 writes the instance into the
+// text of many of its lines, and the collector has no rule for a bare word:
+//
+//	[agent@nethvoice] <HOST>: domain <HOST> should not be used by nethvoice43. ...
+//	[api-moduled] <HOST>: domain <HOST> should not be used by openldap14. ...
+//
+// so one warning became one template, one finding and one review class per
+// instance number -- 78 classes for that single nethvoice line on the dev
+// fleet on 2026-10-09, each to be decided separately.
+//
+// It is keyed on the line's own module, never on the word's shape. A generic
+// "letters then digits" rule would fold php7 into php8, rfc4733 into rfc2833
+// and sha256 into sha1 -- on the same dump such words outnumbered instance
+// ids. The family the line came from is the one name known to be an instance
+// id; another module's instance named in the text (the host bucket's
+// "Module instance "nethvoice12" update failed") is left alone, because
+// telling which words are module names would need a list of modules, and that
+// list would go stale with every new NS8 application.
+//
+// The bracketInstance rule cannot be reused for this: it is what keeps
+// [php7:error] intact, by requiring the digits to close the bracket.
+func replaceOwnInstance(s, family string) string {
+	if family == "" || isDigit(family[len(family)-1]) {
+		// The host bucket names no instance, and a family that still ends in
+		// a digit (ModuleFamily("11") == "11") is not an image name.
+		return s
+	}
+	var b strings.Builder
+	for {
+		i := strings.Index(s, family)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := i + len(family)
+		n := instanceSuffix(s[end:])
+		if n == 0 || (i > 0 && isWordByte(s[i-1])) {
+			// Not an instance id: part of a longer word, or the family name
+			// on its own, which is already canonical.
+			b.WriteString(s[:end])
+			s = s[end:]
+			continue
+		}
+		b.WriteString(s[:end])
+		s = s[end+n:]
+	}
+}
+
+// instanceSuffix returns the length of the instance number at the start of s
+// -- digits, or the edge's <NUM> mask -- or 0 when s does not start with one
+// that ends the word.
+func instanceSuffix(s string) int {
+	if strings.HasPrefix(s, "<NUM>") {
+		return len("<NUM>")
+	}
+	n := 0
+	for n < len(s) && isDigit(s[n]) {
+		n++
+	}
+	if n == 0 || (n < len(s) && isWordByte(s[n])) {
+		return 0
+	}
+	return n
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// isWordByte is regexp's \w, the class \b is defined against.
+func isWordByte(c byte) bool {
+	return isDigit(c) || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // replaceHostnames rewrites dotted host names, leaving file names alone.
@@ -207,5 +286,5 @@ func ModuleFamily(moduleID string) string {
 // and identity disagreed, a window could pay for a template the store already
 // knew and the finding would land on a fresh fingerprint every time.
 func CanonicalKey(moduleID, template string) string {
-	return ModuleFamily(moduleID) + "\x00" + CanonicalTemplate(template)
+	return ModuleFamily(moduleID) + "\x00" + CanonicalTemplate(moduleID, template)
 }

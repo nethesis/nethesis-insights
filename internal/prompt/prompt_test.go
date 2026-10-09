@@ -49,8 +49,8 @@ func sampleOpen() []model.Finding {
 		// tpl-z and tpl-a are both in sampleBundle; "tpl-gone" is not, and
 		// must be omitted rather than rendered as an identifier the model
 		// could cite back at us.
-		{Severity: "high", Title: "Disk almost full", Evidence: []string{"tpl-z", "tpl-gone"}},
-		{Severity: "low", Title: "Minor thing", Evidence: []string{"tpl-a"}},
+		{Severity: "high", Title: "Disk almost full", Modules: []string{"modA"}, Evidence: []string{"tpl-z", "tpl-gone"}},
+		{Severity: "low", Title: "Minor thing", Modules: []string{"modA"}, Evidence: []string{"tpl-a"}},
 	}
 }
 

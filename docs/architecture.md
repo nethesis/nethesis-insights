@@ -1543,7 +1543,8 @@ window and `(CA/…) (HK/…)` in the next produced two different fingerprints a
 two findings, each stuck at `occurrence_count=1`.
 
 `v3` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
-three layers:
+three layers (`v4` keeps them and only widens the collapse in layer 1, see
+below):
 
 1. `fingerprint.Normalize` collapses the fields the collector's masking leaves
    literal. It is `model.CanonicalTemplate`, the same collapse the gate's
@@ -1556,6 +1557,24 @@ three layers:
    belongs in the collector; this exists so a leak there cannot silently split
    identity here. The stored evidence text shown to the operator is never
    rewritten — only the identity path.
+
+   `v4` made the collapse depend on the line's module:
+   `model.CanonicalTemplate(moduleID, template)` rewrites the emitting
+   module's **own** instance id to its family wherever the message spells it
+   out (`should not be used by nethvoice43` → `… by nethvoice`). NS8 writes
+   the instance into the text of many of its lines, and under `v3` one such
+   warning was one finding and one review class per instance number — 78
+   classes for a single nethvoice line on the dev fleet on 2026-10-09, each
+   needing its own decision. It is keyed on the module rather than on the
+   word's shape because a generic "letters then digits" rule folds `php7`
+   into `php8` and `rfc4733` into `rfc2833`, and such words outnumbered
+   instance ids on the same data. The cost: **another** module's instance
+   named in a line (the host bucket's `Module instance "nethvoice12" update
+   failed`) still splits per instance, because recognising every module name
+   would need a list of NS8 applications that goes stale with each new one.
+   Because the collapse needs the module, the prompt's ALREADY KNOWN lookup
+   tries each of the finding's modules against a stored evidence line, which
+   does not record which one it came from.
 2. If every cited template shares one `(module_id, priority)` bucket, the key
    is that bucket. Text variance *within* a bucket the model already chose to
    cite as one condition is noise.

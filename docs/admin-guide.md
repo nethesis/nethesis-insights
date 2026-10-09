@@ -1112,6 +1112,11 @@ that, one ordinary cron line occupied 82 separate templates on that machine,
 each of them "never seen before" the first time its copy said it. Measured on
 2026-09-02, grouping by kind and de-numbering the process names inside the line
 took 678 stored templates down to 230 for the same set of real conditions.
+The same applies when a line names its own copy in the message itself
+(`domain … should not be used by nethvoice43`): the number is ignored, so
+the warning is one finding class to review rather than one per copy. A line
+that names a *different* application's copy — a host message about
+`nethvoice12` — still counts each copy separately.
 
 The trade is that a finding names the kind (`openldap`) and not which of the
 71 copies emitted it.

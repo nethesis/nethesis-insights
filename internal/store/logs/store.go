@@ -325,7 +325,7 @@ func (s *Store) UpsertTemplates(ctx context.Context, systemID string, ts []model
 				last_seen = CASE WHEN excluded.last_seen > system_templates.last_seen
 					THEN excluded.last_seen ELSE system_templates.last_seen END,
 				total_count = system_templates.total_count + excluded.total_count
-		`, systemID, model.CanonicalTemplate(t.Template), t.Template, model.ModuleFamily(t.ModuleID),
+		`, systemID, model.CanonicalTemplate(t.ModuleID, t.Template), t.Template, model.ModuleFamily(t.ModuleID),
 			t.Priority, t.Category, firstSeen, lastSeen, t.Count)
 		if err != nil {
 			return fmt.Errorf("store: upsert template: %w", err)
