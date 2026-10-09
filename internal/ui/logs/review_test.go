@@ -115,25 +115,27 @@ func TestReviewRoutesAreNotReachableWithoutAnAdminKey(t *testing.T) {
 func TestReviewWritesAreAuthenticatedAndSameOrigin(t *testing.T) {
 	w := &fakeWriter{}
 	h := newWriteTestServer(t, seededReader(), w)
-	form := url.Values{"key": {"v3:aaaa"}}
+	form := url.Values{"key": {"v3:aaaa"}, "anchor": {"v3:aaaa"}, "visibility": {"customer"}}
 
-	wrong := writeReq("/review/deliver", form)
-	wrong.SetBasicAuth("alice", "not-the-key")
-	if rec := do(h, wrong); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong key: got %d, want 401", rec.Code)
-	}
+	for _, p := range reviewPaths() {
+		wrong := writeReq(p, form)
+		wrong.SetBasicAuth("alice", "not-the-key")
+		if rec := do(h, wrong); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s wrong key: got %d, want 401", p, rec.Code)
+		}
 
-	forged := writeReq("/review/deliver", form)
-	forged.Header.Set("Sec-Fetch-Site", "cross-site")
-	forged.Header.Set("Origin", "https://evil.example")
-	if rec := do(h, forged); rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-site: got %d, want 403", rec.Code)
-	}
+		forged := writeReq(p, form)
+		forged.Header.Set("Sec-Fetch-Site", "cross-site")
+		forged.Header.Set("Origin", "https://evil.example")
+		if rec := do(h, forged); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s cross-site: got %d, want 403", p, rec.Code)
+		}
 
-	head := writeReq("/review/deliver?key=v3:aaaa", nil)
-	head.Method = http.MethodHead
-	if rec := do(h, head); rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("HEAD: got %d, want 405", rec.Code)
+		head := writeReq(p+"?key=v3:aaaa", nil)
+		head.Method = http.MethodHead
+		if rec := do(h, head); rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s HEAD: got %d, want 405", p, rec.Code)
+		}
 	}
 	if len(w.calls) != 0 {
 		t.Fatalf("a refused write reached the store: %v", w.calls)
