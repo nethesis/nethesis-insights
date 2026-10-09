@@ -123,8 +123,8 @@ edge (ns8-loki)          edge (ns8-crowdsec)         edge (ns8-core, leader)
 ```
 
 One edge node ships one bundle per 15-minute window. The server never
-initiates contact with a node. All five containers — Traefik, `authd` and the
-three pipelines — share one podman pod and therefore one network namespace, so
+initiates contact with a node. All six pod containers — Traefik, `authd`, the
+three pipelines and the `embedder` sidecar — share one podman pod and therefore one network namespace, so
 Traefik's connection to a backend is a genuine loopback connection with no NAT
 in the path; see "Authentication" below for why that is load-bearing.
 
@@ -226,6 +226,9 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/gate` | `gate.Evaluate` — decides whether a bundle is worth an LLM call. Pure function of `(Bundle, SystemState, Config)`. |
 | `internal/fingerprint` | `fingerprint.Compute` — the server-computed identity of a finding — and `fingerprint.Class`, the same identity without the system, which is what an operator reviews. Pure, sha256-based. |
 | `internal/prompt` | Selects which templates are worth showing (`prompt.Select`), renders the deterministic LLM prompt, and parses/validates the strict-JSON response. Owns `prompt.Version`. |
+| `internal/grouping` | Review grouping's pure half: `Text` (what a class is embedded as), `Cosine`, `Assign` (the anchor rule) and `Suggest`. See "Grouping and suggested decisions". |
+| `internal/embed` | Client for the embedding sidecar's `/v1/embeddings`; returns the model name the server reports and retries a non-2xx at shorter cuts. |
+| `internal/classgroup` | `Runner.Run` — the grouping pass: probe the sidecar, embed ungrouped classes, assign to anchors, store. Writes only `class_groups`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
 | `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, nodes), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`) and the finding-class review state (`classes.go` for the decisions, `review.go` for the queue's reads). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneClasses`/`PruneAnalyses`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
@@ -242,11 +245,11 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
-| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its five review routes (`writableRoutes`: deliver, internal, security, severity, doc-ref) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
+| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its seven review routes (`writableRoutes`: deliver, internal, dismiss, security, severity, doc-ref, group) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
-| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker together, runs graceful shutdown. |
+| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker and, only when `EMBED_URL` is set, the class-grouping pass loop together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
 
@@ -1783,6 +1786,7 @@ nothing is copied onto `findings`.
 | Route | Store method | Effect |
 |---|---|---|
 | `/review/deliver`, `/review/internal`, `/review/dismiss` | `SetClassVisibility` | `visibility = customer`/`operator`/`dismissed`. Never back to `pending` (`ErrInvalidVisibility`) |
+| `/review/group` | `SetGroupVisibility` | one visibility applied to every *pending* class of the group, one `class_decisions` row each (detail `group <anchor>`) |
 | `/review/security` | `SetClassSecurity` | the `security` tag, `on`/`off` — nothing else is accepted |
 | `/review/severity` | `SetClassSeverity` | `severity_override`, `""` clears |
 | `/review/doc-ref` | `SetClassDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
@@ -2158,12 +2162,16 @@ refused rather than trusted on an unverified credential.
 The same trusted-proxy set gates `httpx.ClientIP`, which Threat Shield's
 reporter-own-address check depends on (see "Threat ingest" above): the header
 is client-controlled, so `X-Forwarded-For` is believed only from a configured
-proxy, and only its rightmost value. In the deployed shape all five containers
-— Traefik, `authd` and the three pipelines — share one podman pod and
-therefore one network namespace, so Traefik's connection to a backend never
+proxy, and only its rightmost value. In the deployed shape all six containers
+— Traefik, `authd`, the three pipelines and the `embedder` sidecar — share one
+podman pod and therefore one network namespace, so Traefik's connection to a backend never
 crosses a NAT boundary and `RemoteAddr` really is `127.0.0.1` by construction,
 which is what makes the default `TRUSTED_PROXY_CIDRS=127.0.0.0/8` correct
 without a per-deployment value.
+Every pod member, the `embedder` included, connects from `127.0.0.0/8` and is
+therefore inside this trust boundary: a compromised embedder (a third-party
+server parsing log-derived text) could claim any `system_id` on the `insightsd`,
+`threatd` and `sizingd` ingest.
 
 `api.StaticAuth`, the hardcoded system/secret pair used before this split for
 tests and local development, no longer exists: a pipeline no longer holds an

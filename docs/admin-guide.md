@@ -403,7 +403,7 @@ depth. It never logs a credential: the model API key appears only as
 | `FINDING_RETENTION` | how long a stale finding survives (default `4320h`, 180 days). An open finding is never pruned at any age. Past this window a recurrence reads as a new finding rather than a reopen — a continuity cost only |
 | `ANALYSIS_RETENTION` | how long a cost-ledger row is kept (default `2160h`, 90 days). **This one destroys data permanently**: there is no rollup table, so `/cost` silently truncates its spend history at the cutoff |
 | `EMBED_URL` | base URL of the embedding sidecar that groups similar finding classes on `/review` (default empty: grouping off). The deployed unit sets `http://127.0.0.1:9597`. With it set and the sidecar down, everything else keeps working and `/review` just shows no new groups |
-| `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses anything else). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
+| `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses a number outside that range, but a value that is not a number, such as `0,98`, is silently replaced by the default). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
 | `GROUP_INTERVAL` | how often the grouping pass runs (default `1m`); each run groups up to 200 ungrouped classes |
 | `MAINT_INTERVAL` | how often the housekeeping pass prunes those three tables (default `10m`). Each prune is internally batched, so running it often is cheap |
 
@@ -511,8 +511,12 @@ conversely, **a pipeline reached from inside that CIDR accepts any password**.
 Two consequences:
 
 - Never publish a pipeline's own port. The units do not, and the shared pod is
-  what makes the default value correct: all five containers in the pod share one network
+  what makes the default value correct: all six containers in the pod share one network
   namespace, so the proxy's connection really is `127.0.0.1` by construction.
+  Every pod member, the `embedder` included, connects from that range and is
+  therefore inside the trust boundary: a compromised embedder (a third-party
+  server parsing log-derived text) could claim any `system_id` on the three
+  pipelines' ingest.
 - Widen it only for a client you would trust unauthenticated. Testing a
   pipeline from another machine needs it widened to that machine's address,
   which grants that machine the ability to claim any `system_id`.
