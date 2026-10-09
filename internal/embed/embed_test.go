@@ -6,6 +6,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -98,7 +99,7 @@ func TestEmbedCutIsRuneSafe(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("err %v", err)
 	}
-	if len(seen) != 3 {
+	if len(seen) != 4 {
 		t.Fatalf("attempts %d", len(seen))
 	}
 	for _, s := range seen {
@@ -106,8 +107,37 @@ func TestEmbedCutIsRuneSafe(t *testing.T) {
 			t.Fatal("invalid UTF-8 sent")
 		}
 	}
-	if len(seen[1]) != 1000 || len(seen[2]) != 600 {
-		t.Fatalf("lens %d %d", len(seen[1]), len(seen[2]))
+	if len(seen[1]) != 1000 || len(seen[2]) != 600 || len(seen[3]) != 300 {
+		t.Fatalf("lens %d %d %d", len(seen[1]), len(seen[2]), len(seen[3]))
+	}
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("not ErrRejected: %v", err)
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "4000, 1000, 600, 300 bytes") {
+		t.Fatalf("message %q", err)
+	}
+}
+
+func TestEmbedSucceedsAtShortestCut(t *testing.T) {
+	var lens []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Input string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		lens = append(lens, len(in.Input))
+		if len(in.Input) > 300 {
+			http.Error(w, "too large", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(okBody("m", "[1]")))
+	}))
+	defer srv.Close()
+	if _, _, err := New(srv.URL, time.Second).Embed(context.Background(), strings.Repeat("a", 1500)); err != nil {
+		t.Fatal(err)
+	}
+	if len(lens) != 4 || lens[3] != 300 {
+		t.Fatalf("lens %v", lens)
 	}
 }
 
@@ -118,8 +148,9 @@ func TestEmbedShortTextFailsOnce(t *testing.T) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if _, _, err := New(srv.URL, time.Second).Embed(context.Background(), "tiny"); err == nil {
-		t.Fatal("want error")
+	_, _, err := New(srv.URL, time.Second).Embed(context.Background(), "tiny")
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("want ErrRejected, got %v", err)
 	}
 	// Cutting would not change the text, so retrying is pointless.
 	if n != 1 {

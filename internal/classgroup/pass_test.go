@@ -6,10 +6,12 @@ package classgroup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/nethesis/nethesis-insights/internal/embed"
 	"github.com/nethesis/nethesis-insights/internal/grouping"
 	"github.com/nethesis/nethesis-insights/internal/model"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
@@ -147,6 +149,58 @@ func TestModelChangeMidPassStops(t *testing.T) {
 	}
 }
 
+func TestRejectedClassIsSkippedNotBlocking(t *testing.T) {
+	r := &fakeReader{ungrouped: []logsstore.ClassEvidence{ev("bad"), ev("good")}}
+	e := &fakeEmbedder{replies: []reply{
+		{vec: []float32{1, 0}, model: "m"},
+		{err: fmt.Errorf("embed: server answered HTTP 500 at 9, 1 bytes: %w", embed.ErrRejected)},
+		{vec: []float32{1, 0}, model: "m"},
+	}}
+	run(t, r, e)
+	if len(r.set) != 1 || r.set[0].Key != "good" || e.calls != 3 {
+		t.Fatalf("rows %+v calls %d", r.set, e.calls)
+	}
+}
+
+func TestOtherEmbedErrorStillEndsPass(t *testing.T) {
+	r := &fakeReader{ungrouped: []logsstore.ClassEvidence{ev("a"), ev("b")}}
+	e := &fakeEmbedder{replies: []reply{
+		{vec: []float32{1, 0}, model: "m"},
+		{err: errors.New("transport")},
+	}}
+	run(t, r, e)
+	if len(r.set) != 0 || e.calls != 2 {
+		t.Fatalf("rows %+v calls %d", r.set, e.calls)
+	}
+}
+
+// cancelEmbedder cancels the context on its second call and fails with it.
+type cancelEmbedder struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancelEmbedder) Embed(ctx context.Context, _ string) ([]float32, string, error) {
+	c.calls++
+	if c.calls == 1 {
+		return []float32{1, 0}, "m", nil
+	}
+	c.cancel()
+	return nil, "", fmt.Errorf("embed: request failed: %w", ctx.Err())
+}
+
+func TestCancelledContextStopsQuietly(t *testing.T) {
+	r := &fakeReader{ungrouped: []logsstore.ClassEvidence{ev("a"), ev("b")}}
+	ctx, cancel := context.WithCancel(context.Background())
+	e := &cancelEmbedder{cancel: cancel}
+	if err := New(r, e, Config{Threshold: 0.9, Batch: 10}).Run(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.set) != 0 || e.calls != 2 {
+		t.Fatalf("rows %+v calls %d", r.set, e.calls)
+	}
+}
+
 // TestGroupingNeverDecides runs the pass on a real store: a pending class
 // whose group already holds a decided class stays pending and no decision row
 // appears.
@@ -174,8 +228,14 @@ func TestGroupingNeverDecides(t *testing.T) {
 	if err := s.SetClassVisibility(ctx, "v3:decided", logsstore.VisibilityCustomer, "op", 2000); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := s.ClassDecisions(ctx, "v3:pending")
-	allBefore, _ := s.ListClassDecisions(ctx, 100)
+	before, err := s.ClassDecisions(ctx, "v3:pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allBefore, err := s.ListClassDecisions(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	e := &fakeEmbedder{replies: []reply{
 		{vec: []float32{1, 0}, model: "m"},
@@ -183,16 +243,41 @@ func TestGroupingNeverDecides(t *testing.T) {
 	}}
 	run(t, s, e)
 
-	anchors, _ := s.GroupAnchors(ctx, "m")
+	anchors, err := s.GroupAnchors(ctx, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(anchors) != 1 {
 		t.Fatalf("pending class did not join: %+v", anchors)
 	}
-	c, _, _ := s.GetClass(ctx, "v3:pending")
-	if c.Visibility != logsstore.VisibilityPending {
-		t.Fatalf("visibility %s", c.Visibility)
+	classes, err := s.ListClasses(ctx, logsstore.ClassFilter{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	after, _ := s.ClassDecisions(ctx, "v3:pending")
-	allAfter, _ := s.ListClassDecisions(ctx, 100)
+	var found bool
+	for _, c := range classes {
+		if c.Key != "v3:pending" {
+			continue
+		}
+		found = true
+		if c.Visibility != logsstore.VisibilityPending {
+			t.Fatalf("visibility %s", c.Visibility)
+		}
+		if c.GroupAnchor != "v3:decided" || c.Suggestion != logsstore.VisibilityCustomer {
+			t.Fatalf("anchor %q suggestion %q", c.GroupAnchor, c.Suggestion)
+		}
+	}
+	if !found {
+		t.Fatal("pending class not listed")
+	}
+	after, err := s.ClassDecisions(ctx, "v3:pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allAfter, err := s.ListClassDecisions(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(after) != len(before) || len(allAfter) != len(allBefore) {
 		t.Fatal("decision rows changed")
 	}

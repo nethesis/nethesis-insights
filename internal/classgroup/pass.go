@@ -14,8 +14,10 @@ package classgroup
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
+	"github.com/nethesis/nethesis-insights/internal/embed"
 	"github.com/nethesis/nethesis-insights/internal/grouping"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 )
@@ -55,6 +57,7 @@ func New(r Reader, e Embedder, cfg Config) *Runner {
 
 // Run groups up to Config.Batch ungrouped classes. A sidecar failure, or a
 // model change under it, ends the pass quietly; the rest waits for the next.
+// A class the sidecar rejects at every size is skipped and retried next pass.
 // Store errors are returned.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	_, model, err := r.emb.Embed(ctx, grouping.Text(nil, []string{"probe"}))
@@ -74,11 +77,22 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		return err
 	}
 
-	var joined, created, errs int
+	var joined, created, errs, rejected int
 	for _, c := range classes {
 		text := grouping.Text(c.Modules, c.Evidence)
 		vec, m, err := r.emb.Embed(ctx, text)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(err, embed.ErrRejected) {
+				// The sidecar refuses this class even at the shortest cut.
+				// Skip it so it cannot block every class behind it; it is
+				// still ungrouped and is retried next pass.
+				rejected++
+				slog.Warn("embedding rejected, skipping class", "class_key", c.Key, "error", err)
+				continue
+			}
 			errs++
 			slog.Warn("embedding failed, ending pass", "class_key", c.Key, "error", err)
 			break
@@ -111,6 +125,6 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 			"best_anchor", best, "similarity", sim, "threshold", r.cfg.Threshold,
 			"model", model, "chars", len(text))
 	}
-	slog.Info("class grouping pass", "grouped", joined+created, "joined", joined, "new", created, "errors", errs)
+	slog.Info("class grouping pass", "grouped", joined+created, "joined", joined, "new", created, "errors", errs, "rejected", rejected)
 	return nil
 }

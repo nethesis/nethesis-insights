@@ -15,6 +15,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,7 +23,7 @@ import (
 
 // retryCuts are the byte lengths tried, in order, after a non-2xx answer:
 // llama-server answers an input longer than its batch with HTTP 500.
-var retryCuts = []int{1000, 600}
+var retryCuts = []int{1000, 600, 300}
 
 const maxResponseBytes = 1 << 20
 
@@ -41,9 +42,31 @@ type statusError struct{ status int }
 
 func (e *statusError) Error() string { return fmt.Sprintf("embed: server answered HTTP %d", e.status) }
 
+// ErrRejected is returned (test with errors.Is) when the server answered every
+// size attempt with a non-2xx status. The input, not the sidecar, is the
+// problem; callers skip it rather than treat the sidecar as down.
+var ErrRejected = errors.New("embed: input rejected")
+
+type rejectedError struct {
+	status int
+	sizes  []int
+}
+
+func (e *rejectedError) Error() string {
+	parts := make([]string, len(e.sizes))
+	for i, n := range e.sizes {
+		parts[i] = strconv.Itoa(n)
+	}
+	return fmt.Sprintf("embed: server answered HTTP %d at %s bytes", e.status, strings.Join(parts, ", "))
+}
+
+func (e *rejectedError) Is(target error) bool { return target == ErrRejected }
+
 // Embed posts text to <baseURL>/v1/embeddings and returns the L2-normalised
 // vector and the model name the server reported. A non-2xx answer is retried
-// at most twice with the text cut to 1000 then 600 bytes (on a rune boundary);
+// at most three times with the text cut to 1000, 600 then 300 bytes (on a rune
+// boundary; a cut that would not shorten the text is skipped). If every size is
+// refused the error satisfies errors.Is(err, ErrRejected);
 // any other failure returns immediately. The text is never logged.
 func (c *Client) Embed(ctx context.Context, text string) ([]float32, string, error) {
 	vec, model, err := c.embed(ctx, text)
@@ -51,18 +74,20 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, string, err
 	if err == nil || !errors.As(err, &se) {
 		return vec, model, err
 	}
+	sizes := []int{len(text)}
 	for _, n := range retryCuts {
 		cut := cutBytes(text, n)
 		if len(cut) >= len(text) {
 			continue
 		}
 		text = cut
+		sizes = append(sizes, len(text))
 		vec, model, err = c.embed(ctx, text)
 		if err == nil || !errors.As(err, &se) {
 			return vec, model, err
 		}
 	}
-	return nil, "", err
+	return nil, "", &rejectedError{status: se.status, sizes: sizes}
 }
 
 // cutBytes cuts s to at most n bytes, backing up to a rune boundary.
