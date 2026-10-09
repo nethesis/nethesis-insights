@@ -5,6 +5,7 @@ package logs
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -50,8 +51,8 @@ func (f *fakeWriter) SetClassDocRef(_ context.Context, key, docRef, actor string
 	return f.record("doc_ref", key, docRef, actor)
 }
 
-func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor, visibility, actor string, _ int64) (int, error) {
-	return 2, f.record("group", anchor, visibility, actor)
+func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor string, members []string, visibility, actor string, _ int64) (int, error) {
+	return 2, f.record("group", anchor, visibility, actor, strings.Join(members, ","))
 }
 
 const testAdminKey = "dev-admin-key"
@@ -151,8 +152,8 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 		{"/review/deliver", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa customer alice"},
 		{"/review/internal", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa operator alice"},
 		{"/review/dismiss", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa dismissed alice"},
-		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}}, "group v3:aaaa customer alice"},
-		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}}, "group v3:aaaa dismissed alice"},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "group v3:aaaa customer alice v3:aaaa,v3:bbbb"},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}, "member": {"v3:aaaa"}}, "group v3:aaaa dismissed alice v3:aaaa"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"on"}}, "security v3:aaaa on alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"off"}}, "security v3:aaaa off alice"},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"high"}}, "severity v3:aaaa high alice"},
@@ -197,10 +198,14 @@ func TestReviewRejectsBadInput(t *testing.T) {
 	}{
 		{"/review/deliver", url.Values{}},
 		{"/review/deliver", url.Values{"key": {strings.Repeat("k", maxClassKeyLen+1)}}},
-		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"pending"}}},
-		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"bogus"}}},
-		{"/review/group", url.Values{"anchor": {"v3:aaaa"}}},
-		{"/review/group", url.Values{"visibility": {"customer"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"pending"}, "member": {"v3:aaaa"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"bogus"}, "member": {"v3:aaaa"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "member": {"v3:aaaa"}}},
+		{"/review/group", url.Values{"visibility": {"customer"}, "member": {"v3:aaaa"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {" ", ""}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {strings.Repeat("k", maxClassKeyLen+1)}}},
+		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": tooManyMembers()}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"maybe"}}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {""}}},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"urgent"}}},
@@ -511,6 +516,27 @@ func TestReviewDecisionFormsCarryTheSort(t *testing.T) {
 	}
 }
 
+func tooManyMembers() []string {
+	out := make([]string, reviewLimit+1)
+	for i := range out {
+		out[i] = fmt.Sprintf("v3:m%d", i)
+	}
+	return out
+}
+
+// A member in the query string is not a decision anyone submitted.
+func TestReviewGroupIgnoresQueryStringMembers(t *testing.T) {
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, seededReader(), w)
+	form := url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}}
+	if rec := do(h, writeReq("/review/group?member=v3:aaaa", form)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	if len(w.calls) != 0 {
+		t.Fatalf("store called: %v", w.calls)
+	}
+}
+
 func groupedReader() *fakeReader {
 	r := seededReader()
 	r.classes = append([]logsstore.ClassRow(nil), r.classes...)
@@ -562,6 +588,26 @@ func TestReviewGroupViewFiltersAndOffersGroupForms(t *testing.T) {
 	if r.classSeen.Group != "v3:anchor" || r.classSeen.Visibility != "" {
 		t.Fatalf("group link filtered on %+v, want group with every visibility", r.classSeen)
 	}
+	pending := 0
+	for _, c := range r.classes {
+		if c.Visibility == logsstore.VisibilityPending {
+			pending++
+			if want := `name="member" value="` + c.Key + `"`; !strings.Contains(body, want) {
+				t.Errorf("group form lacks %q", want)
+			}
+		} else if strings.Contains(body, `name="member" value="`+c.Key+`"`) {
+			t.Errorf("group form lists decided class %s", c.Key)
+		}
+	}
+	if pending == 0 {
+		t.Fatal("fixture has no pending class")
+	}
+	if want := 3 * pending; strings.Count(body, `name="member"`) != want {
+		t.Errorf("member fields %d, want %d (3 forms x %d pending)", strings.Count(body, `name="member"`), want, pending)
+	}
+	if !strings.Contains(body, `name="filter"`) {
+		t.Error("group forms drop the key filter")
+	}
 	for _, want := range []string{`action="/review/group"`, `name="anchor" value="v3:anchor"`, `name="visibility" value="customer"`, `Deliver all pending`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("group view lacks %q", want)
@@ -582,9 +628,9 @@ func TestReviewGroupViewFiltersAndOffersGroupForms(t *testing.T) {
 
 func TestReviewGroupDecisionKeepsTheGroupFilter(t *testing.T) {
 	h := newWriteTestServer(t, seededReader(), &fakeWriter{})
-	form := url.Values{"anchor": {"v3:anchor"}, "visibility": {"operator"}, "group": {"v3:anchor"}, "view": {"all"}}
+	form := url.Values{"anchor": {"v3:anchor"}, "visibility": {"operator"}, "group": {"v3:anchor"}, "view": {"all"}, "member": {"v3:aaaa"}, "filter": {"ssh"}}
 	rec := do(h, writeReq("/review/group", form))
-	if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/review?group=v3%3Aanchor&view=all" {
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/review?group=v3%3Aanchor&key=ssh&view=all" {
 		t.Fatalf("got %d %q", rec.Code, loc)
 	}
 }

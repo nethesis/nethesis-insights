@@ -138,13 +138,15 @@ func (s *Store) SetClassGroup(ctx context.Context, g ClassGroup) error {
 	return nil
 }
 
-// SetGroupVisibility applies visibility to every pending class of the group
-// anchored at anchor, in one transaction, with one class_decisions row per
-// class changed (the same actions as SetClassVisibility, detail "group
-// <anchor>"). Classes already decided are left alone. It returns how many
-// classes changed; a group with none pending changes nothing and writes no
-// audit row. ErrUnknownClass if anchor has no group row.
-func (s *Store) SetGroupVisibility(ctx context.Context, anchor, visibility, actor string, now int64) (int, error) {
+// SetGroupVisibility applies visibility to the listed members of the group
+// anchored at anchor that are still pending, in one transaction, with one
+// class_decisions row per class changed (the same actions as
+// SetClassVisibility, detail "group <anchor>"). The operator decides what the
+// page showed: a member that joined after it rendered, belongs to another
+// group or is already decided is skipped silently, not an error. It returns
+// how many classes changed; none changed writes no audit row. ErrUnknownClass
+// if anchor has no group row.
+func (s *Store) SetGroupVisibility(ctx context.Context, anchor string, members []string, visibility, actor string, now int64) (int, error) {
 	action, ok := visibilityAction(visibility)
 	if !ok {
 		return 0, ErrInvalidVisibility
@@ -168,7 +170,7 @@ func (s *Store) SetGroupVisibility(ctx context.Context, anchor, visibility, acto
 		return 0, fmt.Errorf("store: read class group: %w", err)
 	}
 
-	todo, err := pendingGroupClasses(ctx, tx, anchor)
+	todo, err := pendingGroupClasses(ctx, tx, anchor, members)
 	if err != nil {
 		return 0, err
 	}
@@ -299,14 +301,23 @@ type pendingClass struct {
 	pv  sql.NullString
 }
 
-// pendingGroupClasses lists the group's classes still awaiting a decision.
-func pendingGroupClasses(ctx context.Context, tx bun.Tx, anchor string) ([]pendingClass, error) {
+// pendingGroupClasses lists those of members that belong to the group and are
+// still awaiting a decision.
+func pendingGroupClasses(ctx context.Context, tx bun.Tx, anchor string, members []string) ([]pendingClass, error) {
+	if len(members) == 0 {
+		return nil, nil
+	}
+	args := []any{anchor, VisibilityPending}
+	for _, m := range members {
+		args = append(args, m)
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(members)), ",")
 	rows, err := tx.QueryContext(ctx, `
 		SELECT c.class_key, c.first_prompt_version
 		FROM class_groups g JOIN finding_classes c ON c.class_key = g.class_key
-		WHERE g.anchor_key = ? AND c.visibility = ?
+		WHERE g.anchor_key = ? AND c.visibility = ? AND c.class_key IN (`+in+`)
 		ORDER BY c.class_key
-	`, anchor, VisibilityPending)
+	`, args...) // #nosec G202 -- only "?" placeholders are concatenated
 	if err != nil {
 		return nil, fmt.Errorf("store: group pending classes: %w", err)
 	}

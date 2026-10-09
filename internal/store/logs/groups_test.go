@@ -117,7 +117,7 @@ func TestSetGroupVisibilityChangesOnlyPending(t *testing.T) {
 	seedGroup(t, s)
 	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityOperator, "op", 1500))
 
-	n, err := s.SetGroupVisibility(ctx, "v3:a", VisibilityDismissed, "alice", 2000)
+	n, err := s.SetGroupVisibility(ctx, "v3:a", []string{"v3:a", "v3:b", "v3:c"}, VisibilityDismissed, "alice", 2000)
 	mustDo(t, err)
 	if n != 2 {
 		t.Fatalf("changed %d, want 2", n)
@@ -138,7 +138,7 @@ func TestSetGroupVisibilityChangesOnlyPending(t *testing.T) {
 		t.Fatalf("decided class got an audit row: %+v", ds)
 	}
 	// nothing pending left: no change, no audit rows
-	n, err = s.SetGroupVisibility(ctx, "v3:a", VisibilityCustomer, "alice", 3000)
+	n, err = s.SetGroupVisibility(ctx, "v3:a", []string{"v3:a", "v3:b", "v3:c"}, VisibilityCustomer, "alice", 3000)
 	if err != nil || n != 0 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
@@ -147,14 +147,39 @@ func TestSetGroupVisibilityChangesOnlyPending(t *testing.T) {
 	}
 }
 
+// Decide what was shown: a pending member the operator never listed (it joined
+// after the page rendered) and a class of another group stay pending.
+func TestSetGroupVisibilityDecidesOnlyListedMembersOfTheGroup(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedGroup(t, s)
+	// v3:x is pending but belongs to no group of v3:a; v3:c is a member that
+	// was not listed.
+	n, err := s.SetGroupVisibility(ctx, "v3:a", []string{"v3:a", "v3:b", "v3:x", "v3:ghost"}, VisibilityCustomer, "alice", 2000)
+	mustDo(t, err)
+	if n != 2 {
+		t.Fatalf("changed %d, want 2", n)
+	}
+	for key, want := range map[string]string{"v3:a": VisibilityCustomer, "v3:b": VisibilityCustomer,
+		"v3:c": VisibilityPending, "v3:x": VisibilityPending} {
+		c, _, _ := s.GetClass(ctx, key)
+		if c.Visibility != want {
+			t.Fatalf("%s: %s, want %s", key, c.Visibility, want)
+		}
+	}
+	if ds, _ := s.ClassDecisions(ctx, "v3:x"); len(ds) != 0 {
+		t.Fatalf("foreign class audited: %+v", ds)
+	}
+}
+
 func TestSetGroupVisibilityRefusals(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	seedGroup(t, s)
-	if _, err := s.SetGroupVisibility(ctx, "v3:a", VisibilityPending, "op", 1); !errors.Is(err, ErrInvalidVisibility) {
+	if _, err := s.SetGroupVisibility(ctx, "v3:a", []string{"v3:a"}, VisibilityPending, "op", 1); !errors.Is(err, ErrInvalidVisibility) {
 		t.Fatalf("pending: %v", err)
 	}
-	if _, err := s.SetGroupVisibility(ctx, "v3:nope", VisibilityCustomer, "op", 1); !errors.Is(err, ErrUnknownClass) {
+	if _, err := s.SetGroupVisibility(ctx, "v3:nope", []string{"v3:a"}, VisibilityCustomer, "op", 1); !errors.Is(err, ErrUnknownClass) {
 		t.Fatalf("unknown anchor: %v", err)
 	}
 }

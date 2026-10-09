@@ -82,9 +82,9 @@ type Writer interface {
 	SetClassSecurity(ctx context.Context, key string, security bool, actor string, now int64) error
 	SetClassSeverity(ctx context.Context, key, severity, actor string, now int64) error
 	SetClassDocRef(ctx context.Context, key, docRef, actor string, now int64) error
-	// SetGroupVisibility decides every pending class of a group at once and
-	// returns how many it changed.
-	SetGroupVisibility(ctx context.Context, anchor, visibility, actor string, now int64) (int, error)
+	// SetGroupVisibility decides the listed members of a group that are still
+	// pending, at once, and returns how many it changed.
+	SetGroupVisibility(ctx context.Context, anchor string, members []string, visibility, actor string, now int64) (int, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -114,7 +114,7 @@ const (
 const (
 	maxClassKeyLen = 128
 	maxDocRefLen   = 512
-	maxReviewForm  = 16 << 10 // 16 KiB; see internal/ui/threat's maxAllowlistFormSize
+	maxReviewForm  = 64 << 10 // 64 KiB (a group form posts up to reviewLimit keys); see internal/ui/threat's maxAllowlistFormSize
 )
 
 // writableRoutes is the small, explicit, enumerated set of paths that also

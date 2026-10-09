@@ -151,11 +151,14 @@ type reviewPageData struct {
 	Key          string
 	Group        string
 	GroupActions []groupAction
-	Sort         string
-	Dir          string
-	Headers      []reviewHeader
-	CanWrite     bool
-	Severities   []string
+	// PendingKeys are the pending rows shown, which the group forms post as
+	// the classes to decide: the operator decides what the page displayed.
+	PendingKeys []string
+	Sort        string
+	Dir         string
+	Headers     []reviewHeader
+	CanWrite    bool
+	Severities  []string
 }
 
 // handleReview shows the class queue: finding classes ranked by how many
@@ -183,6 +186,12 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "review", err)
 		return
 	}
+	var pending []string
+	for _, c := range rows {
+		if c.Visibility == logsstore.VisibilityPending {
+			pending = append(pending, c.Key)
+		}
+	}
 	s.chrome.Render(w, "review.html", reviewPageData{
 		PageData:     s.chrome.PageData(r, "review"),
 		Rows:         rows,
@@ -191,6 +200,7 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		Key:          key,
 		Group:        group,
 		GroupActions: groupActions,
+		PendingKeys:  pending,
 		Sort:         sort,
 		Dir:          dir,
 		Headers:      s.reviewHeaders(view.Key, key, group, sort, dir),
@@ -236,8 +246,8 @@ func (s *server) handleReviewAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDecision serves every writableRoutes path, reached only after
-// AuthenticateWrite. /review/group applies one visibility to every pending
-// class of a group, one audit row each; the rest
+// AuthenticateWrite. /review/group applies one visibility to the listed
+// members of a group that are still pending, one audit row each; the rest
 // apply to the whole class -- every
 // finding in it, on every system, now and when it recurs -- never to one
 // finding.
@@ -276,8 +286,14 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 			http.Error(w, "visibility must be customer, operator or dismissed", http.StatusBadRequest)
 			return
 		}
-		// Only the group's pending classes change; the count is not shown.
-		_, err = s.writer.SetGroupVisibility(ctx, key, visibility, actor, now)
+		members, ok := formMembers(r)
+		if !ok {
+			http.Error(w, "member keys are required (at most 200, each a class key)", http.StatusBadRequest)
+			return
+		}
+		// Only the listed members that are still pending in this group
+		// change; the count is not shown.
+		_, err = s.writer.SetGroupVisibility(ctx, key, members, visibility, actor, now)
 	case "/review/security":
 		security, ok := parseOnOff(r.PostFormValue("security"))
 		if !ok {
@@ -339,6 +355,24 @@ func parseOnOff(v string) (on bool, ok bool) {
 func formKey(r *http.Request, name string) (string, bool) {
 	k := strings.TrimSpace(r.PostFormValue(name))
 	return k, k != "" && len(k) <= maxClassKeyLen
+}
+
+// formMembers reads the repeated member fields of a group decision from the
+// body only: trimmed, empties dropped, between 1 and reviewLimit keys, each
+// bounded. The group forms post exactly the pending rows the page displayed.
+func formMembers(r *http.Request) ([]string, bool) {
+	var out []string
+	for _, m := range r.PostForm["member"] {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if len(m) > maxClassKeyLen {
+			return nil, false
+		}
+		out = append(out, m)
+	}
+	return out, len(out) > 0 && len(out) <= reviewLimit
 }
 
 // cleanDocRef accepts "" (clear it) or an absolute http(s) URL. Nothing else:
