@@ -89,7 +89,7 @@ What it deliberately does not do:
 ## System context
 
 ```
-edge (ns8-loki)          edge (ns8-crowdsec)         edge (ns8-core, leader)
+edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
    │ /logs/v1/bundles       │ /blocklist/v1/events       │ /sizing/v1/reports
    ▼                        ▼                            ▼
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -122,8 +122,9 @@ edge (ns8-loki)          edge (ns8-crowdsec)         edge (ns8-core, leader)
              └─────────────┘    └► …/service/ng-blacklist for the feed
 ```
 
-One edge node ships one bundle per 15-minute window. The server never
-initiates contact with a node. All six pod containers — Traefik, `authd`, the
+One cluster ships one bundle per 15-minute window, from the
+[`ns8-insights`](https://github.com/NethServer/ns8-insights) module. The
+server never initiates contact with a node. All six pod containers — Traefik, `authd`, the
 three pipelines and the `embedder` sidecar — share one podman pod and therefore one network namespace, so
 Traefik's connection to a backend is a genuine loopback connection with no NAT
 in the path; see "Authentication" below for why that is load-bearing.
@@ -1099,8 +1100,9 @@ means a bucket that is never quiet.
 ### Node attribution: which machine, and what it is called
 
 A `system_id` is an NS8 **cluster**, not a machine. One collector runs per
-cluster, on whichever node holds Loki, and reads a stream that already
-aggregates every node. Loki labels every record with `node_id`, and the
+cluster — the `ns8-insights` module, which refuses a second enabled instance —
+on any node, and reads the cluster's default Loki instance, a stream that
+already aggregates every node. Loki labels every record with `node_id`, and the
 collector used to discard it — `sum by (module_id, priority)` in the digest,
 and `tail()` reading only `module_id` and `category` off each series. So a
 finding could say *what* and *when* but not *where*, on a cluster where

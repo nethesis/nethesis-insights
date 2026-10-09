@@ -128,20 +128,22 @@ After the next consensus pass (10s here), the address is on the feed:
 
     curl -u sys-a:x 127.0.0.1:9595/v1/feed
 
-### The edge collector, without installing the module
+### The edge collector
 
-The collector script runs standalone on any NS8 node:
+The client is the NS8 module
+[`NethServer/ns8-insights`](https://github.com/NethServer/ns8-insights). One
+enabled instance per cluster reads the cluster's default Loki instance and
+ships a bundle every 15 minutes. It needs a cluster subscription:
 
-    runagent -m loki
-    cd ../bin
-    curl -o insights-collector https://raw.githubusercontent.com/NethServer/ns8-loki/refs/heads/anomaly_detector/imageroot/bin/insights-collector
-    INSIGHTS_SERVER_URL=https://<host> python3 insights-collector
+    add-module ghcr.io/nethserver/insights:latest 1
+    api-cli run module/insights1/configure-module \
+      --data '{"enabled":true,"base_url":"https://<host>","verify_tls":true}'
 
-`INSIGHTS_SERVER_URL` is the only required variable, and it takes the **bare
-server root** — the collector appends `/logs/v1/bundles` itself. On success it
-prints what it shipped:
+`base_url` takes the **bare server root** — the collector appends
+`/logs/v1/bundles` itself. To see exactly what would leave the node without
+sending anything:
 
-    shipped 76 templates, 332 lines -> 202 {"accepted":true}
+    runagent -m insights1 ../bin/insights-collector --print
 
 ## Against a real model
 

@@ -12,8 +12,8 @@ info:
     Traefik routing by path prefix and stripping the prefix before proxying:
 
     - **Log pipeline** (`insightsd`, prefix `/logs`: `/logs/v1/bundles`,
-      `/logs/v1/findings`): edge nodes ship deduplicated, masked log bundles
-      every 15 minutes; the server gates each one against novelty and
+      `/logs/v1/findings`): each cluster's `ns8-insights` module ships
+      deduplicated, masked log bundles every 15 minutes; the server gates each one against novelty and
       deviation, calls an LLM only when the gate fires, and stores findings
       keyed by a server-computed fingerprint so the same problem is never
       re-raised.
@@ -33,7 +33,7 @@ info:
       hardware baselines.
 
     This document is the contract other teams build clients against
-    (`ns8-crowdsec`, `ns8-loki`, `ns8-core`); it is kept in lockstep with the
+    (`ns8-crowdsec`, `ns8-insights`, `ns8-core`); it is kept in lockstep with the
     Go handlers in `internal/api/logs`, `internal/api/threat` and
     `internal/api/sizing`, not just with the design intent. It does not
     cover the three operator dashboards (`internal/ui/logs`,

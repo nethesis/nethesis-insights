@@ -546,7 +546,7 @@ prefix on the one served hostname:
 
 | Path | Who calls it |
 |---|---|
-| `POST /logs/v1/bundles` | `ns8-loki`'s collector ships a 15-minute bundle |
+| `POST /logs/v1/bundles` | the [`ns8-insights`](https://github.com/NethServer/ns8-insights) module ships a 15-minute bundle for the whole cluster |
 | `GET /logs/v1/findings` | a node reads its own findings, never anyone else's |
 | `POST /blocklist/v1/events` | `ns8-crowdsec` reports ban decisions |
 | `GET /blocklist/v1/feed` | a node fetches the consensus blocklist — **needs the Threat Shield entitlement** |
@@ -561,9 +561,9 @@ that window.
 **Configuration takes the bare server root.** Every client appends its own
 prefix, so one value configures both modules:
 
-    # ns8-loki, on each node
-    api-cli run module/loki1/set-insights \
-      --data '{"active":true,"base_url":"https://insights.example.com","verify_tls":true}'
+    # ns8-insights, one enabled instance per cluster
+    api-cli run module/insights1/configure-module \
+      --data '{"enabled":true,"base_url":"https://insights.example.com","verify_tls":true}'
 
     # ns8-crowdsec, on each node
     INSIGHTS_SERVER_URL=https://insights.example.com
@@ -664,8 +664,9 @@ rather than to this deployment. To undo them:
 
 Two things to know afterwards. Nodes keep calling in and get a connection
 refused, which they treat as a retryable outage — they do not need
-reconfiguring unless the server is gone for good, in which case set
-`ns8-loki`'s `active` to `false` and unset `INSIGHTS_SERVER_URL`. And any node
+reconfiguring unless the server is gone for good, in which case disable
+`ns8-insights` (`configure-module` with `{"enabled": false}`) and unset
+`ns8-crowdsec`'s `INSIGHTS_SERVER_URL`. And any node
 that imported the blocklist keeps its last copy until its own TTL lapses;
 removing the server does not unblock anything.
 

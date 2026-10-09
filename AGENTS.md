@@ -5,7 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `nethesis-insights` is a central log-anomaly analysis server for NethServer fleets
-(~2700 nodes). Edge nodes ship deduplicated, masked log bundles every 15 minutes;
+(~2700 nodes). Each cluster's collector — the NS8 module
+[`ns8-insights`](https://github.com/NethServer/ns8-insights), one enabled
+instance per cluster — ships deduplicated, masked log bundles every 15 minutes;
 the server gates each bundle against novelty, calls an LLM **only**
 when the gate fires, and stores findings keyed by a server-computed fingerprint so
 the same problem is never re-raised.
