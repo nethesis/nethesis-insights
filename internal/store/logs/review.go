@@ -47,6 +47,7 @@ func buildSeverityRankSQL() string {
 type ClassFilter struct {
 	Visibility string
 	Key        string
+	Group      string // only the classes whose group anchor is this key
 	Sort       string
 	Dir        string
 	Limit      int
@@ -124,6 +125,12 @@ type ClassRow struct {
 	SuggestedAction string
 	Modules         []string
 	Evidence        []string
+
+	GroupAnchor     string  // "" when the class has no group row
+	GroupSize       int     // classes in the group, this one included
+	GroupSimilarity float64 // this class's cosine to its anchor
+	Suggestion      string  // a Visibility* value, only on a pending class; "" otherwise
+	SuggestionVotes int     // decided classes in the group carrying Suggestion
 }
 
 // ListClasses returns classes ranked the way the review queue wants them.
@@ -138,7 +145,7 @@ type ClassRow struct {
 // they cannot drift from what is actually retained.
 func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, error) {
 	order, orderArgs := classOrder(f)
-	args := []any{f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key)}
+	args := []any{f.Visibility, f.Visibility, f.Key, VisibilityDismissed, f.Key, likePattern(f.Key), f.Group, f.Group}
 	args = append(append(args, orderArgs...), clampLimit(f.Limit))
 	// order is one of classOrder's fixed clauses, never request text.
 	rows, err := s.db.QueryContext(ctx, `
@@ -149,6 +156,7 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		FROM finding_classes c
 		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR c.visibility != ?)))
 		  AND (? = '' OR c.class_key LIKE ?)
+		  AND (? = '' OR c.class_key IN (SELECT g.class_key FROM class_groups g WHERE g.anchor_key = ?))
 		ORDER BY `+order+`
 		LIMIT ?
 	`, args...) // #nosec G202 -- order is a fixed clause from classSortSQL
@@ -176,6 +184,9 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 		return nil, fmt.Errorf("store: list classes: %w", err)
 	}
 	if err := s.attachClassDetails(ctx, out); err != nil {
+		return nil, err
+	}
+	if err := s.attachGroups(ctx, out); err != nil {
 		return nil, err
 	}
 	return out, nil

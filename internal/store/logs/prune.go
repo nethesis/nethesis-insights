@@ -153,7 +153,7 @@ func (s *Store) PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 // append-only trail in class_decisions would otherwise name a class that no
 // longer exists -- nor is one a retained finding still names.
 func (s *Store) PruneClasses(ctx context.Context, olderThan int64) (int, error) {
-	return s.pruneLoop(ctx, `
+	n, err := s.pruneLoop(ctx, `
 		DELETE FROM finding_classes
 		WHERE class_key IN (
 			SELECT c.class_key FROM finding_classes c
@@ -163,4 +163,22 @@ func (s *Store) PruneClasses(ctx context.Context, olderThan int64) (int, error) 
 			LIMIT ?
 		)
 	`, olderThan)
+	if err != nil {
+		return n, err
+	}
+	// Group rows of classes that no longer exist. An anchor row may go while
+	// its members stay: they keep the anchor_key string, and the pruned
+	// anchor simply stops attracting new classes. The count returned is
+	// classes only.
+	if _, err := s.pruneLoop(ctx, `
+		DELETE FROM class_groups
+		WHERE class_key IN (
+			SELECT g.class_key FROM class_groups g
+			WHERE NOT EXISTS (SELECT 1 FROM finding_classes c WHERE c.class_key = g.class_key)
+			LIMIT ?
+		)
+	`); err != nil {
+		return n, err
+	}
+	return n, nil
 }

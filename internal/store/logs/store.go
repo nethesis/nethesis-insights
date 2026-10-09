@@ -221,6 +221,21 @@ func (s *Store) Init(ctx context.Context) error {
 		// The review queue counts each class's findings and systems, and
 		// the class pruning asks whether any finding still names one.
 		`CREATE INDEX IF NOT EXISTS idx_findings_class ON findings(class_key, system_id)`,
+		// Review grouping: see groups.go. One row per embedded class, written
+		// only by the grouping pass; it never touches finding_classes or
+		// class_decisions. anchor_key == class_key for an anchor (similarity 1).
+		// vector is a JSON array of float32, model the embedder that made it:
+		// vectors of different models are never compared.
+		`CREATE TABLE IF NOT EXISTS class_groups (
+			class_key TEXT PRIMARY KEY,
+			anchor_key TEXT NOT NULL,
+			similarity REAL NOT NULL,
+			threshold REAL NOT NULL,
+			model TEXT NOT NULL,
+			vector TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_class_groups_anchor ON class_groups(anchor_key)`,
 	}
 
 	for _, stmt := range stmts {

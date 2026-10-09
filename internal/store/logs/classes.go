@@ -108,21 +108,27 @@ func (s *Store) classDecision(ctx context.Context, key, actor, action string, no
 	return tx.Commit()
 }
 
+// visibilityAction maps a decidable visibility to its class_decisions action.
+func visibilityAction(visibility string) (string, bool) {
+	switch visibility {
+	case VisibilityCustomer:
+		return ActionDeliver, true
+	case VisibilityOperator:
+		return ActionInternal, true
+	case VisibilityDismissed:
+		return ActionDismiss, true
+	}
+	return "", false
+}
+
 // SetClassVisibility decides whether a class's findings reach the customer
 // (VisibilityCustomer, "deliver"), stay on the operator UI
 // (VisibilityOperator, "internal") or leave every view (VisibilityDismissed,
 // "dismiss"). Never back to pending: a decision can be changed, not taken
 // back, so a dismissal is undone by delivering or keeping the class internal.
 func (s *Store) SetClassVisibility(ctx context.Context, key, visibility, actor string, now int64) error {
-	var action string
-	switch visibility {
-	case VisibilityCustomer:
-		action = ActionDeliver
-	case VisibilityOperator:
-		action = ActionInternal
-	case VisibilityDismissed:
-		action = ActionDismiss
-	default:
+	action, ok := visibilityAction(visibility)
+	if !ok {
 		return ErrInvalidVisibility
 	}
 	return s.classDecision(ctx, key, actor, action, now, func(tx bun.Tx) (string, error) {
