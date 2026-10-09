@@ -37,10 +37,15 @@ jobs:
       # only a v2.x golangci-lint engine understands -- pin a v2 release,
       # matching the version this repo's tooling was validated against.
       #
+      # The engine must also be built with the Go minor CI installs: a binary
+      # built with an older Go cannot read the newer standard library's export
+      # data and fails every package with a "typecheck" error, which is how
+      # v2.13.2 (go1.26) broke on 1.27.x. v2.14.0 is built with go1.27.0.
+      #
       # The ACTION major must move with it: v6 rejects a v2 version string
       # outright ("golangci-lint v2 is not supported by golangci-lint-action
       # v6"), which is a hard failure at install time rather than a lint
       # finding, so the two pins are one decision and not two.
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.13.2
+          version: v2.14.0
