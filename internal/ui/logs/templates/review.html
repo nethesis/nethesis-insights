@@ -42,17 +42,36 @@ separately in the audit trail.</small></p>
 </div>
 {{end}}
 
+{{if .CanWrite}}
+<form id="bulk-decide" method="post" action="{{.Base}}/review/bulk">
+<input type="hidden" name="view" value="{{.View}}">
+<input type="hidden" name="filter" value="{{.Key}}">
+<input type="hidden" name="group" value="{{.Group}}">
+<input type="hidden" name="sort" value="{{.Sort}}">
+<input type="hidden" name="dir" value="{{.Dir}}">
+<p><small>Tick classes in the table, then decide them together: each ticked class gets the decision you
+press, with one audit entry each.</small></p>
+<fieldset role="group">
+<button type="submit" name="visibility" value="customer">Deliver selected</button>
+<button type="submit" name="visibility" value="operator" class="secondary">Keep selected internal</button>
+<button type="submit" name="visibility" value="dismissed" class="secondary">Dismiss selected</button>
+</fieldset>
+</form>
+{{end}}
+
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr>
-{{range .Headers}}<th scope="col"{{if .Num}} class="num"{{end}}{{with .AriaSort}} aria-sort="{{.}}"{{end}}><a href="{{.Href}}">{{.Label}}</a>{{with .Arrow}} <span aria-hidden="true">{{.}}</span>{{end}}</th>
+{{if .CanWrite}}<th scope="col">Select</th>
+{{end}}{{range .Headers}}<th scope="col"{{if .Num}} class="num"{{end}}{{with .AriaSort}} aria-sort="{{.}}"{{end}}><a href="{{.Href}}">{{.Label}}</a>{{with .Arrow}} <span aria-hidden="true">{{.}}</span>{{end}}</th>
 {{end}}</tr>
 </thead>
 <tbody>
 {{range .Rows}}
 <tr>
-<td>
+{{if $.CanWrite}}<td><input type="checkbox" name="member" value="{{.Key}}" form="bulk-decide" aria-label="select {{if .Titles}}{{index .Titles 0}}{{else}}{{short .Key 16}}{{end}}"></td>
+{{end}}<td>
 <button type="button" class="linklike" title="{{if .Titles}}{{index .Titles 0}}{{else}}{{.Key}}{{end}}" commandfor="class-{{.Key}}" command="show-modal"><span>{{if .Titles}}{{index .Titles 0}}{{else}}{{short .Key 16}}{{end}}</span></button>
 {{if .Security}} <span class="chip" data-severity="critical">security</span>{{end}}
 {{if gt .GroupSize 1}}<br><small><a href="{{$.Base}}/review?group={{.GroupAnchor}}">group of {{.GroupSize}}</a></small>{{end}}
@@ -161,7 +180,7 @@ module and priority.{{end}}</small></p>
 <td class="mono" title="{{fmtTime .LastSeen}}">{{fmtAgo .LastSeen}}</td>
 </tr>
 {{else}}
-<tr><td colspan="7">no classes match this filter</td></tr>
+<tr><td colspan="{{if $.CanWrite}}8{{else}}7{{end}}">no classes match this filter</td></tr>
 {{end}}
 </tbody>
 </table>

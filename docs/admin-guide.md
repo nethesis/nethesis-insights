@@ -1336,6 +1336,14 @@ the next run; it never holds up the classes behind it. On `/review`:
   `group <anchor>`. A class that joined the group after you opened the page,
   or that is hidden by the current view, is not decided: reload to see it.
   Classes already decided are left alone.
+- **Deciding several classes at once.** Every row of the queue has a checkbox
+  in its first column. Tick the classes you want, then press **Deliver
+  selected**, **Keep selected internal** or **Dismiss selected** above the
+  table. Each ticked class gets that decision, recorded on `/review/audit` as
+  its own decision with the detail `bulk`. Unlike the group buttons this also
+  changes a class that was decided before, the same as the per-class buttons;
+  a class already at that decision is left alone. Up to 200 classes at a time,
+  and there is no select-all: tick the rows one by one.
 
 **A suggestion is only a hint.** Nothing is ever decided without someone
 pressing a button, and a group is formed by similarity, not by identity: in a

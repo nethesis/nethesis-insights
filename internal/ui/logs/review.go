@@ -247,7 +247,8 @@ func (s *server) handleReviewAudit(w http.ResponseWriter, r *http.Request) {
 
 // handleDecision serves every writableRoutes path, reached only after
 // AuthenticateWrite. /review/group applies one visibility to the listed
-// members of a group that are still pending, one audit row each; the rest
+// members of a group that are still pending, and /review/bulk to every
+// checked class whatever it was decided before, one audit row each; the rest
 // apply to the whole class -- every
 // finding in it, on every system, now and when it recurs -- never to one
 // finding.
@@ -259,14 +260,20 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 	}
 	// PostFormValue, never FormValue: a write takes its parameters from the
 	// body it was submitted with, not from the query string.
-	field := "key"
-	if r.URL.Path == "/review/group" {
-		field = "anchor"
-	}
-	key, ok := formKey(r, field)
-	if !ok {
-		http.Error(w, "a class key is required", http.StatusBadRequest)
-		return
+	var key string
+	switch r.URL.Path {
+	case "/review/bulk":
+		// no single class key: the checked members are the targets
+	default:
+		field := "key"
+		if r.URL.Path == "/review/group" {
+			field = "anchor"
+		}
+		var ok bool
+		if key, ok = formKey(r, field); !ok {
+			http.Error(w, "a class key is required", http.StatusBadRequest)
+			return
+		}
 	}
 	ctx, now := r.Context(), s.now()
 
@@ -294,6 +301,20 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 		// Only the listed members that are still pending in this group
 		// change; the count is not shown.
 		_, err = s.writer.SetGroupVisibility(ctx, key, members, visibility, actor, now)
+	case "/review/bulk":
+		visibility := r.PostFormValue("visibility")
+		switch visibility {
+		case logsstore.VisibilityCustomer, logsstore.VisibilityOperator, logsstore.VisibilityDismissed:
+		default:
+			http.Error(w, "visibility must be customer, operator or dismissed", http.StatusBadRequest)
+			return
+		}
+		members, ok := formMembers(r)
+		if !ok {
+			http.Error(w, "member keys are required (at most 200, each a class key)", http.StatusBadRequest)
+			return
+		}
+		_, err = s.writer.SetClassesVisibility(ctx, members, visibility, actor, now)
 	case "/review/security":
 		security, ok := parseOnOff(r.PostFormValue("security"))
 		if !ok {

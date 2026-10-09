@@ -176,19 +176,68 @@ func (s *Store) SetGroupVisibility(ctx context.Context, anchor string, members [
 	}
 
 	for _, p := range todo {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE finding_classes SET visibility = ? WHERE class_key = ?`, visibility, p.key); err != nil {
-			return 0, fmt.Errorf("store: set class visibility: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, ulid.Make().String(), p.key, actor, action, "group "+anchor, p.pv.String, now); err != nil {
-			return 0, fmt.Errorf("store: record class decision: %w", err)
+		if err := applyVisibility(ctx, tx, p, visibility, action, "group "+anchor, actor, now); err != nil {
+			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: commit group decision: %w", err)
+	}
+	return len(todo), nil
+}
+
+// applyVisibility sets one class's visibility and appends its
+// class_decisions row; the one place the group and bulk decisions write.
+func applyVisibility(ctx context.Context, tx bun.Tx, p pendingClass, visibility, action, detail, actor string, now int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE finding_classes SET visibility = ? WHERE class_key = ?`, visibility, p.key); err != nil {
+		return fmt.Errorf("store: set class visibility: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, ulid.Make().String(), p.key, actor, action, detail, p.pv.String, now); err != nil {
+		return fmt.Errorf("store: record class decision: %w", err)
+	}
+	return nil
+}
+
+// SetClassesVisibility applies visibility to each listed class, in one
+// transaction under the write lock, writing one class_decisions row (detail
+// "bulk") per class whose visibility actually changed. Unlike
+// SetGroupVisibility it may change an already-decided class: the operator
+// ticked it explicitly, the same power as the per-class buttons. A key that
+// is unknown, or already at visibility, is skipped silently. Never back to
+// pending (ErrInvalidVisibility). It returns how many classes changed.
+func (s *Store) SetClassesVisibility(ctx context.Context, keys []string, visibility, actor string, now int64) (int, error) {
+	action, ok := visibilityAction(visibility)
+	if !ok {
+		return 0, ErrInvalidVisibility
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	todo, err := changingClasses(ctx, tx, keys, visibility)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, p := range todo {
+		if err := applyVisibility(ctx, tx, p, visibility, action, "bulk", actor, now); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit bulk decision: %w", err)
 	}
 	return len(todo), nil
 }
@@ -327,6 +376,34 @@ func pendingGroupClasses(ctx context.Context, tx bun.Tx, anchor string, members 
 		var p pendingClass
 		if err := rows.Scan(&p.key, &p.pv); err != nil {
 			return nil, fmt.Errorf("store: scan group class: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// changingClasses lists those of keys that exist and are not already at
+// visibility.
+func changingClasses(ctx context.Context, tx bun.Tx, keys []string, visibility string) ([]pendingClass, error) {
+	args := []any{visibility}
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	rows, err := tx.QueryContext(ctx, `
+		SELECT class_key, first_prompt_version FROM finding_classes
+		WHERE visibility <> ? AND class_key IN (`+in+`)
+		ORDER BY class_key
+	`, args...) // #nosec G202 -- only "?" placeholders are concatenated
+	if err != nil {
+		return nil, fmt.Errorf("store: bulk classes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []pendingClass
+	for rows.Next() {
+		var p pendingClass
+		if err := rows.Scan(&p.key, &p.pv); err != nil {
+			return nil, fmt.Errorf("store: scan bulk class: %w", err)
 		}
 		out = append(out, p)
 	}

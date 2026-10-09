@@ -287,3 +287,57 @@ func TestGroupingVisibilitiesMatchStore(t *testing.T) {
 		t.Fatal("two decisions must not suggest")
 	}
 }
+
+func TestSetClassesVisibilityChangesOnlyListedClasses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedGroup(t, s)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:b", VisibilityCustomer, "op", 1500))
+	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityOperator, "op", 1500))
+
+	// v3:a pending (changes), v3:b decided otherwise (changes), v3:c already
+	// at the target (skipped), v3:ghost unknown (skipped), v3:x not listed.
+	n, err := s.SetClassesVisibility(ctx, []string{"v3:a", "v3:b", "v3:c", "v3:ghost"}, VisibilityOperator, "alice", 2000)
+	mustDo(t, err)
+	if n != 2 {
+		t.Fatalf("changed %d, want 2", n)
+	}
+	for key, want := range map[string]string{"v3:a": VisibilityOperator, "v3:b": VisibilityOperator,
+		"v3:c": VisibilityOperator, "v3:x": VisibilityPending} {
+		c, _, _ := s.GetClass(ctx, key)
+		if c.Visibility != want {
+			t.Fatalf("%s: %s, want %s", key, c.Visibility, want)
+		}
+	}
+	ds, _ := s.ClassDecisions(ctx, "v3:a")
+	if len(ds) != 1 || ds[0].Action != ActionInternal || ds[0].Detail != "bulk" ||
+		ds[0].Actor != "alice" || ds[0].PromptVersion != "p1" {
+		t.Fatalf("audit row: %+v", ds)
+	}
+	if ds, _ := s.ClassDecisions(ctx, "v3:b"); len(ds) != 2 {
+		t.Fatalf("decided class that changed: %+v", ds)
+	}
+	if ds, _ := s.ClassDecisions(ctx, "v3:c"); len(ds) != 1 {
+		t.Fatalf("class already at target got an audit row: %+v", ds)
+	}
+	if ds, _ := s.ClassDecisions(ctx, "v3:x"); len(ds) != 0 {
+		t.Fatalf("unlisted class audited: %+v", ds)
+	}
+}
+
+func TestSetClassesVisibilityRefusalsAndEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedGroup(t, s)
+	for _, v := range []string{VisibilityPending, "garbage", ""} {
+		if _, err := s.SetClassesVisibility(ctx, []string{"v3:a"}, v, "op", 1); !errors.Is(err, ErrInvalidVisibility) {
+			t.Fatalf("%q: %v", v, err)
+		}
+	}
+	if n, err := s.SetClassesVisibility(ctx, nil, VisibilityCustomer, "op", 1); err != nil || n != 0 {
+		t.Fatalf("empty: n=%d err=%v", n, err)
+	}
+	if c, _, _ := s.GetClass(ctx, "v3:a"); c.Visibility != VisibilityPending {
+		t.Fatalf("refused call changed a class: %s", c.Visibility)
+	}
+}

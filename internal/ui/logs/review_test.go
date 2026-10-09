@@ -55,6 +55,10 @@ func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor string, member
 	return 2, f.record("group", anchor, visibility, actor, strings.Join(members, ","))
 }
 
+func (f *fakeWriter) SetClassesVisibility(_ context.Context, keys []string, visibility, actor string, _ int64) (int, error) {
+	return 2, f.record("bulk", visibility, actor, strings.Join(keys, ","))
+}
+
 const testAdminKey = "dev-admin-key"
 
 func newWriteTestServer(t *testing.T, r Reader, w Writer) http.Handler {
@@ -154,6 +158,7 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 		{"/review/dismiss", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa dismissed alice"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "group v3:aaaa customer alice v3:aaaa,v3:bbbb"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}, "member": {"v3:aaaa"}}, "group v3:aaaa dismissed alice v3:aaaa"},
+		{"/review/bulk", url.Values{"visibility": {"operator"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "bulk operator alice v3:aaaa,v3:bbbb"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"on"}}, "security v3:aaaa on alice"},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"off"}}, "security v3:aaaa off alice"},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"high"}}, "severity v3:aaaa high alice"},
@@ -206,6 +211,13 @@ func TestReviewRejectsBadInput(t *testing.T) {
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {" ", ""}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {strings.Repeat("k", maxClassKeyLen+1)}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": tooManyMembers()}},
+		{"/review/bulk", url.Values{"visibility": {"pending"}, "member": {"v3:aaaa"}}},
+		{"/review/bulk", url.Values{"visibility": {"bogus"}, "member": {"v3:aaaa"}}},
+		{"/review/bulk", url.Values{"member": {"v3:aaaa"}}},
+		{"/review/bulk", url.Values{"visibility": {"customer"}}},
+		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": {" ", ""}}},
+		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": {strings.Repeat("k", maxClassKeyLen+1)}}},
+		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": tooManyMembers()}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"maybe"}}},
 		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {""}}},
 		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"urgent"}}},
@@ -592,18 +604,18 @@ func TestReviewGroupViewFiltersAndOffersGroupForms(t *testing.T) {
 	for _, c := range r.classes {
 		if c.Visibility == logsstore.VisibilityPending {
 			pending++
-			if want := `name="member" value="` + c.Key + `"`; !strings.Contains(body, want) {
+			if want := `type="hidden" name="member" value="` + c.Key + `"`; !strings.Contains(body, want) {
 				t.Errorf("group form lacks %q", want)
 			}
-		} else if strings.Contains(body, `name="member" value="`+c.Key+`"`) {
+		} else if strings.Contains(body, `type="hidden" name="member" value="`+c.Key+`"`) {
 			t.Errorf("group form lists decided class %s", c.Key)
 		}
 	}
 	if pending == 0 {
 		t.Fatal("fixture has no pending class")
 	}
-	if want := 3 * pending; strings.Count(body, `name="member"`) != want {
-		t.Errorf("member fields %d, want %d (3 forms x %d pending)", strings.Count(body, `name="member"`), want, pending)
+	if want := 3 * pending; strings.Count(body, `type="hidden" name="member"`) != want {
+		t.Errorf("member fields %d, want %d (3 forms x %d pending)", strings.Count(body, `type="hidden" name="member"`), want, pending)
 	}
 	if !strings.Contains(body, `name="filter"`) {
 		t.Error("group forms drop the key filter")
@@ -632,5 +644,60 @@ func TestReviewGroupDecisionKeepsTheGroupFilter(t *testing.T) {
 	rec := do(h, writeReq("/review/group", form))
 	if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/review?group=v3%3Aanchor&key=ssh&view=all" {
 		t.Fatalf("got %d %q", rec.Code, loc)
+	}
+}
+
+func TestReviewBulkIgnoresQueryStringMembers(t *testing.T) {
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, seededReader(), w)
+	form := url.Values{"visibility": {"customer"}}
+	if rec := do(h, writeReq("/review/bulk?member=v3:aaaa", form)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	if len(w.calls) != 0 {
+		t.Fatalf("store called: %v", w.calls)
+	}
+}
+
+func TestReviewBulkRouteIsEnumerated(t *testing.T) {
+	if !writableRoutes["/review/bulk"] {
+		t.Fatal("/review/bulk is not in writableRoutes, so the auth loop does not cover it")
+	}
+}
+
+func TestReviewBulkFormAndCheckboxes(t *testing.T) {
+	r := seededReader()
+	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
+	for _, want := range []string{
+		`<form id="bulk-decide" method="post" action="/review/bulk">`,
+		`name="visibility" value="customer"`, `name="visibility" value="operator"`, `name="visibility" value="dismissed"`,
+		`Deliver selected`, `Keep selected internal`, `Dismiss selected`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	rows := len(r.classes)
+	if n := strings.Count(body, `<input type="checkbox" name="member"`); n == 0 || n != rows {
+		t.Errorf("%d checkboxes, want %d (one per row)", n, rows)
+	}
+	if n := strings.Count(body, `form="bulk-decide"`); n != rows {
+		t.Errorf("%d checkboxes tied to the bulk form, want %d", n, rows)
+	}
+	table := body[strings.Index(body, "<table"):strings.Index(body, "</table>")]
+	head := table[:strings.Index(table, "</thead>")]
+	firstRow := table[strings.Index(table, "<tbody>"):]
+	firstRow = firstRow[:strings.Index(firstRow, "</tr>")]
+	// the dialog sits inside the first cell and holds no <td>, so cells count
+	// directly
+	if h, c := strings.Count(head, "<th "), strings.Count(firstRow, "<td"); h != c {
+		t.Errorf("header has %d cells, first row %d", h, c)
+	}
+
+	ro := get(t, newTestServer(t, seededReader(), nil), "/review").Body.String()
+	for _, bad := range []string{"bulk-decide", `type="checkbox"`, "/review/bulk"} {
+		if strings.Contains(ro, bad) {
+			t.Errorf("read-only page carries %q", bad)
+		}
 	}
 }

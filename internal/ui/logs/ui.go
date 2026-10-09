@@ -85,6 +85,9 @@ type Writer interface {
 	// SetGroupVisibility decides the listed members of a group that are still
 	// pending, at once, and returns how many it changed.
 	SetGroupVisibility(ctx context.Context, anchor string, members []string, visibility, actor string, now int64) (int, error)
+	// SetClassesVisibility decides the listed classes, whatever they were
+	// decided before, and returns how many it changed.
+	SetClassesVisibility(ctx context.Context, keys []string, visibility, actor string, now int64) (int, error)
 }
 
 // Runtime reports live process state. *queue.Queue satisfies it. rt may be
@@ -131,6 +134,7 @@ var writableRoutes = map[string]bool{
 	"/review/severity": true,
 	"/review/doc-ref":  true,
 	"/review/group":    true,
+	"/review/bulk":     true,
 }
 
 // nav is this dashboard's nav bar structure. A single group with no label
