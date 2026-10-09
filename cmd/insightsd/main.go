@@ -212,8 +212,14 @@ func main() {
 	reviewGroupSimilarity := svc.GetenvFloat("REVIEW_GROUP_SIMILARITY", 0.98)
 	// How often the grouping pass runs.
 	groupInterval := svc.GetenvDuration("GROUP_INTERVAL", time.Minute)
-	if reviewGroupSimilarity <= 0 || reviewGroupSimilarity > 1 {
+	// Written as a negation so NaN, for which every comparison is false, is
+	// refused too.
+	if !(reviewGroupSimilarity > 0 && reviewGroupSimilarity <= 1) {
 		slog.Error("invalid REVIEW_GROUP_SIMILARITY: must be above 0 and at most 1", "value", reviewGroupSimilarity)
+		os.Exit(1)
+	}
+	if embedURL != "" && groupInterval <= 0 {
+		slog.Error("invalid GROUP_INTERVAL: must be positive when EMBED_URL is set", "value", groupInterval)
 		os.Exit(1)
 	}
 
@@ -489,10 +495,10 @@ func main() {
 	// stopped last and simply waited on, the same ordering threatd and
 	// sizingd give their own housekeeping loops.
 	stopMaint()
-	<-maintDone
 	stopGroup()
+	<-maintDone
 	<-groupDone
-	slog.Info("maintenance loop stopped")
+	slog.Info("maintenance and grouping loops stopped")
 }
 
 // logGauges refreshes insightsd's database-derived gauges after each
