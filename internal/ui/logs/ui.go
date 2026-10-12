@@ -112,8 +112,9 @@ const (
 	reviewAuditLimit   = 500
 )
 
-// Review input bounds. A class key is "v3:" plus 64 hex characters; the cap
-// only has to refuse garbage, not describe the format.
+// Review input bounds. A class key is fingerprint.Version, a colon and 64 hex
+// characters (e.g. "v4:…"); the cap only has to refuse garbage, not describe
+// the format.
 const (
 	maxClassKeyLen = 128
 	maxDocRefLen   = 512
