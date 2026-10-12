@@ -74,8 +74,10 @@ type Finding struct {
 	FirstSeen       int64    `json:"first_seen"`
 	LastSeen        int64    `json:"last_seen"`
 	ReopenedAt      *int64   `json:"reopened_at,omitempty"`
-	LLMModel        string   `json:"llm_model"`
-	PromptVersion   string   `json:"prompt_version"`
+	// LLMModel and PromptVersion record what produced the finding.
+	// Server-internal: the operator UI shows them, the read API does not.
+	LLMModel      string `json:"-"`
+	PromptVersion string `json:"-"`
 	// Nodes holds the node ids the cited templates were last seen on --
 	// replaced, not accumulated, on each occurrence, so it answers "where is
 	// this happening now" and stays bounded.

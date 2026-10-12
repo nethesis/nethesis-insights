@@ -34,8 +34,7 @@ func (f *fakePublisher) Publish(b model.Bundle) error {
 	return nil
 }
 
-// fakeStore backs /v1/findings. Nothing here exercises it beyond
-// construction, but NewServer takes one Store for both routes.
+// fakeStore backs /v1/findings. NewServer takes one Store for both routes.
 type fakeStore struct {
 	findings []model.Finding
 	roster   map[int]string
@@ -570,5 +569,41 @@ func TestIngestRejectsTooManyTruncationRecords(t *testing.T) {
 				t.Fatalf("published = %v, want %v", gotPublished, wantPublished)
 			}
 		})
+	}
+}
+
+// What produced a finding is the operator's business, not the customer's:
+// the read API carries the finding, never the model or prompt behind it.
+func TestFindingsOmitModelAndPromptVersion(t *testing.T) {
+	store := &fakeStore{findings: []model.Finding{{
+		ID: "f1", Severity: "high", Title: "t", Status: model.StatusOpen,
+		LLMModel: "some-model", PromptVersion: "v9",
+	}}}
+	h := NewServer(&fakePublisher{}, store, trustedProxy, Config{Now: fixedClock}, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/findings", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth(testSystemID, testSecret)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Findings []map[string]any `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(body.Findings))
+	}
+	f := body.Findings[0]
+	if f["id"] != "f1" {
+		t.Errorf("id = %v, want f1", f["id"])
+	}
+	for _, k := range []string{"llm_model", "prompt_version"} {
+		if _, ok := f[k]; ok {
+			t.Errorf("%s is in the read API: %s", k, rec.Body)
+		}
 	}
 }

@@ -240,8 +240,6 @@ paths:
                     occurrence_count: 1
                     first_seen: 1754380811000
                     last_seen: 1754381690000
-                    llm_model: nvidia/nemotron-3-ultra-550b-a55b:free
-                    prompt_version: v1
                     security: false
         "400":
           description: Invalid `since` (not an integer).
@@ -1092,8 +1090,6 @@ components:
         - occurrence_count
         - first_seen
         - last_seen
-        - llm_model
-        - prompt_version
         - security
       properties:
         id: { type: string, description: ULID. }
@@ -1122,8 +1118,6 @@ components:
           type: ["integer", "null"]
           format: int64
           description: Set when a finding that had gone stale (absent past STALE_AFTER) recurred.
-        llm_model: { type: string }
-        prompt_version: { type: string, description: Code constant stamped at analysis time, never configuration. }
         nodes:
           type: array
           items: { type: integer, minimum: 1 }
