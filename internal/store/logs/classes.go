@@ -185,6 +185,99 @@ func (s *Store) SetClassDocRef(ctx context.Context, key, docRef, actor string, n
 	})
 }
 
+// ClassUpdate is a class's whole decidable state, as the review dialog's one
+// form posts it.
+type ClassUpdate struct {
+	// Visibility is VisibilityCustomer, VisibilityOperator or
+	// VisibilityDismissed; "" leaves it as it is (a pending class the
+	// operator has not decided yet).
+	Visibility       string
+	Security         bool
+	SeverityOverride string // "" is the AI's severity
+	DocRef           string // "" is none
+}
+
+// UpdateClass applies a ClassUpdate in one transaction, compared against the
+// stored row: only the fields that differ change, each with its own
+// class_decisions row under the same action as the single-field methods
+// above, in a fixed order (visibility, security, severity, doc_ref). It
+// returns how many changed; nothing changed records nothing.
+func (s *Store) UpdateClass(ctx context.Context, key string, u ClassUpdate, actor string, now int64) (int, error) {
+	visAction := ""
+	if u.Visibility != "" {
+		var ok bool
+		if visAction, ok = visibilityAction(u.Visibility); !ok {
+			return 0, ErrInvalidVisibility
+		}
+	}
+	if u.SeverityOverride != "" && !model.ValidSeverity(u.SeverityOverride) {
+		return 0, ErrInvalidSeverity
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var cur Class
+	var security int
+	var severity, docRef, pv sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT visibility, security, severity_override, doc_ref, first_prompt_version
+		FROM finding_classes WHERE class_key = ?
+	`, key).Scan(&cur.Visibility, &security, &severity, &docRef, &pv)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrUnknownClass
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: read finding class: %w", err)
+	}
+
+	type change struct {
+		column, action, detail string
+		value                  any
+	}
+	var changes []change
+	if u.Visibility != "" && u.Visibility != cur.Visibility {
+		changes = append(changes, change{"visibility", visAction, "", u.Visibility})
+	}
+	if u.Security != (security != 0) {
+		detail := "off"
+		if u.Security {
+			detail = "on"
+		}
+		changes = append(changes, change{"security", ActionSecurity, detail, boolToInt(u.Security)})
+	}
+	if u.SeverityOverride != severity.String {
+		changes = append(changes, change{"severity_override", ActionSeverity, u.SeverityOverride, nullIfEmpty(u.SeverityOverride)})
+	}
+	if u.DocRef != docRef.String {
+		changes = append(changes, change{"doc_ref", ActionDocRef, u.DocRef, nullIfEmpty(u.DocRef)})
+	}
+
+	for _, c := range changes {
+		// c.column is one of the four literals above, never request input.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE finding_classes SET `+c.column+` = ? WHERE class_key = ?`, c.value, key); err != nil { // #nosec G202
+			return 0, fmt.Errorf("store: set class %s: %w", c.column, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, ulid.Make().String(), key, actor, c.action, nullIfEmpty(c.detail), pv.String, now); err != nil {
+			return 0, fmt.Errorf("store: record class decision: %w", err)
+		}
+	}
+	if len(changes) == 0 {
+		return 0, nil
+	}
+	return len(changes), tx.Commit()
+}
+
 // GetClass reads one finding_classes row.
 func (s *Store) GetClass(ctx context.Context, key string) (Class, bool, error) {
 	var c Class

@@ -71,17 +71,15 @@ type Reader interface {
 	ListClassDecisions(ctx context.Context, limit int) ([]logsstore.ClassDecision, error)
 }
 
-// Writer is the slice of logsstore.Store the review routes need, one method
-// per decision. Each is a single transaction that also appends the
-// decision's class_decisions row, so a class never changes without the
-// record of who changed it. It is wired in, and its routes are reachable,
+// Writer is the slice of logsstore.Store the review routes need. Each method
+// is a single transaction that also appends one class_decisions row per
+// change, so a class never changes without the record of who changed it. It is wired in, and its routes are reachable,
 // only when ADMIN_API_KEY is set -- see NewServer and writableRoutes.
 // *logsstore.Store satisfies it.
 type Writer interface {
-	SetClassVisibility(ctx context.Context, key, visibility, actor string, now int64) error
-	SetClassSecurity(ctx context.Context, key string, security bool, actor string, now int64) error
-	SetClassSeverity(ctx context.Context, key, severity, actor string, now int64) error
-	SetClassDocRef(ctx context.Context, key, docRef, actor string, now int64) error
+	// UpdateClass applies the class dialog's whole form, changing (and
+	// auditing) only the fields that differ, and returns how many did.
+	UpdateClass(ctx context.Context, key string, u logsstore.ClassUpdate, actor string, now int64) (int, error)
 	// SetGroupVisibility decides the listed members of a group that are still
 	// pending, at once, and returns how many it changed.
 	SetGroupVisibility(ctx context.Context, anchor string, members []string, visibility, actor string, now int64) (int, error)
@@ -128,14 +126,9 @@ const (
 // still Basic auth, which a browser replays on a forged cross-site POST.
 // The class key is always a form field, never part of the path.
 var writableRoutes = map[string]bool{
-	"/review/deliver":  true,
-	"/review/internal": true,
-	"/review/dismiss":  true,
-	"/review/security": true,
-	"/review/severity": true,
-	"/review/doc-ref":  true,
-	"/review/group":    true,
-	"/review/bulk":     true,
+	"/review/decide": true,
+	"/review/group":  true,
+	"/review/bulk":   true,
 }
 
 // nav is this dashboard's nav bar structure. A single group with no label

@@ -129,8 +129,16 @@ var groupActions = []groupAction{
 	{logsstore.VisibilityDismissed, "Dismiss all pending in this group"},
 }
 
-// suggestionLabel names a suggested visibility in the words of the per-class
-// buttons.
+// classChoices are the class dialog's visibility radios, after "pending"
+// (offered only while the class is still undecided).
+var classChoices = []groupAction{
+	{logsstore.VisibilityCustomer, "Deliver to customers"},
+	{logsstore.VisibilityOperator, "Keep internal"},
+	{logsstore.VisibilityDismissed, "Dismiss"},
+}
+
+// suggestionLabel names a suggested visibility in the words of the class
+// dialog's choices.
 func suggestionLabel(v string) string {
 	switch v {
 	case logsstore.VisibilityCustomer:
@@ -151,6 +159,7 @@ type reviewPageData struct {
 	Key          string
 	Group        string
 	GroupActions []groupAction
+	Choices      []groupAction
 	// PendingKeys are the pending rows shown, which the group forms post as
 	// the classes to decide: the operator decides what the page displayed.
 	PendingKeys []string
@@ -200,6 +209,7 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		Key:          key,
 		Group:        group,
 		GroupActions: groupActions,
+		Choices:      classChoices,
 		PendingKeys:  pending,
 		Sort:         sort,
 		Dir:          dir,
@@ -248,10 +258,10 @@ func (s *server) handleReviewAudit(w http.ResponseWriter, r *http.Request) {
 // handleDecision serves every writableRoutes path, reached only after
 // AuthenticateWrite. /review/group applies one visibility to the listed
 // members of a group that are still pending, and /review/bulk to every
-// checked class whatever it was decided before, one audit row each; the rest
-// apply to the whole class -- every
-// finding in it, on every system, now and when it recurs -- never to one
-// finding.
+// checked class whatever it was decided before, one audit row each.
+// /review/decide is the class dialog's one form: the class's whole state,
+// applied to the whole class -- every finding in it, on every system, now and
+// when it recurs -- never to one finding.
 func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor string) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxReviewForm)
 	if err := r.ParseForm(); err != nil {
@@ -279,12 +289,13 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 
 	var err error
 	switch r.URL.Path {
-	case "/review/deliver":
-		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityCustomer, actor, now)
-	case "/review/internal":
-		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityOperator, actor, now)
-	case "/review/dismiss":
-		err = s.writer.SetClassVisibility(ctx, key, logsstore.VisibilityDismissed, actor, now)
+	case "/review/decide":
+		u, ok := formClassUpdate(r)
+		if !ok {
+			http.Error(w, "visibility, security, severity or doc_ref is invalid (doc_ref must be an absolute http(s) URL)", http.StatusBadRequest)
+			return
+		}
+		_, err = s.writer.UpdateClass(ctx, key, u, actor, now)
 	case "/review/group":
 		visibility := r.PostFormValue("visibility")
 		switch visibility {
@@ -315,27 +326,6 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 			return
 		}
 		_, err = s.writer.SetClassesVisibility(ctx, members, visibility, actor, now)
-	case "/review/security":
-		security, ok := parseOnOff(r.PostFormValue("security"))
-		if !ok {
-			http.Error(w, "security must be on or off", http.StatusBadRequest)
-			return
-		}
-		err = s.writer.SetClassSecurity(ctx, key, security, actor, now)
-	case "/review/severity":
-		severity := r.PostFormValue("severity")
-		if severity != "" && !model.ValidSeverity(severity) {
-			http.Error(w, "unknown severity", http.StatusBadRequest)
-			return
-		}
-		err = s.writer.SetClassSeverity(ctx, key, severity, actor, now)
-	case "/review/doc-ref":
-		docRef, ok := cleanDocRef(r.PostFormValue("doc_ref"))
-		if !ok {
-			http.Error(w, "doc_ref must be an absolute http(s) URL", http.StatusBadRequest)
-			return
-		}
-		err = s.writer.SetClassDocRef(ctx, key, docRef, actor, now)
 	default:
 		// Reachable only if a path is added to writableRoutes with no case
 		// here -- err would stay nil and fall through to the redirect below
@@ -356,18 +346,37 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 	}
 }
 
-// parseOnOff reads the /review/security form's security field: "on" or
-// "off", nothing else -- there is no implicit default, so a stale or
-// malformed form is refused rather than silently toggling either way.
-func parseOnOff(v string) (on bool, ok bool) {
-	switch v {
-	case "on":
-		return true, true
-	case "off":
-		return false, true
+// formClassUpdate reads the class dialog's form. Every field is posted by
+// that form, so each is required in its own way: visibility must name one of
+// the four (pending only leaves an undecided class undecided -- the store
+// still refuses it as a target); security is a checkbox, "on" or absent; a
+// blank severity or doc_ref clears it. Nothing is defaulted from a missing
+// visibility, so a stale or malformed form is refused rather than applied.
+func formClassUpdate(r *http.Request) (logsstore.ClassUpdate, bool) {
+	var u logsstore.ClassUpdate
+	switch v := r.PostFormValue("visibility"); v {
+	case logsstore.VisibilityPending:
+	case logsstore.VisibilityCustomer, logsstore.VisibilityOperator, logsstore.VisibilityDismissed:
+		u.Visibility = v
 	default:
-		return false, false
+		return u, false
 	}
+	switch r.PostFormValue("security") {
+	case "on":
+		u.Security = true
+	case "":
+	default:
+		return u, false
+	}
+	u.SeverityOverride = r.PostFormValue("severity")
+	if u.SeverityOverride != "" && !model.ValidSeverity(u.SeverityOverride) {
+		return u, false
+	}
+	var ok bool
+	if u.DocRef, ok = cleanDocRef(r.PostFormValue("doc_ref")); !ok {
+		return u, false
+	}
+	return u, true
 }
 
 // formKey reads a class key from the form body: trimmed, non-empty and

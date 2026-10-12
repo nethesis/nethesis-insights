@@ -31,24 +31,12 @@ func (f *fakeWriter) record(parts ...string) error {
 	return nil
 }
 
-func (f *fakeWriter) SetClassVisibility(_ context.Context, key, visibility, actor string, _ int64) error {
-	return f.record("visibility", key, visibility, actor)
-}
-
-func (f *fakeWriter) SetClassSecurity(_ context.Context, key string, security bool, actor string, _ int64) error {
-	v := "off"
-	if security {
-		v = "on"
+func (f *fakeWriter) UpdateClass(_ context.Context, key string, u logsstore.ClassUpdate, actor string, _ int64) (int, error) {
+	sec := "off"
+	if u.Security {
+		sec = "on"
 	}
-	return f.record("security", key, v, actor)
-}
-
-func (f *fakeWriter) SetClassSeverity(_ context.Context, key, severity, actor string, _ int64) error {
-	return f.record("severity", key, severity, actor)
-}
-
-func (f *fakeWriter) SetClassDocRef(_ context.Context, key, docRef, actor string, _ int64) error {
-	return f.record("doc_ref", key, docRef, actor)
+	return 1, f.record("update", key, "vis="+u.Visibility, "sec="+sec, "sev="+u.SeverityOverride, "doc="+u.DocRef, actor)
 }
 
 func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor string, members []string, visibility, actor string, _ int64) (int, error) {
@@ -153,18 +141,15 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 		form url.Values
 		want string
 	}{
-		{"/review/deliver", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa customer alice"},
-		{"/review/internal", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa operator alice"},
-		{"/review/dismiss", url.Values{"key": {"v3:aaaa"}}, "visibility v3:aaaa dismissed alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "security": {"on"}, "severity": {"high"}, "doc_ref": {"https://docs.example.org/fix"}},
+			"update v3:aaaa vis=customer sec=on sev=high doc=https://docs.example.org/fix alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"operator"}}, "update v3:aaaa vis=operator sec=off sev= doc= alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"dismissed"}}, "update v3:aaaa vis=dismissed sec=off sev= doc= alice"},
+		// pending leaves an undecided class undecided while the rest is saved
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"pending"}, "security": {"on"}}, "update v3:aaaa vis= sec=on sev= doc= alice"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "group v3:aaaa customer alice v3:aaaa,v3:bbbb"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}, "member": {"v3:aaaa"}}, "group v3:aaaa dismissed alice v3:aaaa"},
 		{"/review/bulk", url.Values{"visibility": {"operator"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "bulk operator alice v3:aaaa,v3:bbbb"},
-		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"on"}}, "security v3:aaaa on alice"},
-		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"off"}}, "security v3:aaaa off alice"},
-		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"high"}}, "severity v3:aaaa high alice"},
-		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {""}}, "severity v3:aaaa  alice"},
-		{"/review/doc-ref", url.Values{"key": {"v3:aaaa"}, "doc_ref": {"https://docs.example.org/fix"}}, "doc_ref v3:aaaa https://docs.example.org/fix alice"},
-		{"/review/doc-ref", url.Values{"key": {"v3:aaaa"}, "doc_ref": {""}}, "doc_ref v3:aaaa  alice"},
 	} {
 		w := &fakeWriter{}
 		h := newWriteTestServer(t, seededReader(), w)
@@ -188,7 +173,7 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 func TestReviewIgnoresQueryStringParameters(t *testing.T) {
 	w := &fakeWriter{}
 	h := newWriteTestServer(t, seededReader(), w)
-	if rec := do(h, writeReq("/review/deliver?key=v3:aaaa", nil)); rec.Code != http.StatusBadRequest {
+	if rec := do(h, writeReq("/review/decide?key=v3:aaaa&visibility=customer", nil)); rec.Code != http.StatusBadRequest {
 		t.Fatalf("key in the query string: got %d, want 400", rec.Code)
 	}
 	if len(w.calls) != 0 {
@@ -201,8 +186,15 @@ func TestReviewRejectsBadInput(t *testing.T) {
 		path string
 		form url.Values
 	}{
-		{"/review/deliver", url.Values{}},
-		{"/review/deliver", url.Values{"key": {strings.Repeat("k", maxClassKeyLen+1)}}},
+		{"/review/decide", url.Values{"visibility": {"customer"}}},
+		{"/review/decide", url.Values{"key": {strings.Repeat("k", maxClassKeyLen+1)}, "visibility": {"customer"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"bogus"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "security": {"maybe"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "security": {"off"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "severity": {"urgent"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "doc_ref": {"javascript:alert(1)"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "doc_ref": {"docs/fix.md"}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"pending"}, "member": {"v3:aaaa"}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"bogus"}, "member": {"v3:aaaa"}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "member": {"v3:aaaa"}}},
@@ -218,11 +210,6 @@ func TestReviewRejectsBadInput(t *testing.T) {
 		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": {" ", ""}}},
 		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": {strings.Repeat("k", maxClassKeyLen+1)}}},
 		{"/review/bulk", url.Values{"visibility": {"customer"}, "member": tooManyMembers()}},
-		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {"maybe"}}},
-		{"/review/security", url.Values{"key": {"v3:aaaa"}, "security": {""}}},
-		{"/review/severity", url.Values{"key": {"v3:aaaa"}, "severity": {"urgent"}}},
-		{"/review/doc-ref", url.Values{"key": {"v3:aaaa"}, "doc_ref": {"javascript:alert(1)"}}},
-		{"/review/doc-ref", url.Values{"key": {"v3:aaaa"}, "doc_ref": {"docs/fix.md"}}},
 	} {
 		w := &fakeWriter{}
 		h := newWriteTestServer(t, seededReader(), w)
@@ -242,7 +229,7 @@ func TestReviewMapsStoreRefusals(t *testing.T) {
 		logsstore.ErrInvalidSeverity:   http.StatusBadRequest,
 	} {
 		h := newWriteTestServer(t, seededReader(), &fakeWriter{err: err})
-		if rec := do(h, writeReq("/review/deliver", url.Values{"key": {"v3:aaaa"}})); rec.Code != want {
+		if rec := do(h, writeReq("/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}})); rec.Code != want {
 			t.Errorf("%v: got %d, want %d", err, rec.Code, want)
 		}
 	}
@@ -320,17 +307,47 @@ func TestReviewQueueDefaultsToPending(t *testing.T) {
 	}
 }
 
-// A security class gets the same decision forms as any other.
+// A security class gets the same decision form as any other: one form
+// holding every decision, prefilled with the class's current state.
 func TestReviewOffersEveryDecisionForASecurityClass(t *testing.T) {
 	r := seededReader()
 	r.classes = []logsstore.ClassRow{
-		{Class: logsstore.Class{Key: "v3:s", Visibility: logsstore.VisibilityPending, Security: true}},
+		{Class: logsstore.Class{Key: "v3:s", Visibility: logsstore.VisibilityPending, Security: true,
+			SeverityOverride: "high", DocRef: "https://d.example/fix"}},
 	}
 	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
-	for _, path := range []string{"/review/deliver", "/review/internal", "/review/dismiss", "/review/security", "/review/severity", "/review/doc-ref"} {
-		if !strings.Contains(body, path) {
-			t.Errorf("a security class was not offered %s", path)
+	for _, want := range []string{
+		`action="/review/decide"`,
+		`name="visibility" value="pending" checked`,
+		`name="visibility" value="customer">`,
+		`name="visibility" value="operator">`,
+		`name="visibility" value="dismissed">`,
+		`name="security" value="on" checked`,
+		`<option value="high" selected>`,
+		`name="doc_ref" value="https://d.example/fix"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("a security class's form lacks %s", want)
 		}
+	}
+	if n := strings.Count(body, `method="post"`); n != 2 { // the bulk form and this one
+		t.Errorf("%d POST forms on the page, want 2 (bulk + the class's one form)", n)
+	}
+}
+
+// A decided class cannot go back to pending, so its form does not offer it,
+// and its current visibility is the checked one.
+func TestReviewFormOffersPendingOnlyWhileUndecided(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:d", Visibility: logsstore.VisibilityOperator}},
+	}
+	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
+	if strings.Contains(body, `name="visibility" value="pending"`) {
+		t.Error("a decided class's form offers pending")
+	}
+	if !strings.Contains(body, `name="visibility" value="operator" checked`) {
+		t.Error("the class's current visibility is not checked")
 	}
 }
 
@@ -500,7 +517,8 @@ func TestReviewDecisionKeepsTheSort(t *testing.T) {
 	} {
 		h := newWriteTestServer(t, seededReader(), &fakeWriter{})
 		form := url.Values{"key": {"v3:aaaa"}, "view": {"all"}, "filter": {"v3:aa"}, "sort": {tc.sort}, "dir": {tc.dir}}
-		rec := do(h, writeReq("/review/deliver", form))
+		form.Set("visibility", "customer")
+		rec := do(h, writeReq("/review/decide", form))
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("got %d, want 303", rec.Code)
 		}
@@ -574,13 +592,16 @@ func TestReviewShowsGroupLinkAndSuggestion(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
-	// only the dismiss button of a pending row is marked, and decided rows
-	// carry no suggestion text
+	// only the dismiss choice of a pending row is marked, never pre-selected,
+	// and decided rows carry no suggestion text
 	if n := strings.Count(body, "Suggested: "); n != 1 {
 		t.Errorf("%d suggestion lines, want 1 (one pending row)", n)
 	}
 	if n := strings.Count(body, `class="suggested"`); n != 1 {
-		t.Errorf("%d marked buttons, want 1", n)
+		t.Errorf("%d marked choices, want 1", n)
+	}
+	if strings.Contains(body, `value="dismissed" checked`) {
+		t.Error("the suggestion was pre-selected")
 	}
 }
 

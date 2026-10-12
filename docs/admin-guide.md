@@ -1293,7 +1293,11 @@ never a decided class to scroll past to find one still waiting.
 A decision applies to the whole class: every finding in it, on every machine,
 now and whenever it recurs — including machines that report it for the first
 time next month, which get it delivered with no new review. It never applies
-to just the one finding you happened to be looking at. The decisions are:
+to just the one finding you happened to be looking at. Click a class's title
+to open it: one form holds every decision below, filled in with what the
+class has now. Change what you need and press **Save** once; only what you
+changed is recorded on `/review/audit`, one line per setting. The
+visibility choices are:
 
 - **Deliver** — the class's findings go to customers.
 - **Keep internal** — they stay on the operator dashboard only.
@@ -1309,14 +1313,17 @@ to just the one finding you happened to be looking at. The decisions are:
   module and priority together, so dismissing it also hides later, different
   problems from the same place. The form warns about these.
 
-Deliver, keep internal and dismiss can each be replaced by another later;
-none can be taken back to "pending".
-- **Security on/off** — whether customers see the class tagged as a security
+While a class is undecided the form also offers **Pending**, which saves the
+other settings and leaves the class in the queue. Deliver, keep internal and
+dismiss can each be replaced by another later; none can be taken back to
+"pending". The other settings are:
+
+- **Security** — whether customers see the class tagged as a security
   problem. The node's own classification sets it the first time the class is
   seen; after that it is the operator's, and a recurrence never resets it.
-- **Set severity** — what customers are shown instead of the AI's severity.
+- **Severity the customer sees** — what customers are shown instead of the AI's severity.
   The stored severity, and what the AI is told, do not change.
-- **Set docs** — a link to remediation documentation, returned to customers
+- **Remediation docs** — a link to remediation documentation, blank for none,, returned to customers
   with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
 
 **Groups and suggestions.** About half of the classes waiting in the queue
@@ -1334,8 +1341,9 @@ the next run; it never holds up the classes behind it. On `/review`:
   group alone, whatever its classes' visibility (dismissed ones included).
 - If exactly one decision has been made among the group's other classes —
   all delivered, or all kept internal, or all dismissed — a pending class
-  shows **Suggested: …** with how many similar classes were decided that way.
-  If they disagree, or none is decided, nothing is suggested.
+  shows **Suggested: …** with how many similar classes were decided that way,
+  and the matching choice in its form is marked "(suggested)" — marked, not
+  selected. If they disagree, or none is decided, nothing is suggested.
 - On a group's page, **Deliver / Keep internal / Dismiss all pending in this
   group** applies one decision to the pending classes listed on the page, each
   recorded on `/review/audit` as its own decision with the detail
@@ -1347,7 +1355,7 @@ the next run; it never holds up the classes behind it. On `/review`:
   selected**, **Keep selected internal** or **Dismiss selected** above the
   table. Each ticked class gets that decision, recorded on `/review/audit` as
   its own decision with the detail `bulk`. Unlike the group buttons this also
-  changes a class that was decided before, the same as the per-class buttons;
+  changes a class that was decided before, the same as the class's own form;
   a class already at that decision is left alone. Up to 200 classes at a time,
   and there is no select-all: tick the rows one by one.
 

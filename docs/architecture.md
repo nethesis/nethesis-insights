@@ -246,7 +246,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
-| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its eight review routes (`writableRoutes`: deliver, internal, dismiss, security, severity, doc-ref, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
+| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
@@ -1795,7 +1795,7 @@ no decision can ride along on the findings it returns.
 an internal visibility, a security tag, a severity override and a `doc_ref`
 on the class behind an open finding and requires byte-identical prompts.
 
-Every decision is one `logsstore.Store` method, one transaction that refuses
+Every decision route is one `logsstore.Store` method, one transaction that refuses
 an unknown class (`ErrUnknownClass`, a `404` on the route, no audit row),
 applies the change and appends a `class_decisions` row (`Store.classDecision`),
 so a class never changes without the record of who changed it. **A decision
@@ -1806,12 +1806,9 @@ nothing is copied onto `findings`.
 
 | Route | Store method | Effect |
 |---|---|---|
-| `/review/deliver`, `/review/internal`, `/review/dismiss` | `SetClassVisibility` | `visibility = customer`/`operator`/`dismissed`. Never back to `pending` (`ErrInvalidVisibility`) |
+| `/review/decide` | `UpdateClass` | the class dialog's one form, posting the class's whole state: `visibility` (`customer`/`operator`/`dismissed`, or `pending` to leave an undecided class undecided — never back to `pending`, `ErrInvalidVisibility`), `security` (a checkbox: `on` or absent), `severity` (`severity_override`, `""` clears) and `doc_ref` (`""` clears; only an absolute `http(s)` URL is accepted). Compared against the stored row in the same transaction: only the fields that differ change, each with its own `class_decisions` row under the single-field action (`deliver`/`internal`/`dismiss`, `security`, `severity`, `doc_ref`), in that order; an unchanged form records nothing. The suggested visibility is marked on its radio, never pre-selected |
 | `/review/group` | `SetGroupVisibility` | one visibility applied to the `member` keys the form posted (the pending rows the page showed) that are still `pending` in that group, one `class_decisions` row each (detail `group <anchor>`); 1 to 200 members, a member not in the group or already decided is skipped |
 | `/review/bulk` | `SetClassesVisibility` | one visibility applied to each checked class (`member` keys, 1 to 200) whatever it was decided before, one `class_decisions` row per class that changed (detail `bulk`); an unknown key or a class already at that visibility is skipped. The checkboxes sit in the queue table and tie to one form outside it by the HTML `form` attribute (forms cannot nest); no select-all, since that needs JavaScript |
-| `/review/security` | `SetClassSecurity` | the `security` tag, `on`/`off` — nothing else is accepted |
-| `/review/severity` | `SetClassSeverity` | `severity_override`, `""` clears |
-| `/review/doc-ref` | `SetClassDocRef` | `doc_ref`, `""` clears; the route accepts only an absolute `http(s)` URL |
 
 The routes follow `internal/ui/threat`'s discipline exactly — enumerated in
 `writableRoutes`, `POST` only, `chrome.AuthenticateWrite` (admin key, then the
@@ -1945,7 +1942,7 @@ Rules that are not visible from the code:
   classes that carry it; none or several suggest nothing. A conflicting group
   is a signal, not a vote to be settled by majority.
 - **Never applied without a POST.** The pass writes only `class_groups`; it
-  never calls a `SetClass*` method and never touches `finding_classes` or
+  never calls a `SetClass*` or `UpdateClass` method and never touches `finding_classes` or
   `class_decisions`. `POST /review/group` (in `writableRoutes`, authenticated
   and cross-site-checked like every write) applies one visibility to the
   classes **the operator was shown**: the form posts the keys of the pending

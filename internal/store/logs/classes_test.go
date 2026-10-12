@@ -237,6 +237,7 @@ func TestDecisionOnAnUnknownClassIsRefused(t *testing.T) {
 		"security":   s.SetClassSecurity(ctx, "v3:nope", true, "op", 1),
 		"severity":   s.SetClassSeverity(ctx, "v3:nope", "low", "op", 1),
 		"doc_ref":    s.SetClassDocRef(ctx, "v3:nope", "", "op", 1),
+		"update":     updateErr(s.UpdateClass(ctx, "v3:nope", ClassUpdate{Visibility: VisibilityCustomer}, "op", 1)),
 	} {
 		if !errors.Is(err, ErrUnknownClass) {
 			t.Errorf("%s: want ErrUnknownClass, got %v", name, err)
@@ -272,6 +273,81 @@ func TestClassDecisionIsAudited(t *testing.T) {
 		if ds[i] != want[i] {
 			t.Errorf("decision %d: got %+v, want %+v", i, ds[i], want[i])
 		}
+	}
+}
+
+func updateErr(_ int, err error) error { return err }
+
+// The review dialog posts a class's whole state at once; only what differs
+// from the stored row changes, each with its own audit row, and a form that
+// changes nothing records nothing.
+func TestUpdateClassAuditsOnlyWhatChanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+
+	n, err := s.UpdateClass(ctx, "v3:a", ClassUpdate{
+		Visibility: VisibilityCustomer, Security: true, SeverityOverride: "high", DocRef: "https://d.example",
+	}, "alice", 2000)
+	mustDo(t, err)
+	if n != 4 {
+		t.Fatalf("first update changed %d fields, want 4", n)
+	}
+	// Same state again, visibility left alone: nothing changes.
+	n, err = s.UpdateClass(ctx, "v3:a", ClassUpdate{
+		Security: true, SeverityOverride: "high", DocRef: "https://d.example",
+	}, "bob", 3000)
+	mustDo(t, err)
+	if n != 0 {
+		t.Fatalf("an unchanged form changed %d fields", n)
+	}
+	// Clear the override only.
+	n, err = s.UpdateClass(ctx, "v3:a", ClassUpdate{
+		Visibility: VisibilityCustomer, Security: true, DocRef: "https://d.example",
+	}, "carol", 4000)
+	mustDo(t, err)
+	if n != 1 {
+		t.Fatalf("clearing the override changed %d fields, want 1", n)
+	}
+
+	c, ok, err := s.GetClass(ctx, "v3:a")
+	mustDo(t, err)
+	if !ok || c.Visibility != VisibilityCustomer || !c.Security || c.SeverityOverride != "" || c.DocRef != "https://d.example" {
+		t.Fatalf("class after updates: %+v", c)
+	}
+	ds, err := s.ClassDecisions(ctx, "v3:a")
+	mustDo(t, err)
+	want := []ClassDecision{
+		{Key: "v3:a", Actor: "alice", Action: ActionDeliver, PromptVersion: "p1", CreatedAt: 2000},
+		{Key: "v3:a", Actor: "alice", Action: ActionSecurity, Detail: "on", PromptVersion: "p1", CreatedAt: 2000},
+		{Key: "v3:a", Actor: "alice", Action: ActionSeverity, Detail: "high", PromptVersion: "p1", CreatedAt: 2000},
+		{Key: "v3:a", Actor: "alice", Action: ActionDocRef, Detail: "https://d.example", PromptVersion: "p1", CreatedAt: 2000},
+		{Key: "v3:a", Actor: "carol", Action: ActionSeverity, PromptVersion: "p1", CreatedAt: 4000},
+	}
+	if len(ds) != len(want) {
+		t.Fatalf("got %d decisions, want %d: %+v", len(ds), len(want), ds)
+	}
+	for i := range want {
+		if ds[i] != want[i] {
+			t.Errorf("decision %d: got %+v, want %+v", i, ds[i], want[i])
+		}
+	}
+}
+
+func TestUpdateClassRefusesBadValues(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v3:a", "low", "a", false, 1000)
+	if _, err := s.UpdateClass(ctx, "v3:a", ClassUpdate{Visibility: VisibilityPending}, "op", 2000); !errors.Is(err, ErrInvalidVisibility) {
+		t.Errorf("back to pending: want ErrInvalidVisibility, got %v", err)
+	}
+	if _, err := s.UpdateClass(ctx, "v3:a", ClassUpdate{SeverityOverride: "urgent"}, "op", 2000); !errors.Is(err, ErrInvalidSeverity) {
+		t.Errorf("unknown severity: want ErrInvalidSeverity, got %v", err)
+	}
+	var n int
+	mustDo(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM class_decisions`).Scan(&n))
+	if n != 0 {
+		t.Fatalf("a refused update was audited: %d rows", n)
 	}
 }
 

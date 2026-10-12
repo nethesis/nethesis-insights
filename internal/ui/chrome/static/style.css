@@ -194,9 +194,9 @@ nav details.dropdown > summary.active {
 .pill[data-basis="convention"] { color: var(--pico-muted-color); }
 .pill[data-basis="physical"]   { color: var(--pico-ins-color); }
 
-/* The decision button a group's earlier decisions suggest. Only a mark:
-   nothing is submitted for the operator. */
-button.suggested {
-  outline: 3px solid var(--pico-primary);
-  outline-offset: 2px;
+/* The visibility choice a group's earlier decisions suggest. Only a mark:
+   it is not pre-selected, so nothing is submitted for the operator. */
+label.suggested {
+  font-weight: 600;
+  color: var(--pico-primary);
 }

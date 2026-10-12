@@ -206,7 +206,7 @@ func applyVisibility(ctx context.Context, tx bun.Tx, p pendingClass, visibility,
 // transaction under the write lock, writing one class_decisions row (detail
 // "bulk") per class whose visibility actually changed. Unlike
 // SetGroupVisibility it may change an already-decided class: the operator
-// ticked it explicitly, the same power as the per-class buttons. A key that
+// ticked it explicitly, the same power as the class dialog's form. A key that
 // is unknown, or already at visibility, is skipped silently. Never back to
 // pending (ErrInvalidVisibility). It returns how many classes changed.
 func (s *Store) SetClassesVisibility(ctx context.Context, keys []string, visibility, actor string, now int64) (int, error) {
