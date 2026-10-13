@@ -24,6 +24,16 @@ type Response struct {
 	// zero, which prices the call as if nothing was cached -- the safe
 	// direction for a cost figure.
 	CachedTokens int
+
+	// CostUSD is what the provider says it billed for the call, nil when it
+	// says nothing (OpenAI). OpenRouter reports it on every answer; a free
+	// model reports a zero, which is a cost, not a missing one.
+	CostUSD *float64
+
+	// ServiceTier is the tier the provider says served the call, which is
+	// not always the one requested: a flex 429 is retried at the default
+	// tier (see OpenAI.Complete).
+	ServiceTier string
 }
 
 type Client interface {

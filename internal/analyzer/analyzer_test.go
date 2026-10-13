@@ -925,3 +925,46 @@ func TestCachedInputIsPricedAtItsOwnRate(t *testing.T) {
 		t.Fatalf("cost = %d micros, cached = %d; want 96 and 600", rows[0].CostMicros, rows[0].CachedTokens)
 	}
 }
+
+// pricedCall runs one analysed window through stub and returns the stored
+// cost, with list prices of $0.10 in, $0.01 cached in and $0.50 out.
+func pricedCall(t *testing.T, stub *llm.Stub) int64 {
+	t.Helper()
+	ctx := context.Background()
+	s := newTestStore(t)
+	stub.Content = `{"window_assessment":"nominal","findings":[]}`
+	cfg := testConfig()
+	cfg.InputPerMTok, cfg.CachedInputPerMTok, cfg.OutputPerMTok = 0.10, 0.01, 0.50
+	a := New(s, stub, testBudget(s), cfg, func() int64 { return 1000 })
+	if err := a.Process(ctx, steadyBundle("sys1")); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	rows, err := s.ListAnalyses(ctx, "sys1", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListAnalyses: %+v %v", rows, err)
+	}
+	return rows[0].CostMicros
+}
+
+// A provider that says what it billed (OpenRouter) is believed over the
+// configured prices, which can only estimate it.
+func TestReportedCostWinsOverConfiguredPrices(t *testing.T) {
+	cost := 0.000321
+	got := pricedCall(t, &llm.Stub{InputTokens: 1000, OutputTokens: 100, CostUSD: &cost})
+	if got != 321 {
+		t.Fatalf("cost = %d micros, want the reported 321", got)
+	}
+}
+
+// The configured prices are list prices. Flex halves the whole bill, and
+// only the provider knows whether a call ran on flex: a flex 429 is retried
+// at the default tier, at the full price.
+func TestFlexIsPricedAtHalfOnlyWhenTheProviderSaysSo(t *testing.T) {
+	// 1000 in x $0.10 + 100 out x $0.50, per million = 150 micros.
+	if got := pricedCall(t, &llm.Stub{InputTokens: 1000, OutputTokens: 100, ServiceTier: "flex"}); got != 75 {
+		t.Errorf("flex: cost = %d micros, want 75", got)
+	}
+	if got := pricedCall(t, &llm.Stub{InputTokens: 1000, OutputTokens: 100, ServiceTier: "default"}); got != 150 {
+		t.Errorf("default: cost = %d micros, want 150", got)
+	}
+}

@@ -71,16 +71,41 @@ type promptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
 }
 
+// costDetails is OpenRouter's. UpstreamInferenceCost is set only when the
+// account brings its own provider key (BYOK): Cost is then OpenRouter's fee
+// alone, and the provider's charge is this.
+type costDetails struct {
+	UpstreamInferenceCost *float64 `json:"upstream_inference_cost"`
+}
+
+// chatUsage's Cost and CostDetails are OpenRouter extensions; OpenAI sends
+// neither. Pointers, because a free model's reported 0 must not read as
+// "not reported".
 type chatUsage struct {
 	PromptTokens        int                 `json:"prompt_tokens"`
 	CompletionTokens    int                 `json:"completion_tokens"`
 	PromptTokensDetails promptTokensDetails `json:"prompt_tokens_details"`
+	Cost                *float64            `json:"cost"`
+	CostDetails         costDetails         `json:"cost_details"`
 }
 
 type chatResponse struct {
-	Model   string       `json:"model"`
-	Choices []chatChoice `json:"choices"`
-	Usage   chatUsage    `json:"usage"`
+	Model       string       `json:"model"`
+	ServiceTier string       `json:"service_tier"`
+	Choices     []chatChoice `json:"choices"`
+	Usage       chatUsage    `json:"usage"`
+}
+
+// billed is the provider's own figure for the call, nil when it gave none.
+func (u chatUsage) billed() *float64 {
+	if u.Cost == nil {
+		return nil
+	}
+	total := *u.Cost
+	if u.CostDetails.UpstreamInferenceCost != nil {
+		total += *u.CostDetails.UpstreamInferenceCost
+	}
+	return &total
 }
 
 // Complete sends one chat completion. When a service tier is configured and
@@ -187,5 +212,7 @@ func (o *OpenAI) complete(ctx context.Context, req Request, serviceTier string) 
 		InputTokens:  parsed.Usage.PromptTokens,
 		OutputTokens: parsed.Usage.CompletionTokens,
 		CachedTokens: parsed.Usage.PromptTokensDetails.CachedTokens,
+		CostUSD:      parsed.Usage.billed(),
+		ServiceTier:  parsed.ServiceTier,
 	}, nil
 }

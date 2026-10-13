@@ -79,6 +79,8 @@ type Config struct {
 	PromptAmbient int
 	StaleAfter    time.Duration
 	Model         string
+	// InputPerMTok and OutputPerMTok are the model's list prices, used
+	// only when the provider does not report what it billed (see costUSD).
 	InputPerMTok  float64
 	OutputPerMTok float64
 
@@ -487,17 +489,13 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	}
 
 	// 10. Record bookkeeping now that the analysis fully succeeded.
-	// Cached input is billed at its own rate. Clamp first: a provider that
-	// reported more cached than prompt tokens would otherwise produce a
-	// negative bill.
+	// Clamp first: a provider that reported more cached than prompt tokens
+	// would otherwise produce a negative bill.
 	cached := resp.CachedTokens
 	if cached > resp.InputTokens {
 		cached = resp.InputTokens
 	}
-	usd := float64(resp.InputTokens-cached)/1e6*a.cfg.InputPerMTok +
-		float64(cached)/1e6*a.cfg.CachedInputPerMTok +
-		float64(resp.OutputTokens)/1e6*a.cfg.OutputPerMTok
-	costMicros := int64(math.Round(usd * 1e6))
+	costMicros := int64(math.Round(a.costUSD(resp, cached) * 1e6))
 	a.Metrics.llmCall("success", costMicros)
 
 	return a.record(ctx, b, analysisEntry{
@@ -513,4 +511,24 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		model:        resp.Model,
 		durationMs:   int(time.Since(start).Milliseconds()),
 	})
+}
+
+// costUSD is what one successful call cost. A provider that reports what it
+// billed (OpenRouter) is believed: the configured prices can only estimate
+// it. Otherwise (OpenAI) tokens are priced at the configured list prices,
+// cached input at its own rate, and the whole bill is halved when the
+// provider says the flex tier served the call. The provider's word is what
+// counts, not the configured tier: a flex 429 is retried at the default
+// tier, at the full price.
+func (a *Analyzer) costUSD(resp llm.Response, cached int) float64 {
+	if resp.CostUSD != nil {
+		return *resp.CostUSD
+	}
+	usd := float64(resp.InputTokens-cached)/1e6*a.cfg.InputPerMTok +
+		float64(cached)/1e6*a.cfg.CachedInputPerMTok +
+		float64(resp.OutputTokens)/1e6*a.cfg.OutputPerMTok
+	if resp.ServiceTier == "flex" {
+		usd /= 2
+	}
+	return usd
 }

@@ -1997,7 +1997,7 @@ run.
 | subscriber without the Threat Shield entitlement | `403` on `/blocklist/v1/feed` and `/blocklist/v1/allowlist-requests`, never `401`; `POST /blocklist/v1/events` is unaffected, so the node keeps contributing to consensus while it cannot consume it |
 | `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
 | LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
-| `LLM_SERVICE_TIER` capacity unavailable (a `429` from the provider) | the call is repeated once without the tier, at the standard price, rather than handed back as a transient error: a failed window is analysed again only if the edge happens to resend it |
+| `LLM_SERVICE_TIER` capacity unavailable (a `429` from the provider) | the call is repeated once without the tier, at the standard price (and the cost ledger prices it so, from the answer's `service_tier`), rather than handed back as a transient error: a failed window is analysed again only if the edge happens to resend it |
 | LLM provider returns a permanent error | the window is finalized and closed — retrying would hit the same wall forever |
 | spend cap reached | the gate narrows to security-only. Genuinely cheap, because the security condition is novelty-scoped |
 | per-system call cap reached | the window is recorded `gated = 1`, `suppressed_by` naming the limit, no reasons, no cost — and its templates are still recorded |
@@ -2073,10 +2073,23 @@ a configured tier is repeated once without it (see "Degradation and failure
 modes"). An empty tier sends no field at all, since some providers reject
 fields they do not know.
 
+**`cost_micros` is the provider's bill when the provider states one, and an
+estimate only when it does not** (`Analyzer.costUSD`). OpenRouter reports
+what it charged in `usage.cost` on every answer; with the account's own
+provider key (BYOK) that is only OpenRouter's fee, and the provider's charge
+is `usage.cost_details.upstream_inference_cost`, so the two are added. That
+figure is stored as-is and the `LLM_PRICE_*` settings are ignored for the
+call; a free model's reported `0` is a cost, not a missing one, hence
+`Response.CostUSD` is a pointer. OpenAI reports no cost, so the call is
+priced from its tokens at the configured **list** prices, and the whole bill
+is halved when the answer's `service_tier` says `flex`. The answer's tier,
+not the configured one, decides: a flex `429` is retried at the default tier
+and billed in full, and pricing by configuration made those calls invisible.
+
 `Response.CachedTokens` carries `usage.prompt_tokens_details.cached_tokens`
 where the provider reports it. Cached input is billed at its own rate,
 `LLM_PRICE_CACHED_INPUT_PER_MTOK` (default: half the input price, which is
-`gpt-4o-mini`'s discount; `gpt-6-luna`'s is a tenth), and `analyzer.Process`
+`gpt-4o-mini`'s discount; `gpt-6-luna`'s is a tenth), and the estimate
 prices it that way; a provider that reports nothing leaves
 it zero, which prices the call as if nothing was cached — the safe direction
 for a cost figure. Earning those hits is why `prompt.Render` opens with an

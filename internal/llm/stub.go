@@ -12,6 +12,8 @@ type Stub struct {
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
+	CostUSD      *float64
+	ServiceTier  string
 	Err          error
 
 	Calls       int
@@ -30,5 +32,7 @@ func (s *Stub) Complete(ctx context.Context, req Request) (Response, error) {
 		InputTokens:  s.InputTokens,
 		OutputTokens: s.OutputTokens,
 		CachedTokens: s.CachedTokens,
+		CostUSD:      s.CostUSD,
+		ServiceTier:  s.ServiceTier,
 	}, nil
 }
