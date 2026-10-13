@@ -295,6 +295,19 @@ func TestNearKnownNeverAppliesToSecurity(t *testing.T) {
 	}
 }
 
+// A security line is never matched as near-known, so a Call-ID tail the edge
+// leaves literal (<HEX>-<random letters>) made every INVITE auth failure fire
+// security_new. Canonicalization is what makes the next call's copy known.
+func TestLeakedCallIDTailIsNotNovel(t *testing.T) {
+	const authfail = `<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] %[1]s INVITE-<NUM> - event=auth_failure method=INVITE status=<NUM> src_ip=<IP> user=<HEX> callid=%[1]s`
+	b := bundleOf(model.Template{Template: fmt.Sprintf(authfail, "<HEX>-qpwmzkrtxbvn"), ModuleID: "nethvoice-proxy1", Priority: 3, Category: "security"})
+	s := SystemState{KnownTemplates: knownIn("nethvoice-proxy1", fmt.Sprintf(authfail, "<HEX>-dseadsfjqujt"))}
+
+	if d := Evaluate(b, s, prodCfg()); d.Call {
+		t.Fatalf("a known auth failure on another call must not be novel: %v", d.Reasons)
+	}
+}
+
 func TestNearKnownNeverAppliesToHighPriority(t *testing.T) {
 	for _, prio := range []int{0, 1, 2} {
 		b := bundleOf(model.Template{Template: sipNew, ModuleID: "nethvoice-proxy1", Priority: prio})

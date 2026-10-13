@@ -1575,6 +1575,24 @@ below):
    Because the collapse needs the module, the prompt's ALREADY KNOWN lookup
    tries each of the finding's modules against a stored evidence line, which
    does not record which one it came from.
+
+   The collapse also rewrites a **SIP Call-ID** the collector left partly
+   literal. Some user agents mint a Call-ID as `<hex>-<random letters>` and
+   the edge masks only the hex, so a `nethvoice-proxy` auth failure arrived
+   as `[SECURITY-AUTHFAIL] <HEX>-dseadsfjqujt INVITE-<NUM> … callid=<HEX>-dseadsfjqujt`
+   — a new template on every call. Being a security line, it is never matched
+   as near-known, and the tail is letters only, so it would read as a plain
+   word anyway: each one fired `security_new` and could land on a fresh
+   class. The rule is keyed on the `callid=` field (`(?i)\bcall-?id=`), never
+   on the value's shape: a value still holding a letter or digit outside the
+   edge's placeholders becomes `<ID>`, and so does every other whole-token
+   occurrence of that same value in the line (Kamailio logs it twice, as the
+   `$ci` prefix and in the field). A "word after `<HEX>-`" shape rule was
+   rejected because it also takes stable suffixes such as `<HEX>-infra`. A
+   value that is already only placeholders (`<ID>@<IP>`, the REGISTER form) is
+   left as it is, so correctly masked lines keep their key; a leaked Call-ID
+   in a line **without** a `callid=` field is not caught. The real fix is in
+   the collector's masking.
 2. If every cited template shares one `(module_id, priority)` bucket, the key
    is that bucket. Text variance *within* a bucket the model already chose to
    cite as one condition is noise.

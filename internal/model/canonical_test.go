@@ -4,6 +4,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -307,5 +308,61 @@ func TestCanonicalTemplateKeepsOtherInstanceLikeWords(t *testing.T) {
 		if got := CanonicalTemplate(tc.module, tc.in); got != want {
 			t.Errorf("module %q rewrote more than its own instance:\n in: %q\ngot: %q\nwant: %q", tc.module, tc.in, got, want)
 		}
+	}
+}
+
+// Some SIP user agents mint a Call-ID as <hex>-<random letters>, and the edge
+// masks only the hex. Kamailio logs it twice per line, so every INVITE auth
+// failure on the dev fleet was a new template, and the letters-only tail
+// slipped past the gate's near-known rule as a plain word.
+func TestCanonicalTemplateCollapsesCallIDTail(t *testing.T) {
+	const invite = `<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] %[1]s INVITE-<NUM> - event=auth_failure method=INVITE status=<NUM> src_ip=<IP> user=<HEX> callid=%[1]s`
+	const want = `<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] <ID> INVITE-<NUM> - event=auth_failure method=INVITE status=<NUM> src_ip=<IP> user=<HEX> callid=<ID>`
+
+	cases := []struct{ name, value string }{
+		{"hex then random letters", "<HEX>-dseadsfjqujt"},
+		{"another call", "<HEX>-qpwmzkrtxbvn"},
+		{"id placeholder then letters", "<ID>-abcdefgh"},
+		{"wholly literal", "a84b4c76e66710"},
+		{"literal at host", "zrtxbvn@<IP>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := fmt.Sprintf(invite, tc.value)
+			got := CanonicalTemplate("nethvoice-proxy4", in)
+			if got != want {
+				t.Errorf("call-id not collapsed in both positions:\n got=%q\nwant=%q", got, want)
+			}
+			if again := CanonicalTemplate("nethvoice-proxy4", got); again != got {
+				t.Errorf("not idempotent:\n once=%q\ntwice=%q", got, again)
+			}
+		})
+	}
+}
+
+// The call-id rule is keyed on the callid= field, never on the shape of a
+// token after a hyphen. Masked ids with a stable suffix, hyphenated words and
+// a Call-ID the collector already masked must come through unchanged.
+func TestCanonicalTemplateCallIDRuleIsNarrow(t *testing.T) {
+	for _, in := range []string{
+		// The correctly masked REGISTER form keeps the key it always had.
+		`<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] <ID>@<IP> REGISTER-<NUM> - event=auth_failure method=REGISTER status=<NUM> src_ip=<IP> user=<USER> callid=<ID>@<IP>`,
+		// No callid= field: a stable suffix on a masked id is not touched,
+		// and neither is the same leak without the field that names it.
+		`<6> [podman] container <HEX>-infra died`,
+		`<3> [kamailio] [SECURITY-AUTHFAIL] <HEX>-dseadsfjqujt INVITE-<NUM> - event=auth_failure`,
+		`<6> [webapp] cache-control set to no-store`,
+	} {
+		if got := CanonicalTemplate("", in); got != in {
+			t.Errorf("rewritten without a leaking callid=:\n in=%q\ngot=%q", in, got)
+		}
+	}
+
+	// Only whole-token occurrences of the value are rewritten: a word that
+	// merely contains it is left alone.
+	in := `<3> [kamailio] callid=abc failed for abcd and xabc, retry abc`
+	want := `<3> [kamailio] callid=<ID> failed for abcd and xabc, retry <ID>`
+	if got := CanonicalTemplate("", in); got != want {
+		t.Errorf("token boundaries:\n got=%q\nwant=%q", got, want)
 	}
 }

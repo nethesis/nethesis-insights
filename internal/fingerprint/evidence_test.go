@@ -174,6 +174,25 @@ func TestCountryVariantsUsePrimaryNotBucket(t *testing.T) {
 	}
 }
 
+// A Call-ID tail the edge leaves literal is different on every call. Cited as
+// the primary template, it put one SIP auth failure on a fresh class per call;
+// cited twice, the two spellings fell back to the bucket key instead.
+func TestClassIgnoresLeakedCallIDTail(t *testing.T) {
+	line := func(tail string) model.Template {
+		return tpl("nethvoice-proxy", 3, `<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] <HEX>-`+tail+` INVITE-<NUM> - event=auth_failure method=INVITE status=<NUM> src_ip=<IP> user=<HEX> callid=<HEX>-`+tail)
+	}
+	class := func(cited ...model.Template) string {
+		return Class([]string{"nethvoice-proxy"}, EvidenceKey(cited), "security")
+	}
+	a := class(line("dseadsfjqujt"))
+	if b := class(line("qpwmzkrtxbvn")); a != b {
+		t.Fatal("one SIP auth failure on two calls became two classes")
+	}
+	if both := class(line("dseadsfjqujt"), line("qpwmzkrtxbvn")); a != both {
+		t.Fatal("citing two calls of one SIP auth failure changed its class")
+	}
+}
+
 // One NS8 warning names its own instance in the text. Keyed on the raw
 // instance number it split into one review class per instance -- 78 on the
 // dev fleet on 2026-10-09 -- each to be decided separately.

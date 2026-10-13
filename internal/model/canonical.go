@@ -96,6 +96,23 @@ var (
 	// Quoted database object names, and only those: the keyword before the
 	// quote is what makes the collapse safe.
 	objectName = regexp.MustCompile(`\b(on|table|relation|index|database|hypertable|schema|view|constraint)\s+"[^"]*"`)
+
+	// The value of a callid= field. A SIP Call-ID is minted per call (RFC
+	// 3261 section 8.1.1.4), so it can never tell two conditions apart. The
+	// collector masks the shapes it knows -- <ID>@<IP> -- but some user
+	// agents send <hex>-<random letters>, and the edge masks only the hex:
+	//
+	//	[SECURITY-AUTHFAIL] <HEX>-dseadsfjqujt INVITE-<NUM> - ... callid=<HEX>-dseadsfjqujt
+	//
+	// made every INVITE auth failure a new template and split one problem
+	// into several finding classes on the same system. The near-known rule
+	// in the gate cannot catch it, because the tail is all letters and reads
+	// as a plain word. See replaceCallIDs.
+	callIDField = regexp.MustCompile(`(?i)\bcall-?id=([^\s,;=]+)`)
+
+	// An edge placeholder (<HEX>, <ID>, <IP>, ...). A Call-ID that is nothing
+	// but placeholders and punctuation is already masked and left alone.
+	placeholder = regexp.MustCompile(`<[A-Z]+>`)
 )
 
 // sourceFileSuffix lists the trailing labels that make a dotted token a file
@@ -126,6 +143,7 @@ var sourceFileSuffix = map[string]bool{
 func CanonicalTemplate(moduleID, template string) string {
 	prefix, rest := splitPriority(template)
 
+	rest = replaceCallIDs(rest)
 	rest = replaceOwnInstance(rest, ModuleFamily(moduleID))
 	rest = countryCode.ReplaceAllString(rest, "(<CC>/")
 	rest = objectName.ReplaceAllString(rest, "$1 <STR>")
@@ -156,6 +174,79 @@ func splitPriority(template string) (prefix, rest string) {
 		}
 	}
 	return template[:end+1], template[end+1:]
+}
+
+// replaceCallIDs rewrites a callid= value that still carries literal text to
+// <ID>, and with it every other whole-token occurrence of the same value in
+// the line -- Kamailio logs the Call-ID twice, once as the xlog prefix ($ci)
+// and once in the field, and both must come out the same.
+//
+// It is keyed on the field name, never on the value's shape. A shape rule --
+// "a word after <HEX>-" -- would also take <HEX>-infra and every other stable
+// suffix of a masked id, and a letters-only token is exactly what the plain
+// words this file refuses to touch look like. The field name is what makes
+// the value a Call-ID; its occurrences elsewhere in the line are matched by
+// identity, not by shape.
+//
+// A value that is already only placeholders and punctuation (<ID>@<IP>) is
+// left as it is, so lines the collector masked correctly keep the key they
+// had. That is also what makes the rule idempotent: its own output, <ID>, is
+// such a value.
+func replaceCallIDs(s string) string {
+	matches := callIDField.FindAllStringSubmatch(s, -1)
+	for _, m := range matches {
+		v := m[1]
+		if !hasLiteral(v) {
+			continue
+		}
+		s = replaceToken(s, v, "<ID>")
+	}
+	return s
+}
+
+// hasLiteral reports whether v holds a letter or digit outside the edge's
+// placeholders.
+func hasLiteral(v string) bool {
+	for _, c := range placeholder.ReplaceAllString(v, "") {
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// replaceToken replaces every occurrence of old in s that is a whole token --
+// bounded on both sides by the start or end of s or by a byte that cannot be
+// part of a callid= value -- with repl. A bounded match is what stops a short
+// value from rewriting the middle of a longer one.
+func replaceToken(s, old, repl string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, old)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := i + len(old)
+		if (i > 0 && !isCallIDDelim(s[i-1])) || (end < len(s) && !isCallIDDelim(s[end])) {
+			b.WriteString(s[:i+1])
+			s = s[i+1:]
+			continue
+		}
+		b.WriteString(s[:i])
+		b.WriteString(repl)
+		s = s[end:]
+	}
+}
+
+// isCallIDDelim reports whether c ends a callid= value: the complement of the
+// value class in callIDField.
+func isCallIDDelim(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\f', ',', ';', '=':
+		return true
+	}
+	return false
 }
 
 // replaceOwnInstance rewrites the emitting module's own instance id to its
