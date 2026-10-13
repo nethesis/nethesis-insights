@@ -5,6 +5,8 @@ package logs
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -57,7 +59,7 @@ func TestUIMethodsOnEmptyDatabase(t *testing.T) {
 		t.Fatalf("CostRollup: expected empty, got %d", len(costRows))
 	}
 
-	findings, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	findings, err := s.ListAllFindings(ctx, FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListAllFindings: %v", err)
 	}
@@ -508,7 +510,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	seedFinding(t, ctx, s, "sys2", "fp3", "high", model.StatusOpen, 3000)
 
 	// No filters: all 4, in model.SortFindings order (severity asc rank, then last_seen desc).
-	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListAllFindings: %v", err)
 	}
@@ -523,7 +525,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// systemID filter, exact.
-	sys1Only, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	sys1Only, err := s.ListAllFindings(ctx, FindingFilter{System: "sys1"})
 	if err != nil {
 		t.Fatalf("ListAllFindings systemID filter: %v", err)
 	}
@@ -532,7 +534,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// systemID filter, bare-value prefix match -- "sys" matches both systems.
-	sysPrefix, err := s.ListAllFindings(ctx, "sys", "", "", "", "", 0)
+	sysPrefix, err := s.ListAllFindings(ctx, FindingFilter{System: "sys"})
 	if err != nil {
 		t.Fatalf("ListAllFindings systemID prefix filter: %v", err)
 	}
@@ -541,7 +543,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// status filter.
-	staleOnly, err := s.ListAllFindings(ctx, "", model.StatusStale, "", "", "", 0)
+	staleOnly, err := s.ListAllFindings(ctx, FindingFilter{Status: model.StatusStale})
 	if err != nil {
 		t.Fatalf("ListAllFindings status filter: %v", err)
 	}
@@ -550,7 +552,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// severity filter.
-	criticalOnly, err := s.ListAllFindings(ctx, "", "", "critical", "", "", 0)
+	criticalOnly, err := s.ListAllFindings(ctx, FindingFilter{Severity: "critical"})
 	if err != nil {
 		t.Fatalf("ListAllFindings severity filter: %v", err)
 	}
@@ -559,7 +561,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// idLike: a bare value (no "%") is a prefix match against id or fingerprint.
-	fpPrefix, err := s.ListAllFindings(ctx, "", "", "", "fp2", "", 0)
+	fpPrefix, err := s.ListAllFindings(ctx, FindingFilter{ID: "fp2"})
 	if err != nil {
 		t.Fatalf("ListAllFindings idLike prefix: %v", err)
 	}
@@ -569,7 +571,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 
 	// idLike: an explicit "%" pattern is passed through, so an operator can
 	// search a substring anywhere in id/fingerprint.
-	fpSubstring, err := s.ListAllFindings(ctx, "", "", "", "%p3", "", 0)
+	fpSubstring, err := s.ListAllFindings(ctx, FindingFilter{ID: "%p3"})
 	if err != nil {
 		t.Fatalf("ListAllFindings idLike substring: %v", err)
 	}
@@ -578,7 +580,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 
 	// idLike also matches by the finding's ULID id, not just fingerprint.
-	byID, err := s.ListAllFindings(ctx, "", "", "", fpPrefix[0].ID, "", 0)
+	byID, err := s.ListAllFindings(ctx, FindingFilter{ID: fpPrefix[0].ID})
 	if err != nil {
 		t.Fatalf("ListAllFindings idLike by id: %v", err)
 	}
@@ -589,7 +591,7 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	// sort=SortRecent orders by last_seen descending only, ignoring severity --
 	// fp3 (3000) is high severity but has the most recent last_seen, so it
 	// leads even though the default order puts the critical fp2 first.
-	recent, err := s.ListAllFindings(ctx, "", "", "", "", SortRecent, 0)
+	recent, err := s.ListAllFindings(ctx, FindingFilter{Sort: SortRecent})
 	if err != nil {
 		t.Fatalf("ListAllFindings sort=recent: %v", err)
 	}
@@ -604,6 +606,41 @@ func TestListAllFindingsFiltersAndOrder(t *testing.T) {
 	}
 }
 
+func TestListAllFindingsTitleIsALiteralSubstring(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for i, title := range []string{"SIP authentication failures", "Disk 100% full", "Disk 1000 full", "a_b"} {
+		if _, err := s.UpsertFinding(ctx, model.Finding{
+			SystemID: "sys1", Fingerprint: fmt.Sprintf("fp%d", i), Severity: "low", Title: title,
+			Summary: "s", SuggestedAction: "a", Modules: []string{"m1"}, Evidence: []string{"e1"},
+		}, int64(1000+i)); err != nil {
+			t.Fatalf("seed %q: %v", title, err)
+		}
+	}
+	for _, tc := range []struct {
+		title string
+		want  []string
+	}{
+		{"auth", []string{"fp0"}},               // a substring, not a prefix
+		{"sip AUTHENTICATION", []string{"fp0"}}, // case-insensitive
+		{"100%", []string{"fp1"}},               // "%" is literal, not a wildcard
+		{"a_b", []string{"fp3"}},
+		{"x_y", nil}, // "_" is literal too
+	} {
+		got, err := s.ListAllFindings(ctx, FindingFilter{Title: tc.title})
+		if err != nil {
+			t.Fatalf("title %q: %v", tc.title, err)
+		}
+		var fps []string
+		for _, f := range got {
+			fps = append(fps, f.Fingerprint)
+		}
+		if !reflect.DeepEqual(fps, tc.want) {
+			t.Errorf("title %q: got %v, want %v", tc.title, fps, tc.want)
+		}
+	}
+}
+
 func TestListAllFindingsHonoursLimitAndDefaultCap(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -612,7 +649,7 @@ func TestListAllFindingsHonoursLimitAndDefaultCap(t *testing.T) {
 		seedFinding(t, ctx, s, "sys1", "fp"+string(rune('0'+i)), "low", model.StatusOpen, int64(i*1000))
 	}
 
-	limited, err := s.ListAllFindings(ctx, "", "", "", "", "", 2)
+	limited, err := s.ListAllFindings(ctx, FindingFilter{Limit: 2})
 	if err != nil {
 		t.Fatalf("ListAllFindings limit=2: %v", err)
 	}
@@ -620,7 +657,7 @@ func TestListAllFindingsHonoursLimitAndDefaultCap(t *testing.T) {
 		t.Fatalf("expected 2 findings with limit=2, got %d", len(limited))
 	}
 
-	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListAllFindings default cap: %v", err)
 	}

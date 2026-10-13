@@ -82,10 +82,11 @@ func (f *fakeReader) ResolveNodesFleet(_ context.Context, findings []model.Findi
 	return nil
 }
 
-func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sortMode string, limit int) ([]model.Finding, error) {
+func (f *fakeReader) ListAllFindings(ctx context.Context, filter logsstore.FindingFilter) ([]model.Finding, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
+	systemID, status, severity, idLike, sortMode, limit := filter.System, filter.Status, filter.Severity, filter.ID, filter.Sort, filter.Limit
 	var out []model.Finding
 	for _, fnd := range f.findings {
 		if systemID != "" && !strings.HasPrefix(fnd.SystemID, strings.TrimSuffix(systemID, "%")) {
@@ -98,6 +99,9 @@ func (f *fakeReader) ListAllFindings(ctx context.Context, systemID, status, seve
 			continue
 		}
 		if idLike != "" && !strings.HasPrefix(fnd.ID, strings.TrimSuffix(idLike, "%")) && !strings.HasPrefix(fnd.Fingerprint, strings.TrimSuffix(idLike, "%")) {
+			continue
+		}
+		if filter.Title != "" && !strings.Contains(strings.ToLower(fnd.Title), strings.ToLower(filter.Title)) {
 			continue
 		}
 		out = append(out, fnd)
@@ -563,6 +567,23 @@ func TestFindingsFilters(t *testing.T) {
 	}
 	if strings.Contains(body, `value="bogus"`) {
 		t.Fatalf("severity=bogus: raw invalid value was reflected into the page")
+	}
+}
+
+// The title search is how an operator finds one problem on one system to
+// reclassify it: the box keeps what was typed and narrows the rows.
+func TestFindingsTitleSearch(t *testing.T) {
+	h := newTestServer(t, seededReader(), fakeRuntime{})
+
+	body := get(t, h, "/?system=sys-1&title=+SSHD+FAILING+").Body.String()
+	if !strings.Contains(body, "sshd failing repeatedly") {
+		t.Fatalf("title search: expected finding missing")
+	}
+	if strings.Contains(body, "disk usage crept up") {
+		t.Fatalf("title search: unexpected finding present")
+	}
+	if !strings.Contains(body, `name="title" value="SSHD FAILING"`) {
+		t.Fatalf("title search: the box does not keep the trimmed search")
 	}
 }
 

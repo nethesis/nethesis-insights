@@ -17,6 +17,7 @@ everywhere it has ever happened.</small></p>
 <fieldset role="group">
 <input type="text" name="system" value="{{.System}}" placeholder="system id (prefix)">
 <input type="text" name="id" value="{{.ID}}" placeholder="id, fingerprint or class">
+<input type="search" name="title" value="{{.Title}}" placeholder="title contains">
 <select name="status">
 <option value=""{{if eq .Status ""}} selected{{end}}>any status</option>
 <option value="open"{{if eq .Status "open"}} selected{{end}}>open</option>

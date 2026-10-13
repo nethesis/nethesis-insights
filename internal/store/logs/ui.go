@@ -40,6 +40,15 @@ func likePattern(s string) string {
 	return s + "%"
 }
 
+// containsPattern turns s into a LIKE pattern, for use with ESCAPE '\', that
+// matches any value containing s literally: its "%", "_" and "\" are escaped
+// so they match themselves. SQLite's LIKE folds ASCII case only.
+func containsPattern(s string) string {
+	return "%" + likeEscaper.Replace(s) + "%"
+}
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 const dayMillis = 86400000
 
 // Counts is per-table row counts, for the status page.
@@ -417,41 +426,55 @@ func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 // then last_seen) stays the one used everywhere else, per CLAUDE.md.
 const SortRecent = "recent"
 
+// FindingFilter selects ListAllFindings' rows. Every field is optional (""
+// or 0 means no filter). System and ID match with SQL LIKE, letting an
+// operator paste a prefix of the (unshortened) system ID, the short finding
+// ID shown in the UI table, or a class key (fingerprint.Class); see
+// likePattern for how a bare value (no "%") is turned into a prefix match.
+// Title is a case-insensitive substring of the finding's title, taken
+// literally: "%" and "_" in it match themselves, because a title is prose
+// and an operator searching one types words, not patterns. Severity filters
+// on the stored severity, not the override.
+type FindingFilter struct {
+	System   string
+	Status   string
+	Severity string
+	ID       string
+	Title    string
+	Sort     string // "" or SortRecent
+	Limit    int
+}
+
 // ListAllFindings is the fleet-wide counterpart to ListFindings: no implicit
 // system scope and no visibility filter but one -- the operator sees every
 // finding except those of a dismissed class, and each one's class review
-// state alongside it -- and systemID/status/
-// severity/idLike are each optional filters ("" means no filter). systemID
-// and idLike both match with SQL LIKE, letting an operator paste a prefix of
-// the (unshortened) system ID, the short finding ID shown in the UI table,
-// or a class key (fingerprint.Class); see likePattern for how a bare value
-// (no "%") is turned into a prefix match. Severity filters and shows the
-// stored severity, not the override. Results are capped to limit (most
-// recently seen first). sort selects the order of that capped page: ""
-// (default) re-sorts into the canonical severity/last_seen order via
+// state alongside it. Results are capped to f.Limit (most recently seen
+// first). f.Sort selects the order of that capped page: "" (default)
+// re-sorts into the canonical severity/last_seen order via
 // model.SortFindings; SortRecent leaves the SQL's last_seen-descending order
 // as is.
-func (s *Store) ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error) {
+func (s *Store) ListAllFindings(ctx context.Context, f FindingFilter) ([]model.Finding, error) {
 	query := `
 		SELECT ` + findingColumns + `, c.visibility, c.severity_override, c.doc_ref, c.security
 		FROM findings f` + findingClassJoin + `
 		WHERE (? = '' OR f.system_id LIKE ?) AND (? = '' OR f.status = ?) AND (? = '' OR f.severity = ?)
 		  AND (? = '' OR f.id LIKE ? OR f.fingerprint LIKE ? OR f.class_key LIKE ?)
+		  AND (? = '' OR f.title LIKE ? ESCAPE '\')
 		  AND ` + notDismissed + `
 		ORDER BY f.last_seen DESC
 		LIMIT ?
 	`
-	systemPattern := likePattern(systemID)
-	idPattern := likePattern(idLike)
-	findings, err := s.queryFindings(ctx, query, systemID, systemPattern, status, status, severity, severity,
-		idLike, idPattern, idPattern, idPattern, VisibilityDismissed, clampLimit(limit))
+	systemPattern := likePattern(f.System)
+	idPattern := likePattern(f.ID)
+	findings, err := s.queryFindings(ctx, query, f.System, systemPattern, f.Status, f.Status, f.Severity, f.Severity,
+		f.ID, idPattern, idPattern, idPattern, f.Title, containsPattern(f.Title), VisibilityDismissed, clampLimit(f.Limit))
 	if err != nil {
 		return nil, err
 	}
 	if findings == nil {
 		findings = []model.Finding{}
 	}
-	if sort != SortRecent {
+	if f.Sort != SortRecent {
 		model.SortFindings(findings)
 	}
 	return findings, nil

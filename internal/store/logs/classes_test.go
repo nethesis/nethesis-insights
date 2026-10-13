@@ -56,7 +56,7 @@ func TestOperatorOnlyFindingsNeverReachTheReadAPI(t *testing.T) {
 			t.Fatalf("%s: want only %s, got %+v", sys, want, got)
 		}
 	}
-	all, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, FindingFilter{System: "sys1"})
 	mustDo(t, err)
 	if len(all) != 3 {
 		t.Fatalf("the operator must see every finding, got %d", len(all))
@@ -506,13 +506,13 @@ func TestListAllFindingsHidesDismissedClasses(t *testing.T) {
 	seedClassFinding(t, s, "sys1", "fp-none", "", "low", "n", false, 1000)
 	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityDismissed, "op", 2000))
 
-	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, FindingFilter{})
 	mustDo(t, err)
 	got := fingerprints(all)
 	if _, ok := got["fp-a"]; ok || len(got) != 2 {
 		t.Fatalf("want fp-b and fp-none only, got %+v", all)
 	}
-	byKey, err := s.ListAllFindings(ctx, "", "", "", "v3:a", "", 0)
+	byKey, err := s.ListAllFindings(ctx, FindingFilter{ID: "v3:a"})
 	mustDo(t, err)
 	if len(byKey) != 0 {
 		t.Fatalf("a dismissed finding is hidden even when searched for: %+v", byKey)

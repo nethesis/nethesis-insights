@@ -134,7 +134,7 @@ func TestFindingStoredWithValidFingerprint(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	findings, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	findings, err := s.ListAllFindings(ctx, logsstore.FindingFilter{System: "sys1"})
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -773,7 +773,7 @@ func TestFindingClassIgnoresSystem(t *testing.T) {
 		t.Fatalf("sys2: %v", err)
 	}
 
-	all, err := s.ListAllFindings(ctx, "", "", "", "", "", 0)
+	all, err := s.ListAllFindings(ctx, logsstore.FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListAllFindings: %v", err)
 	}

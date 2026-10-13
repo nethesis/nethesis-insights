@@ -40,6 +40,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
@@ -63,7 +64,7 @@ type Reader interface {
 	ListAnalyses(ctx context.Context, systemID string, limit int) ([]logsstore.AnalysisRow, error)
 	GateRollup(ctx context.Context, since int64) ([]logsstore.GateRow, error)
 	CostRollup(ctx context.Context) ([]logsstore.CostRow, error)
-	ListAllFindings(ctx context.Context, systemID, status, severity, idLike, sort string, limit int) ([]model.Finding, error)
+	ListAllFindings(ctx context.Context, f logsstore.FindingFilter) ([]model.Finding, error)
 	ResolveNodesFleet(ctx context.Context, findings []model.Finding) error
 	ListTemplates(ctx context.Context, systemID string, limit int) ([]logsstore.TemplateRow, error)
 	ListClasses(ctx context.Context, f logsstore.ClassFilter) ([]logsstore.ClassRow, error)
@@ -354,6 +355,7 @@ type findingsPageData struct {
 	Status     string
 	Severity   string
 	ID         string
+	Title      string
 	Sort       string
 	Severities []string
 }
@@ -364,9 +366,12 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 	status := sanitizeStatus(q.Get("status"))
 	severity := sanitizeSeverity(q.Get("severity"))
 	id := q.Get("id")
+	title := strings.TrimSpace(q.Get("title"))
 	sort := sanitizeFindingsSort(q.Get("sort"))
 
-	findings, err := s.reader.ListAllFindings(r.Context(), systemID, status, severity, id, sort, findingsLimit)
+	findings, err := s.reader.ListAllFindings(r.Context(), logsstore.FindingFilter{
+		System: systemID, Status: status, Severity: severity, ID: id, Title: title, Sort: sort, Limit: findingsLimit,
+	})
 	if err != nil {
 		s.chrome.StoreError(w, "index", err)
 		return
@@ -385,6 +390,7 @@ func (s *server) handleFindings(w http.ResponseWriter, r *http.Request) {
 		Status:     status,
 		Severity:   severity,
 		ID:         id,
+		Title:      title,
 		Sort:       sort,
 		Severities: model.Severities,
 	})

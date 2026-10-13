@@ -10,6 +10,7 @@ import (
 
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
+	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
 )
 
 // findingResponse is a stub reply citing T1, which is the only template the
@@ -43,7 +44,7 @@ func TestFindingCarriesTheCitedTemplatesNodes(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	found, err := s.ListAllFindings(ctx, logsstore.FindingFilter{System: "sys1"})
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestRecurrenceReplacesTheNodeSetRatherThanAccumulating(t *testing.T) {
 		t.Fatalf("second process: %v", err)
 	}
 
-	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	found, err := s.ListAllFindings(ctx, logsstore.FindingFilter{System: "sys1"})
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestABundleWithoutNodeDataStillProducesAFinding(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 
-	found, err := s.ListAllFindings(ctx, "sys1", "", "", "", "", 0)
+	found, err := s.ListAllFindings(ctx, logsstore.FindingFilter{System: "sys1"})
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}

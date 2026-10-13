@@ -72,7 +72,7 @@ func TestDecisionsNeverReachThePrompt(t *testing.T) {
 		c.t = 2000
 		process(t, a, fresh("sys1", 1000)) // raises the open finding
 		if decide {
-			findings, err := s.ListAllFindings(context.Background(), "sys1", "", "", "", "", 0)
+			findings, err := s.ListAllFindings(context.Background(), logsstore.FindingFilter{System: "sys1"})
 			if err != nil || len(findings) != 1 {
 				t.Fatalf("list findings: %v %v", findings, err)
 			}
