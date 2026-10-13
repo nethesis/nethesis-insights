@@ -1284,8 +1284,9 @@ decision is made once. The class is worked out by the server from the log
 lines the finding is based on, the same way a finding's identity is (section
 6) but leaving the machine out — never from the AI's wording. The review
 queue shows the pending classes by default, the ones seen on the most
-machines at the top, each with the titles and summaries the AI wrote for it,
-the evidence it is based on, and the most severe severity the AI gave any of
+machines at the top, each with the wording customers will read for it (see
+"What the customer reads" below), the titles and summaries the AI wrote for
+its findings, the evidence it is based on, and the most severe severity the AI gave any of
 its findings. Switching to "all" still lists whatever is still pending
 first, ahead of classes already delivered or kept internal, so there is
 never a decided class to scroll past to find one still waiting.
@@ -1323,8 +1324,20 @@ dismiss can each be replaced by another later; none can be taken back to
   seen; after that it is the operator's, and a recurrence never resets it.
 - **Severity the customer sees** — what customers are shown instead of the AI's severity.
   The stored severity, and what the AI is told, do not change.
-- **Remediation docs** — a link to remediation documentation, blank for none,, returned to customers
+- **Remediation docs** — a link to remediation documentation, blank for none, returned to customers
   with each finding as `doc_ref`. Only an `http`/`https` address is accepted.
+- **What the customer reads** — the title, summary and suggested action
+  customers see for every finding in the class. The AI writes these afresh
+  for each machine, so the same class could read "SIP authentication
+  failures" on one machine and "NethVoice proxy is seeing SIP authentication
+  failures" on another. Instead, the class keeps the words of its first
+  finding and every customer reads those. You can rewrite any of the three
+  here. Leave a box blank to go back to the AI's first wording; a blank box
+  never shows customers an empty title. Limits: 500 characters for the title,
+  5000 each for the other two. As with severity, the findings themselves and
+  what the AI is told do not change: the findings page still shows each
+  finding's own words, and adds "… the customer sees" lines where the class
+  wording differs.
 
 **Groups and suggestions.** About half of the classes waiting in the queue
 restate one already seen, worded differently by the AI or citing a slightly
@@ -1380,8 +1393,9 @@ many classes it raised and what operators decided about them; it is the page
 to watch when the prompt changes.
 
 A class nobody has decided on is forgotten once all its findings have been
-pruned (`FINDING_RETENTION`); a class with a decision is kept, so the
-decision still applies if the problem comes back.
+pruned (`FINDING_RETENTION`), its wording with it; a class with a decision
+(a rewritten wording counts) is kept, so the decision still applies if the
+problem comes back.
 
 ## Threat Shield
 

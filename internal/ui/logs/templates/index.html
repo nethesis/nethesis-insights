@@ -72,7 +72,10 @@ everywhere it has ever happened.</small></p>
 <dt>Delivered to the customer</dt>
 <dd>{{if eq .Visibility "customer"}}yes{{else if eq .Visibility "operator"}}no &mdash; internal{{else if eq .Visibility "pending"}}not yet &mdash; pending review{{else}}no &mdash; no class{{end}}{{if .ClassKey}} &middot; <a href="{{$.Base}}/review?key={{.ClassKey}}">review class</a>{{end}}</dd>
 {{if .SeverityOverride}}<dt>Severity the customer sees</dt><dd><span class="chip" data-severity="{{.SeverityOverride}}">{{.SeverityOverride}}</span></dd>{{end}}
-{{if .DocRef}}<dt>Documentation</dt><dd class="mono">{{.DocRef}}</dd>{{end}}
+{{if and .ClassTitle (ne .ClassTitle .Title)}}<dt>Title the customer sees</dt><dd>{{.ClassTitle}}</dd>
+{{end}}{{if and .ClassSummary (ne .ClassSummary .Summary)}}<dt>Summary the customer sees</dt><dd class="prose">{{.ClassSummary}}</dd>
+{{end}}{{if and .ClassSuggestedAction (ne .ClassSuggestedAction .SuggestedAction)}}<dt>Suggested action the customer sees</dt><dd class="prose">{{.ClassSuggestedAction}}</dd>
+{{end}}{{if .DocRef}}<dt>Documentation</dt><dd class="mono">{{.DocRef}}</dd>{{end}}
 <dt>Class</dt><dd class="mono">{{if .ClassKey}}{{.ClassKey}}{{else}}&mdash;{{end}}</dd>
 <dt>Security</dt><dd>{{if .Security}}tagged{{else}}no{{end}}</dd>
 <dt>Fingerprint</dt><dd class="mono">{{.Fingerprint}}</dd>

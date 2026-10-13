@@ -1101,9 +1101,19 @@ components:
           description: >-
             The operator's severity override for this kind of finding when
             one is set, otherwise the AI's.
-        title: { type: string }
-        summary: { type: string }
-        suggested_action: { type: string }
+        title:
+          type: string
+          description: >-
+            The wording of this kind of finding, the same on every system that
+            reports it: an operator's text when one is set, otherwise the AI's
+            text for the first finding of its kind. Not this finding's own
+            AI text, which may be worded differently.
+        summary:
+          type: string
+          description: As `title`, the one wording of this kind of finding.
+        suggested_action:
+          type: string
+          description: As `title`, the one wording of this kind of finding.
         modules:
           type: array
           items: { type: string }

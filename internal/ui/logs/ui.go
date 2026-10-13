@@ -114,10 +114,17 @@ const (
 // Review input bounds. A class key is fingerprint.Version, a colon and 64 hex
 // characters (e.g. "v4:…"); the cap only has to refuse garbage, not describe
 // the format.
+//
+// The wording caps are in runes and refuse rather than truncate: a cut
+// wording would differ from the seed and silently become an override. They
+// sit well above anything the model writes, because an unchanged form posts
+// the seed back and must not be refused for its length.
 const (
-	maxClassKeyLen = 128
-	maxDocRefLen   = 512
-	maxReviewForm  = 64 << 10 // 64 KiB (a group form posts up to reviewLimit keys); see internal/ui/threat's maxAllowlistFormSize
+	maxClassKeyLen  = 128
+	maxDocRefLen    = 512
+	maxWordingTitle = 500
+	maxWordingText  = 5000      // summary and suggested action, each
+	maxReviewForm   = 256 << 10 // 256 KiB: a group form posts up to reviewLimit keys, the class form two URL-encoded maxWordingText fields; see internal/ui/threat's maxAllowlistFormSize
 )
 
 // writableRoutes is the small, explicit, enumerated set of paths that also

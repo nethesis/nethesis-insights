@@ -105,6 +105,15 @@ type Finding struct {
 	// Severity itself.
 	Visibility       string `json:"-"`
 	SeverityOverride string `json:"-"`
+	// ClassTitle, ClassSummary and ClassSuggestedAction are the class's one
+	// customer-facing wording (the operator's edit, else the class's first
+	// finding's text), joined at read time; "" where the class has none.
+	// Server-internal: the read API puts them in Title, Summary and
+	// SuggestedAction, and the operator UI shows them beside the finding's
+	// own text. Never stored on a finding and never read back by the prompt.
+	ClassTitle           string `json:"-"`
+	ClassSummary         string `json:"-"`
+	ClassSuggestedAction string `json:"-"`
 }
 
 var Severities = []string{"critical", "high", "medium", "low"}

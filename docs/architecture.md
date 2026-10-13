@@ -411,9 +411,10 @@ sorted by `model.SortFindings` — severity descending, then most-recently-seen
 first. Delivered means the finding's class has `visibility = customer`,
 reached in one join on `findings.class_key`; a pending or internal class's
 findings, and a finding with no class key, are withheld. The class's
-`severity_override` replaces `severity`, and its `doc_ref` and `security`
-tag are returned, all here and nowhere else — see "Review: per finding
-class".
+`severity_override` replaces `severity`, its wording (`class_texts`)
+replaces `title`, `summary` and `suggested_action`, and its `doc_ref` and
+`security` tag are returned, all here and nowhere else — see "Review: per
+finding class".
 
 ### Maintenance pass: `maint.Runner.Run`
 
@@ -455,6 +456,9 @@ The review state has no retention knob of its own; it shares
 undecided class with nothing left to review. A decided class is never pruned
 however old: the decision must keep applying when the condition returns, on
 any system, and the append-only audit trail would otherwise name nothing.
+The same call then deletes the `class_groups` and `class_texts` rows of
+classes that no longer exist, so neither grows forever; an edited wording
+is a decision, so only an untouched seed ever goes.
 Step 3 runs right after step 2 only so a class that step 2 just orphaned is
 collected in the same pass; there is still no ordering constraint for
 correctness.
@@ -1021,6 +1025,7 @@ without a goroutine to leak.
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every operator decision. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
 | `class_decisions` | Append-only audit trail of operator actions on classes: actor, action, detail, the class's `first_prompt_version`, time. Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
+| `class_texts` | Fleet-wide, one row per class key: the class's one customer-facing wording. `title`/`summary`/`suggested_action` are the **seed** — the first finding stored in the class, written with `ON CONFLICT DO NOTHING` and never changed; `title_override`/`summary_override`/`suggested_action_override` are the operator's, `NULL` for none. Its own table rather than columns on `finding_classes` because `CREATE TABLE IF NOT EXISTS` is the only schema mechanism, so a new column would never reach an existing database. Read by `ListFindings`, `ListAllFindings` and the review queue, never by `OpenFindings`. Orphan rows are deleted by `PruneClasses`. |
 | `class_groups` | One row per grouped class: `anchor_key` (the group's first class; the anchor's own row points at itself with similarity 1), the cosine it joined at, the `threshold` in force then, the `model` the sidecar reported, and the `vector` as a JSON array in `TEXT`. Written only by the grouping pass; never read by anything that feeds the prompt. Orphan rows are deleted by `PruneClasses`. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
@@ -1810,8 +1815,9 @@ the bundle and `OpenFindings` only, whatever a finding's class or its
 visibility. `OpenFindings` deliberately does not join `finding_classes`, so
 no decision can ride along on the findings it returns.
 `TestDecisionsNeverReachThePrompt` renders the same window with and without
-an internal visibility, a security tag, a severity override and a `doc_ref`
-on the class behind an open finding and requires byte-identical prompts.
+an internal visibility, a security tag, a severity override, a `doc_ref`
+and a reworded title, summary and suggested action on the class behind an
+open finding and requires byte-identical prompts.
 
 Every decision route is one `logsstore.Store` method, one transaction that refuses
 an unknown class (`ErrUnknownClass`, a `404` on the route, no audit row),
@@ -1824,7 +1830,7 @@ nothing is copied onto `findings`.
 
 | Route | Store method | Effect |
 |---|---|---|
-| `/review/decide` | `UpdateClass` | the class dialog's one form, posting the class's whole state: `visibility` (`customer`/`operator`/`dismissed`, or `pending` to leave an undecided class undecided — never back to `pending`, `ErrInvalidVisibility`), `security` (a checkbox: `on` or absent), `severity` (`severity_override`, `""` clears) and `doc_ref` (`""` clears; only an absolute `http(s)` URL is accepted). Compared against the stored row in the same transaction: only the fields that differ change, each with its own `class_decisions` row under the single-field action (`deliver`/`internal`/`dismiss`, `security`, `severity`, `doc_ref`), in that order; an unchanged form records nothing. The suggested visibility is marked on its radio, never pre-selected |
+| `/review/decide` | `UpdateClass` | the class dialog's one form, posting the class's whole state: `visibility` (`customer`/`operator`/`dismissed`, or `pending` to leave an undecided class undecided — never back to `pending`, `ErrInvalidVisibility`), `security` (a checkbox: `on` or absent), `severity` (`severity_override`, `""` clears), `doc_ref` (`""` clears; only an absolute `http(s)` URL is accepted) and the class wording, `title`, `summary` and `suggested_action` (the `class_texts` overrides; `""` or the seed itself, trimmed, means no override, so an emptied box restores the seed; at most 500 / 5000 / 5000 characters, refused rather than cut). Compared against the stored row in the same transaction: only the fields that differ change, each with its own `class_decisions` row under the single-field action (`deliver`/`internal`/`dismiss`, `security`, `severity`, `doc_ref`, `title`, `summary`, `suggested_action`), in that order; an unchanged form records nothing. A class with no `class_texts` row yet is seeded first, from its latest retained finding (the one the dialog shows). The suggested visibility is marked on its radio, never pre-selected |
 | `/review/group` | `SetGroupVisibility` | one visibility applied to the `member` keys the form posted (the pending rows the page showed) that are still `pending` in that group, one `class_decisions` row each (detail `group <anchor>`); 1 to 200 members, a member not in the group or already decided is skipped |
 | `/review/bulk` | `SetClassesVisibility` | one visibility applied to each checked class (`member` keys, 1 to 200) whatever it was decided before, one `class_decisions` row per class that changed (detail `bulk`); an unknown key or a class already at that visibility is skipped. The checkboxes sit in the queue table and tie to one form outside it by the HTML `form` attribute (forms cannot nest); no select-all, since that needs JavaScript |
 
@@ -1908,9 +1914,25 @@ Rules that are not visible from the code:
   templates is probably a `bucket:` class, and dismissing it also hides
   every later, different conclusion in that bucket; the form warns.
 - **A decision changes what the customer reads, never the finding row.**
-  The severity override replaces `severity` in `ListFindings` only; the
-  stored severity is what `prompt.Render` prints, and `OpenFindings` joins
-  nothing.
+  The severity override replaces `severity` in `ListFindings` only, and the
+  class wording replaces `title`, `summary` and `suggested_action` there
+  only; the stored values are what `prompt.Render` prints, and
+  `OpenFindings` joins nothing.
+- **One class, one wording.** The model words every finding afresh, so one
+  class raised on two systems read two ways ("SIP authentication failures"
+  on one, "NethVoice proxy is seeing SIP authentication failures" on
+  another) although the operator reviewed it once. `class_texts` gives each
+  class one wording: `UpsertFinding` seeds it from the class's first finding,
+  in the same transaction, first writer wins, and a recurrence never
+  reseeds it; the operator may override each field on the class dialog.
+  Read time takes the override, else the seed, else — no row yet, a class
+  from before the table existed until its next finding — the finding's own
+  text, **field by field**, so an empty stored value can never blank what
+  the customer reads. An emptied box clears the override and restores the
+  seed for the same reason. The operator UI keeps showing each finding's
+  own text and shows the class wording beside it where it differs. The
+  wording never reaches the fingerprint, the gate, the prompt or the
+  grouping text (`grouping.Text` embeds evidence only).
 - **`/review/stats` partitions by `first_prompt_version`**: pending,
   delivered, internal and dismissed partition a version's classes, and "security"
   overlaps them, counting tagged classes whatever their visibility. It is the

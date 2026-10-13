@@ -823,3 +823,27 @@ func TestFindingsRowCapsTheNodeList(t *testing.T) {
 		t.Fatal("the dialog must still list every node")
 	}
 }
+
+// A finding's dialog shows the class wording the customer reads only where it
+// differs from the finding's own text, as it does the severity override.
+func TestFindingsPageShowsTheCustomerWording(t *testing.T) {
+	r := seededReader()
+	r.findings = r.findings[:1]
+	f := &r.findings[0]
+	f.ClassKey, f.Visibility = "v3:aaaa", "customer"
+	f.ClassTitle = "SSH logins keep failing"
+	f.ClassSummary = f.Summary // the same: not repeated
+	f.ClassSuggestedAction = "review the sshd config\nand the ban list"
+	body := get(t, newTestServer(t, r, nil), "/").Body.String()
+	for _, want := range []string{
+		`<dt>Title the customer sees</dt><dd>SSH logins keep failing</dd>`,
+		`<dt>Suggested action the customer sees</dt><dd class="prose">review the sshd config` + "\n" + `and the ban list</dd>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("finding dialog lacks %s", want)
+		}
+	}
+	if strings.Contains(body, "Summary the customer sees") {
+		t.Error("a class summary equal to the finding's own was shown")
+	}
+}

@@ -236,6 +236,25 @@ func (s *Store) Init(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_class_groups_anchor ON class_groups(anchor_key)`,
+		// A class's one customer-facing wording: see classes.go. Its own
+		// table, not columns on finding_classes, because a live database
+		// already has finding_classes and CREATE TABLE IF NOT EXISTS is the
+		// only schema mechanism there is. title/summary/suggested_action are
+		// the seed -- the first finding's text, written once (ON CONFLICT DO
+		// NOTHING) and never changed; the *_override columns are the
+		// operator's, NULL for none. Only ListFindings puts it in place of a
+		// finding's own text; the operator reads show it beside that text,
+		// and OpenFindings never reads it, so it cannot reach the prompt.
+		`CREATE TABLE IF NOT EXISTS class_texts (
+			class_key TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			suggested_action TEXT NOT NULL,
+			title_override TEXT,
+			summary_override TEXT,
+			suggested_action_override TEXT,
+			created_at INTEGER NOT NULL
+		)`,
 	}
 
 	for _, stmt := range stmts {
@@ -443,27 +462,42 @@ func (s *Store) SystemCallsSince(ctx context.Context, systemID string, since int
 }
 
 // findingColumns is what queryFindings scans: the findings row, then the
-// review state of its class. The last four are NULL wherever the query
-// does not join finding_classes.
+// review state of its class (classColumns). A query that does not join the
+// class selects noClassColumns in its place.
 const findingColumns = `f.id, f.system_id, f.fingerprint, f.severity, f.title, f.summary, f.suggested_action,
 	f.modules, f.evidence, f.status, f.occurrence_count, f.first_seen, f.last_seen, f.reopened_at,
 	f.llm_model, f.prompt_version, f.nodes, f.class_key`
 
-// findingClassJoin reaches a finding's class. It is a LEFT JOIN; ListFindings
-// makes it an inner one by requiring a visibility.
+// classColumns is a finding's class review state over findingClassJoin: the
+// decisions on finding_classes, then the class's customer wording field by
+// field -- the operator's override, else the seed, else NULL (no class_texts
+// row yet), in which case the finding's own text stands.
+const classColumns = `c.visibility, c.severity_override, c.doc_ref, c.security,
+	coalesce(nullif(t.title_override, ''), nullif(t.title, '')),
+	coalesce(nullif(t.summary_override, ''), nullif(t.summary, '')),
+	coalesce(nullif(t.suggested_action_override, ''), nullif(t.suggested_action, ''))`
+
+// noClassColumns stands in for classColumns where no class is joined.
+const noClassColumns = `NULL, NULL, NULL, NULL, NULL, NULL, NULL`
+
+// findingClassJoin reaches a finding's class and its wording. Both are LEFT
+// JOINs; ListFindings makes the first an inner one by requiring a
+// visibility.
 const findingClassJoin = `
-	LEFT JOIN finding_classes c ON c.class_key = f.class_key`
+	LEFT JOIN finding_classes c ON c.class_key = f.class_key
+	LEFT JOIN class_texts t ON t.class_key = f.class_key`
 
 // notDismissed is the operator views' filter over findingClassJoin, and
 // takes VisibilityDismissed as its one argument. A finding with no class row
 // (NULL visibility) is kept: only a decision hides anything.
 const notDismissed = `(c.visibility IS NULL OR c.visibility != ?)`
 
-// OpenFindings feeds prompt.Render, so it deliberately does not join
-// finding_classes: no operator decision -- visibility, severity override,
-// doc_ref -- can reach the model through it.
+// OpenFindings feeds prompt.Render, so it deliberately joins neither
+// finding_classes nor class_texts: no operator decision -- visibility,
+// severity override, doc_ref, the class wording -- can reach the model
+// through it. The model keeps reading the text it wrote itself.
 func (s *Store) OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error) {
-	return s.queryFindings(ctx, `SELECT `+findingColumns+`, NULL, NULL, NULL, NULL FROM findings f WHERE f.system_id = ? AND f.status = ?`, systemID, model.StatusOpen)
+	return s.queryFindings(ctx, `SELECT `+findingColumns+`, `+noClassColumns+` FROM findings f WHERE f.system_id = ? AND f.status = ?`, systemID, model.StatusOpen)
 }
 
 func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (Outcome, error) {
@@ -564,6 +598,18 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 		`, f.ClassKey, visibility, boolToInt(f.Security), nullIfEmpty(f.PromptVersion), now, now); err != nil {
 			return "", fmt.Errorf("store: upsert finding class: %w", err)
 		}
+		// The class's customer wording is seeded by the first finding that
+		// reaches it, and only by that one: every later finding of the class,
+		// on any system, is worded afresh by the model, and the customer must
+		// read one wording for one reviewed class. A class from before
+		// class_texts existed is seeded by its next finding.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO class_texts (class_key, title, summary, suggested_action, created_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(class_key) DO NOTHING
+		`, f.ClassKey, f.Title, f.Summary, f.SuggestedAction, now); err != nil {
+			return "", fmt.Errorf("store: seed class text: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -593,10 +639,11 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 // class has been delivered (visibility = customer). A pending or internal
 // class's findings are withheld, and so is a finding with no class at all --
 // only a reviewed class reaches the customer. The class's severity override
-// replaces the stored severity here, and only here: the stored value is what
-// prompt.Render prints.
+// replaces the stored severity here, and only here, and so does the class's
+// wording replace the finding's own title, summary and suggested action:
+// the stored values are what prompt.Render prints.
 func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, status string) ([]model.Finding, error) {
-	query := `SELECT ` + findingColumns + `, c.visibility, c.severity_override, c.doc_ref, c.security
+	query := `SELECT ` + findingColumns + `, ` + classColumns + `
 		FROM findings f` + findingClassJoin + `
 		WHERE f.system_id = ? AND f.last_seen >= ? AND c.visibility = ?`
 	args := []any{systemID, since, VisibilityCustomer}
@@ -610,8 +657,18 @@ func (s *Store) ListFindings(ctx context.Context, systemID string, since int64, 
 		return nil, err
 	}
 	for i := range findings {
-		if o := findings[i].SeverityOverride; o != "" {
-			findings[i].Severity = o
+		f := &findings[i]
+		if f.SeverityOverride != "" {
+			f.Severity = f.SeverityOverride
+		}
+		if f.ClassTitle != "" {
+			f.Title = f.ClassTitle
+		}
+		if f.ClassSummary != "" {
+			f.Summary = f.ClassSummary
+		}
+		if f.ClassSuggestedAction != "" {
+			f.SuggestedAction = f.ClassSuggestedAction
 		}
 	}
 	model.SortFindings(findings)
@@ -630,12 +687,14 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 		var f model.Finding
 		var modulesJSON, evidenceJSON string
 		var nodesJSON, classKey, visibility, severityOverride, docRef sql.NullString
+		var classTitle, classSummary, classAction sql.NullString
 		var reopenedAt sql.NullInt64
 		var security sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.SystemID, &f.Fingerprint, &f.Severity, &f.Title, &f.Summary, &f.SuggestedAction,
 			&modulesJSON, &evidenceJSON, &f.Status, &f.OccurrenceCount, &f.FirstSeen, &f.LastSeen, &reopenedAt,
 			&f.LLMModel, &f.PromptVersion, &nodesJSON, &classKey,
-			&visibility, &severityOverride, &docRef, &security); err != nil {
+			&visibility, &severityOverride, &docRef, &security,
+			&classTitle, &classSummary, &classAction); err != nil {
 			return nil, fmt.Errorf("store: scan finding: %w", err)
 		}
 		f.ClassKey = classKey.String
@@ -643,6 +702,9 @@ func (s *Store) queryFindings(ctx context.Context, query string, args ...any) ([
 		f.SeverityOverride = severityOverride.String
 		f.DocRef = docRef.String
 		f.Security = security.Int64 != 0
+		f.ClassTitle = classTitle.String
+		f.ClassSummary = classSummary.String
+		f.ClassSuggestedAction = classAction.String
 		if nodesJSON.Valid && nodesJSON.String != "" {
 			if err := json.Unmarshal([]byte(nodesJSON.String), &f.Nodes); err != nil {
 				return nil, fmt.Errorf("store: unmarshal nodes: %w", err)

@@ -169,12 +169,25 @@ func (s *Store) PruneClasses(ctx context.Context, olderThan int64) (int, error) 
 	// Group rows of classes that no longer exist. An anchor row may go while
 	// its members stay: they keep the anchor_key string, and the pruned
 	// anchor simply stops attracting new classes. The count returned is
-	// classes only.
+	// classes only, here and for the wording below.
 	if _, err := s.pruneLoop(ctx, `
 		DELETE FROM class_groups
 		WHERE class_key IN (
 			SELECT g.class_key FROM class_groups g
 			WHERE NOT EXISTS (SELECT 1 FROM finding_classes c WHERE c.class_key = g.class_key)
+			LIMIT ?
+		)
+	`); err != nil {
+		return n, err
+	}
+	// The wording of classes that no longer exist. An edited wording is a
+	// decision, so its class is never pruned above; what goes here is a
+	// seed nobody touched, which the class's next finding would re-seed.
+	if _, err := s.pruneLoop(ctx, `
+		DELETE FROM class_texts
+		WHERE class_key IN (
+			SELECT t.class_key FROM class_texts t
+			WHERE NOT EXISTS (SELECT 1 FROM finding_classes c WHERE c.class_key = t.class_key)
 			LIMIT ?
 		)
 	`); err != nil {

@@ -5,7 +5,6 @@ package logs
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -72,8 +71,7 @@ const (
 )
 
 // latestFindingSQL selects one column of a class's latest finding, the one
-// attachClassDetails shows: ordered as its titles are (last_seen, then title)
-// for the title, as its detail row is (last_seen, then id) for the modules.
+// attachClassDetails' detail row shows (last_seen, then id).
 const latestFindingSQL = `(SELECT x.%s FROM findings x WHERE x.class_key = c.class_key ORDER BY x.last_seen DESC, x.%s LIMIT 1)`
 
 // classSortSQL maps each ClassSort* key to the fixed ORDER BY expression
@@ -85,8 +83,12 @@ const latestFindingSQL = `(SELECT x.%s FROM findings x WHERE x.class_key = c.cla
 // ranked (critical 0). The title, module and severity expressions are
 // correlated subqueries evaluated only when that column is chosen; modules
 // sort on the stored JSON text, whose first element is the module shown.
+// The title is the one the row shows: the class wording's (override, else
+// seed), else the latest finding's, ordered as attachClassDetails' detail
+// row is.
 var classSortSQL = map[string]string{
-	ClassSortTitle:  fmt.Sprintf(latestFindingSQL, "title", "title") + ` COLLATE NOCASE`,
+	ClassSortTitle: `coalesce(nullif(t.title_override, ''), nullif(t.title, ''), ` +
+		fmt.Sprintf(latestFindingSQL, "title", "id") + `) COLLATE NOCASE`,
 	ClassSortModule: fmt.Sprintf(latestFindingSQL, "modules", "id"),
 	ClassSortSeverity: fmt.Sprintf(`(%d - coalesce((SELECT MIN(%s) FROM findings x WHERE x.class_key = c.class_key), %d))`,
 		len(model.Severities), severityRankSQL, len(model.Severities)),
@@ -115,11 +117,14 @@ func classOrder(f ClassFilter) (string, []any) {
 // reviewTitles distinct titles across systems, the most severe stored
 // severity across the class's findings (never the model's wording -- the
 // class carries no free-text severity of its own), and the latest finding's
-// summary, suggested action, modules and evidence.
+// summary, suggested action, modules and evidence. Wording is what the
+// customer reads for the class: its class_texts wording field by field, else
+// the latest finding's own text.
 type ClassRow struct {
 	Class
 	Systems         int
 	Findings        int
+	Wording         Wording
 	Titles          []string
 	Severity        string
 	Summary         string
@@ -150,11 +155,10 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 	args = append(append(args, orderArgs...), clampLimit(f.Limit))
 	// order is one of classOrder's fixed clauses, never request text.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.class_key, c.visibility, c.security, c.severity_override, c.doc_ref,
-		       c.first_prompt_version, c.first_seen, c.last_seen,
+		SELECT `+classSelect+`,
 		       (SELECT count(DISTINCT x.system_id) FROM findings x WHERE x.class_key = c.class_key) AS systems,
 		       (SELECT count(*) FROM findings x WHERE x.class_key = c.class_key) AS findings
-		FROM finding_classes c
+		FROM finding_classes c LEFT JOIN class_texts t ON t.class_key = c.class_key
 		WHERE (c.visibility = ? OR (? = '' AND (? != '' OR ? != '' OR c.visibility != ?)))
 		  AND (? = '' OR c.class_key LIKE ?)
 		  AND (? = '' OR c.class_key IN (SELECT g.class_key FROM class_groups g WHERE g.anchor_key = ?))
@@ -169,16 +173,10 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 	out := []ClassRow{}
 	for rows.Next() {
 		var r ClassRow
-		var security int
-		var severity, docRef, promptVersion sql.NullString
-		if err := rows.Scan(&r.Key, &r.Visibility, &security, &severity, &docRef,
-			&promptVersion, &r.FirstSeen, &r.LastSeen, &r.Systems, &r.Findings); err != nil {
+		if err := scanClass(rows, &r.Class, &r.Systems, &r.Findings); err != nil {
 			return nil, fmt.Errorf("store: scan class: %w", err)
 		}
-		r.Security = security != 0
-		r.SeverityOverride = severity.String
-		r.DocRef = docRef.String
-		r.FirstPromptVersion = promptVersion.String
+		r.Wording = r.Text.Customer()
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -194,8 +192,10 @@ func (s *Store) ListClasses(ctx context.Context, f ClassFilter) ([]ClassRow, err
 }
 
 // attachClassDetails fills Titles, Severity, Summary, SuggestedAction,
-// Modules and Evidence for rows in two bounded queries -- never one row per
-// finding, which at fleet scale is ~100k rows for 200 classes:
+// Modules and Evidence -- and the latest finding's text into any field of
+// Wording the class wording leaves empty -- for rows in two bounded queries,
+// never one row per finding, which at fleet scale is ~100k rows for 200
+// classes:
 //
 //   - titles: one row per distinct (class_key, title), aggregated in SQL,
 //     most recently seen first.
@@ -245,9 +245,9 @@ func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 	}
 
 	detailRows, err := s.db.QueryContext(ctx, `
-		SELECT class_key, summary, suggested_action, modules, evidence, best_rank
+		SELECT class_key, title, summary, suggested_action, modules, evidence, best_rank
 		FROM (
-			SELECT class_key, summary, suggested_action, modules, evidence,
+			SELECT class_key, title, summary, suggested_action, modules, evidence,
 			       ROW_NUMBER() OVER (PARTITION BY class_key ORDER BY last_seen DESC, id) AS rn,
 			       MIN(`+severityRankSQL+`) OVER (PARTITION BY class_key) AS best_rank
 			FROM findings WHERE class_key IN (`+in+`)
@@ -259,9 +259,9 @@ func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 	defer func() { _ = detailRows.Close() }()
 
 	for detailRows.Next() {
-		var key, summary, suggestedAction, modulesJSON, evidenceJSON string
+		var key, title, summary, suggestedAction, modulesJSON, evidenceJSON string
 		var bestRank int
-		if err := detailRows.Scan(&key, &summary, &suggestedAction, &modulesJSON, &evidenceJSON, &bestRank); err != nil {
+		if err := detailRows.Scan(&key, &title, &summary, &suggestedAction, &modulesJSON, &evidenceJSON, &bestRank); err != nil {
 			return fmt.Errorf("store: scan class detail: %w", err)
 		}
 		r := index[key]
@@ -270,6 +270,17 @@ func (s *Store) attachClassDetails(ctx context.Context, rows []ClassRow) error {
 		}
 		r.Summary = summary
 		r.SuggestedAction = suggestedAction
+		// A field the class wording leaves empty reads as the finding's
+		// own, exactly as ListFindings falls back.
+		if r.Wording.Title == "" {
+			r.Wording.Title = title
+		}
+		if r.Wording.Summary == "" {
+			r.Wording.Summary = summary
+		}
+		if r.Wording.SuggestedAction == "" {
+			r.Wording.SuggestedAction = suggestedAction
+		}
 		if bestRank >= 0 && bestRank < len(model.Severities) {
 			r.Severity = model.Severities[bestRank]
 		}

@@ -37,6 +37,12 @@ figure.overflow-auto :is(th, td) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Free text an operator may have typed over several lines (a class's
+   customer wording): keep the line breaks the textarea posted. */
+.prose {
+  white-space: pre-line;
+}
+
 td.num, th.num {
   text-align: right;
   font-variant-numeric: tabular-nums;

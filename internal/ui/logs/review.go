@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	logsstore "github.com/nethesis/nethesis-insights/internal/store/logs"
@@ -168,6 +170,10 @@ type reviewPageData struct {
 	Headers     []reviewHeader
 	CanWrite    bool
 	Severities  []string
+	// The class form's wording boxes carry the same caps the handler
+	// enforces, so a browser stops the operator before the server refuses.
+	MaxWordingTitle int
+	MaxWordingText  int
 }
 
 // handleReview shows the class queue: finding classes ranked by how many
@@ -216,6 +222,9 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		Headers:      s.reviewHeaders(view.Key, key, group, sort, dir),
 		CanWrite:     s.canWrite(),
 		Severities:   model.Severities,
+
+		MaxWordingTitle: maxWordingTitle,
+		MaxWordingText:  maxWordingText,
 	})
 }
 
@@ -292,7 +301,7 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 	case "/review/decide":
 		u, ok := formClassUpdate(r)
 		if !ok {
-			http.Error(w, "visibility, security, severity or doc_ref is invalid (doc_ref must be an absolute http(s) URL)", http.StatusBadRequest)
+			http.Error(w, "visibility, security, severity, doc_ref or the wording is invalid (doc_ref must be an absolute http(s) URL; a wording field longer than its form box allows is refused)", http.StatusBadRequest)
 			return
 		}
 		_, err = s.writer.UpdateClass(ctx, key, u, actor, now)
@@ -350,7 +359,8 @@ func (s *server) handleDecision(w http.ResponseWriter, r *http.Request, actor st
 // that form, so each is required in its own way: visibility must name one of
 // the four (pending only leaves an undecided class undecided -- the store
 // still refuses it as a target); security is a checkbox, "on" or absent; a
-// blank severity or doc_ref clears it. Nothing is defaulted from a missing
+// blank severity or doc_ref clears it, and a blank wording field restores
+// the class's first wording. Nothing is defaulted from a missing
 // visibility, so a stale or malformed form is refused rather than applied.
 func formClassUpdate(r *http.Request) (logsstore.ClassUpdate, bool) {
 	var u logsstore.ClassUpdate
@@ -376,7 +386,39 @@ func formClassUpdate(r *http.Request) (logsstore.ClassUpdate, bool) {
 	if u.DocRef, ok = cleanDocRef(r.PostFormValue("doc_ref")); !ok {
 		return u, false
 	}
+	// A blank wording field restores the class's seed (see
+	// logsstore.ClassUpdate); it never blanks what the customer reads.
+	for _, w := range []struct {
+		field string
+		max   int
+		dst   *string
+	}{
+		{"title", maxWordingTitle, &u.Wording.Title},
+		{"summary", maxWordingText, &u.Wording.Summary},
+		{"suggested_action", maxWordingText, &u.Wording.SuggestedAction},
+	} {
+		if *w.dst, ok = cleanWording(r.PostFormValue(w.field), w.max); !ok {
+			return u, false
+		}
+	}
 	return u, true
+}
+
+// cleanWording normalises one wording field as a browser posts it: line
+// breaks to "\n" (a textarea submits CRLF, which would otherwise never equal
+// the seed), other control characters dropped (a tab kept), surrounding
+// space trimmed. Longer than max runes is refused, not cut -- see
+// maxWordingText.
+func cleanWording(raw string, max int) (string, bool) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	v := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, raw))
+	return v, utf8.RuneCountInString(v) <= max
 }
 
 // formKey reads a class key from the form body: trimmed, non-empty and

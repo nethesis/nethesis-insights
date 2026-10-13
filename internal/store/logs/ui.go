@@ -455,7 +455,7 @@ type FindingFilter struct {
 // as is.
 func (s *Store) ListAllFindings(ctx context.Context, f FindingFilter) ([]model.Finding, error) {
 	query := `
-		SELECT ` + findingColumns + `, c.visibility, c.severity_override, c.doc_ref, c.security
+		SELECT ` + findingColumns + `, ` + classColumns + `
 		FROM findings f` + findingClassJoin + `
 		WHERE (? = '' OR f.system_id LIKE ?) AND (? = '' OR f.status = ?) AND (? = '' OR f.severity = ?)
 		  AND (? = '' OR f.id LIKE ? OR f.fingerprint LIKE ? OR f.class_key LIKE ?)

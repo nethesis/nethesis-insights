@@ -69,10 +69,11 @@ press, with one audit entry each.</small></p>
 </thead>
 <tbody>
 {{range .Rows}}
+{{$name := .Wording.Title}}{{if and (not $name) .Titles}}{{$name = index .Titles 0}}{{end}}
 <tr>
-{{if $.CanWrite}}<td><input type="checkbox" name="member" value="{{.Key}}" form="bulk-decide" aria-label="select {{if .Titles}}{{index .Titles 0}}{{else}}{{short .Key 16}}{{end}}"></td>
+{{if $.CanWrite}}<td><input type="checkbox" name="member" value="{{.Key}}" form="bulk-decide" aria-label="select {{if $name}}{{$name}}{{else}}{{short .Key 16}}{{end}}"></td>
 {{end}}<td>
-<button type="button" class="linklike" title="{{if .Titles}}{{index .Titles 0}}{{else}}{{.Key}}{{end}}" commandfor="class-{{.Key}}" command="show-modal"><span>{{if .Titles}}{{index .Titles 0}}{{else}}{{short .Key 16}}{{end}}</span></button>
+<button type="button" class="linklike" title="{{if $name}}{{$name}}{{else}}{{.Key}}{{end}}" commandfor="class-{{.Key}}" command="show-modal"><span>{{if $name}}{{$name}}{{else}}{{short .Key 16}}{{end}}</span></button>
 {{if .Security}} <span class="chip" data-severity="critical">security</span>{{end}}
 {{if gt .GroupSize 1}}<br><small><a href="{{$.Base}}/review?group={{.GroupAnchor}}">group of {{.GroupSize}}</a></small>{{end}}
 {{if .Suggestion}}<br><small>Suggested: {{suggestionLabel .Suggestion}} &mdash; {{.SuggestionVotes}} similar class(es) decided</small>{{end}}
@@ -83,11 +84,15 @@ press, with one audit entry each.</small></p>
 <p><strong>Class <span class="mono">{{short .Key 16}}</span></strong></p>
 </header>
 <dl>
-<dt>Titles</dt>
+<dt>Title the customer sees{{if .Text.Override.Title}} <small>(edited)</small>{{end}}</dt><dd>{{if .Wording.Title}}{{.Wording.Title}}{{else}}&mdash;{{end}}</dd>
+<dt>Summary the customer sees{{if .Text.Override.Summary}} <small>(edited)</small>{{end}}</dt><dd class="prose">{{if .Wording.Summary}}{{.Wording.Summary}}{{else}}&mdash;{{end}}</dd>
+<dt>Suggested action the customer sees{{if .Text.Override.SuggestedAction}} <small>(edited)</small>{{end}}</dt><dd class="prose">{{if .Wording.SuggestedAction}}{{.Wording.SuggestedAction}}{{else}}&mdash;{{end}}</dd>
+<dt>AI titles</dt>
 <dd>{{range .Titles}}<div>{{.}}</div>{{else}}&mdash;{{end}}
 {{if .Findings}}<div><small>{{.Findings}} finding(s) fleet-wide &middot; <a href="{{$.Base}}/?id={{.Key}}">show them</a></small></div>{{end}}</dd>
-<dt>Summary</dt><dd>{{if .Summary}}{{.Summary}}{{else}}&mdash;{{end}}</dd>
-<dt>Suggested action</dt><dd>{{if .SuggestedAction}}{{.SuggestedAction}}{{else}}&mdash;{{end}}</dd>
+{{if ne .Summary .Wording.Summary}}<dt>Latest AI summary</dt><dd class="prose">{{.Summary}}</dd>
+{{end}}{{if ne .SuggestedAction .Wording.SuggestedAction}}<dt>Latest AI suggested action</dt><dd class="prose">{{.SuggestedAction}}</dd>
+{{end}}
 <dt>Modules</dt><dd class="mono">{{if .Modules}}{{range .Modules}}<div>{{.}}</div>{{end}}{{else}}&mdash;{{end}}</dd>
 <dt>Evidence</dt><dd>{{range .Evidence}}<div class="mono">{{.}}</div>{{else}}&mdash;{{end}}</dd>
 <dt>Visibility</dt><dd><span class="pill" data-status="{{if eq .Visibility "customer"}}open{{else}}stale{{end}}">{{.Visibility}}</span></dd>
@@ -132,6 +137,20 @@ module and priority.{{end}}</small></p>
 <label>Remediation docs
 <input type="url" name="doc_ref" value="{{.DocRef}}" placeholder="https://… (blank clears)">
 </label>
+<fieldset>
+<legend>What the customer reads</legend>
+<p><small>One wording for every finding in this class, on every system. A blank box restores the
+AI's first wording.</small></p>
+<label>Title
+<input type="text" name="title" value="{{.Wording.Title}}" maxlength="{{$.MaxWordingTitle}}">
+</label>
+<label>Summary
+<textarea name="summary" rows="4" maxlength="{{$.MaxWordingText}}">{{.Wording.Summary}}</textarea>
+</label>
+<label>Suggested action
+<textarea name="suggested_action" rows="3" maxlength="{{$.MaxWordingText}}">{{.Wording.SuggestedAction}}</textarea>
+</label>
+</fieldset>
 <button type="submit">Save</button>
 </form>
 {{else}}

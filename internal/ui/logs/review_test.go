@@ -36,7 +36,8 @@ func (f *fakeWriter) UpdateClass(_ context.Context, key string, u logsstore.Clas
 	if u.Security {
 		sec = "on"
 	}
-	return 1, f.record("update", key, "vis="+u.Visibility, "sec="+sec, "sev="+u.SeverityOverride, "doc="+u.DocRef, actor)
+	return 1, f.record("update", key, "vis="+u.Visibility, "sec="+sec, "sev="+u.SeverityOverride, "doc="+u.DocRef,
+		"words="+u.Wording.Title+"|"+u.Wording.Summary+"|"+u.Wording.SuggestedAction, actor)
 }
 
 func (f *fakeWriter) SetGroupVisibility(_ context.Context, anchor string, members []string, visibility, actor string, _ int64) (int, error) {
@@ -142,11 +143,16 @@ func TestReviewDecisionsReachTheStoreWithTheActor(t *testing.T) {
 		want string
 	}{
 		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "security": {"on"}, "severity": {"high"}, "doc_ref": {"https://docs.example.org/fix"}},
-			"update v3:aaaa vis=customer sec=on sev=high doc=https://docs.example.org/fix alice"},
-		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"operator"}}, "update v3:aaaa vis=operator sec=off sev= doc= alice"},
-		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"dismissed"}}, "update v3:aaaa vis=dismissed sec=off sev= doc= alice"},
+			"update v3:aaaa vis=customer sec=on sev=high doc=https://docs.example.org/fix words=|| alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"operator"}}, "update v3:aaaa vis=operator sec=off sev= doc= words=|| alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"dismissed"}}, "update v3:aaaa vis=dismissed sec=off sev= doc= words=|| alice"},
 		// pending leaves an undecided class undecided while the rest is saved
-		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"pending"}, "security": {"on"}}, "update v3:aaaa vis= sec=on sev= doc= alice"},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"pending"}, "security": {"on"}}, "update v3:aaaa vis= sec=on sev= doc= words=|| alice"},
+		// the class wording: trimmed, CRLF from a textarea made "\n", other
+		// control characters dropped
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"},
+			"title": {"  SIP logins fail\x00 "}, "summary": {"line one\r\nline two"}, "suggested_action": {"\tcheck\r the trunk\x1b"}},
+			"update v3:aaaa vis=customer sec=off sev= doc= words=SIP logins fail|line one\nline two|check\n the trunk alice"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "group v3:aaaa customer alice v3:aaaa,v3:bbbb"},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"dismissed"}, "member": {"v3:aaaa"}}, "group v3:aaaa dismissed alice v3:aaaa"},
 		{"/review/bulk", url.Values{"visibility": {"operator"}, "member": {"v3:aaaa", " v3:bbbb ", ""}}, "bulk operator alice v3:aaaa,v3:bbbb"},
@@ -195,6 +201,9 @@ func TestReviewRejectsBadInput(t *testing.T) {
 		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "severity": {"urgent"}}},
 		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "doc_ref": {"javascript:alert(1)"}}},
 		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "doc_ref": {"docs/fix.md"}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "title": {strings.Repeat("é", maxWordingTitle+1)}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "summary": {strings.Repeat("s", maxWordingText+1)}}},
+		{"/review/decide", url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"}, "suggested_action": {strings.Repeat("a", maxWordingText+1)}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"pending"}, "member": {"v3:aaaa"}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "visibility": {"bogus"}, "member": {"v3:aaaa"}}},
 		{"/review/group", url.Values{"anchor": {"v3:aaaa"}, "member": {"v3:aaaa"}}},
@@ -720,5 +729,57 @@ func TestReviewBulkFormAndCheckboxes(t *testing.T) {
 		if strings.Contains(ro, bad) {
 			t.Errorf("read-only page carries %q", bad)
 		}
+	}
+}
+
+// The class dialog shows what the customer reads and offers it for editing:
+// the row is named by the class wording, the form's boxes are prefilled with
+// it and capped like the handler, and an edited field says so.
+func TestReviewFormCarriesTheClassWording(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{{
+		Class: logsstore.Class{Key: "v3:aaaa", Visibility: logsstore.VisibilityPending,
+			Text: logsstore.ClassText{
+				Seed:     logsstore.Wording{Title: "AI title", Summary: "AI summary", SuggestedAction: "AI action"},
+				Override: logsstore.Wording{Title: "Customer title"},
+			}},
+		Wording: logsstore.Wording{Title: "Customer title", Summary: "AI summary", SuggestedAction: "AI action"},
+		Titles:  []string{"latest AI title"}, Summary: "latest AI summary", SuggestedAction: "AI action",
+	}}
+	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
+	for _, want := range []string{
+		`<span>Customer title</span></button>`,
+		`Title the customer sees <small>(edited)</small>`,
+		`<dt>Summary the customer sees</dt><dd class="prose">AI summary</dd>`,
+		`<dt>Latest AI summary</dt><dd class="prose">latest AI summary</dd>`,
+		`<input type="text" name="title" value="Customer title" maxlength="500">`,
+		`<textarea name="summary" rows="4" maxlength="5000">AI summary</textarea>`,
+		`<textarea name="suggested_action" rows="3" maxlength="5000">AI action</textarea>`,
+		`A blank box restores the`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review page lacks %s", want)
+		}
+	}
+	// The suggested action equals the latest finding's: not shown twice.
+	if strings.Contains(body, "Latest AI suggested action") {
+		t.Error("an unchanged suggested action was shown twice")
+	}
+	if strings.Contains(body, "Summary the customer sees <small>(edited)</small>") {
+		t.Error("an unedited field was marked edited")
+	}
+}
+
+// The caps are inclusive and count characters, not bytes.
+func TestReviewAcceptsWordingAtTheLimit(t *testing.T) {
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, seededReader(), w)
+	form := url.Values{"key": {"v3:aaaa"}, "visibility": {"customer"},
+		"title": {strings.Repeat("é", maxWordingTitle)}, "summary": {strings.Repeat("s", maxWordingText)}}
+	if rec := do(h, writeReq("/review/decide", form)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("wording at the limit: got %d (%s), want 303", rec.Code, rec.Body.String())
+	}
+	if len(w.calls) != 1 {
+		t.Fatalf("store calls %v", w.calls)
 	}
 }
