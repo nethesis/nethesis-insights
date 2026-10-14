@@ -1319,10 +1319,7 @@ visibility choices are:
   does not save money — the AI is still told about these findings, so it
   does not report them again as new — and it does not delete them. To undo
   it, pick the **dismissed** view on `/review` and deliver the class or keep
-  it internal. Be careful with a class whose evidence lists several
-  different log lines: it stands for any conclusion the AI drew from that
-  module and priority together, so dismissing it also hides later, different
-  problems from the same place. The form warns about these.
+  it internal.
 
 While a class is undecided the form also offers **Pending**, which saves the
 other settings and leaves the class in the queue. Deliver, keep internal and

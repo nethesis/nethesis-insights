@@ -27,7 +27,7 @@ func TestEvidenceKeyStableWhenCitedSetGrows(t *testing.T) {
 		tpl("crowdsec1", 3, "ssh-bf by ip <IP> (NL/<NUM>)"),
 	}
 	if fp(small) != fp(large) {
-		t.Fatal("fingerprint moved when the model cited more of the same bucket")
+		t.Fatal("fingerprint moved when the model cited more variants of the same line")
 	}
 }
 
@@ -60,10 +60,8 @@ func TestEvidenceKeyStableAcrossBanDurations(t *testing.T) {
 	}
 }
 
-// The bucket fallback merges within one bucket only. Distinctness across
-// modules and priorities is what stops it over-merging genuinely different
-// conditions -- the risk that fallback introduces.
-func TestEvidenceKeyDistinctAcrossBuckets(t *testing.T) {
+// The same text in another module or at another priority is another line.
+func TestEvidenceKeyDistinctAcrossModulesAndPriorities(t *testing.T) {
 	a := EvidenceKey([]model.Template{tpl("crowdsec1", 3, "x")})
 	b := EvidenceKey([]model.Template{tpl("loki1", 3, "x")})
 	c := EvidenceKey([]model.Template{tpl("crowdsec1", 6, "x")})
@@ -132,12 +130,9 @@ func TestNormalizeCollapsesCollectorLeaks(t *testing.T) {
 	}
 }
 
-// The bucket fallback must be a last resort, not the common path. Every
-// single-citation finding shares "one bucket" trivially, so keying on the
-// bucket there would merge unrelated problems that happen to sit in the same
-// module at the same priority -- and the host bucket carries hundreds of
-// distinct templates.
-func TestSingleCitationsInOneBucketStayDistinct(t *testing.T) {
+// Two unrelated single-citation findings in one module at one priority stay
+// distinct -- the host bucket carries hundreds of distinct templates.
+func TestSingleCitationsInOneModuleStayDistinct(t *testing.T) {
 	ssh := fp([]model.Template{tpl("", 6, "sshd: failed password for <USER>")})
 	disk := fp([]model.Template{tpl("", 6, "disk almost full on <PATH>")})
 	if ssh == disk {
@@ -145,38 +140,52 @@ func TestSingleCitationsInOneBucketStayDistinct(t *testing.T) {
 	}
 }
 
-// Within one bucket, genuinely different templates that survive normalization
-// do fall back to the bucket -- that is the residual-variance case.
-func TestMultipleDistinctTemplatesInOneBucketUseTheBucket(t *testing.T) {
-	got := EvidenceKey([]model.Template{
-		tpl("crowdsec1", 3, "scenario-a on <IP>"),
-		tpl("crowdsec1", 3, "scenario-b on <IP>"),
+// v4 keyed several distinct lines of one (module, priority) on the bucket,
+// so every multi-line finding of a module shared one class: on the dev fleet,
+// six unrelated nethvoice-proxy problems. Each now keys on its own primary
+// line.
+func TestMultiLineFindingsInOneModuleStayDistinct(t *testing.T) {
+	relay := EvidenceKey([]model.Template{
+		tpl("nethvoice-proxy", 3, "<3> [kamailio] ERROR: rtpengine: rtpp_function_call(): no available proxies"),
+		tpl("nethvoice-proxy", 3, "<3> [kamailio] ERROR: rtpengine: rtpp_test(): proxy did not respond to ping"),
 	})
-	if got[0] != "bucket:crowdsec1/3" {
-		t.Fatalf("expected the bucket key, got %q", got[0])
+	malformed := EvidenceKey([]model.Template{
+		tpl("nethvoice-proxy", 3, "<3> [kamailio] ERROR: <core>: parse_cseq(): bad cseq"),
+		tpl("nethvoice-proxy", 3, "<3> [kamailio] ERROR: <core>: receive_msg(): core parsing of SIP message failed"),
+	})
+	if relay[0] == malformed[0] {
+		t.Fatalf("two unrelated multi-line findings in one module share a key: %q", relay[0])
 	}
 }
 
-// Country-code variants normalize to one template, so they take the primary
-// path, not the bucket path -- which is what keeps them distinct from an
-// unrelated condition in the same bucket.
-func TestCountryVariantsUsePrimaryNotBucket(t *testing.T) {
+// Citing more lines of a condition keeps its key while its primary line --
+// the first under model.LessTemplate -- is among them.
+func TestEvidenceKeyKeepsThePrimaryLine(t *testing.T) {
+	a := tpl("nethvoice-proxy", 3, "a: register auth failed")
+	b := tpl("nethvoice-proxy", 3, "b: invite auth failed")
+	if one, both := EvidenceKey([]model.Template{a}), EvidenceKey([]model.Template{b, a}); one[0] != both[0] {
+		t.Fatalf("adding a later line moved the key: %q != %q", one[0], both[0])
+	}
+}
+
+// Country-code variants normalize to one template: one condition, still
+// distinct from an unrelated one in the same module.
+func TestCountryVariantsStayOneCondition(t *testing.T) {
 	got := EvidenceKey([]model.Template{
 		tpl("crowdsec1", 3, "ssh-bf by ip <IP> (US/<NUM>)"),
 		tpl("crowdsec1", 3, "ssh-bf by ip <IP> (DE/<NUM>)"),
 	})
-	if got[0] == "bucket:crowdsec1/3" {
-		t.Fatalf("country variants fell back to the bucket: %q", got[0])
+	if one := EvidenceKey([]model.Template{tpl("crowdsec1", 3, "ssh-bf by ip <IP> (NL/<NUM>)")}); got[0] != one[0] {
+		t.Fatalf("country variants changed the key: %q != %q", got[0], one[0])
 	}
 	other := EvidenceKey([]model.Template{tpl("crowdsec1", 3, "something else on <IP>")})
 	if got[0] == other[0] {
-		t.Fatalf("distinct conditions in one bucket collapsed: %q", got[0])
+		t.Fatalf("distinct conditions in one module collapsed: %q", got[0])
 	}
 }
 
 // A Call-ID tail the edge leaves literal is different on every call. Cited as
-// the primary template, it put one SIP auth failure on a fresh class per call;
-// cited twice, the two spellings fell back to the bucket key instead.
+// the primary template, it put one SIP auth failure on a fresh class per call.
 func TestClassIgnoresLeakedCallIDTail(t *testing.T) {
 	line := func(tail string) model.Template {
 		return tpl("nethvoice-proxy", 3, `<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] <HEX>-`+tail+` INVITE-<NUM> - event=auth_failure method=INVITE status=<NUM> src_ip=<IP> user=<HEX> callid=<HEX>-`+tail)

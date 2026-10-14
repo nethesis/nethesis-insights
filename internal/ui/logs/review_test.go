@@ -384,24 +384,6 @@ func TestFindingDetailOpensInADialog(t *testing.T) {
 	}
 }
 
-// Dismissing a class that groups several log lines hides every later
-// conclusion drawn from its bucket, so the form says so; a one-line class
-// carries no such warning.
-func TestReviewWarnsBeforeDismissingABucketClass(t *testing.T) {
-	r := seededReader()
-	r.classes = []logsstore.ClassRow{
-		{Class: logsstore.Class{Key: "v3:bucket", Visibility: logsstore.VisibilityPending}, Evidence: []string{"a", "b"}},
-	}
-	const warning = "groups several different"
-	if body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review").Body.String(); !strings.Contains(body, warning) {
-		t.Fatal("no warning before dismissing a multi-line class")
-	}
-	r.classes[0].Evidence = []string{"a"}
-	if body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review").Body.String(); strings.Contains(body, warning) {
-		t.Fatal("a one-line class carries the bucket warning")
-	}
-}
-
 // The dismissed view is where a dismissal is undone, so it must exist and
 // filter on the stored visibility.
 func TestReviewHasADismissedView(t *testing.T) {

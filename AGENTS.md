@@ -532,7 +532,7 @@ rejected as a duplicate and the window is lost. On a **permanent** error
 
 `fingerprint.Compute(systemID, modules, evidence, category)` — sha256 over
 length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
-(currently `"v4"`). Never a `strings.Join`
+(currently `"v5"`). Never a `strings.Join`
 (a separator is forgeable). Consequences to preserve:
 
 - The LLM cites templates by **ID** (`T1`, `T2`, … from `prompt.TemplateID`); the
@@ -543,10 +543,14 @@ length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
 - Refusing model-authored text is **not sufficient**: the model still chooses
   which templates to cite. `v1` hashed the whole cited set, so a changing mix of
   GeoIP country codes split one SSH condition into ~160 findings on the dev
-  fleet, nearly all at `occurrence_count=1`. `v2` hashes one derived key from
-  `fingerprint.EvidenceKey`: normalize the known masking leaks, key on the
-  `(module_id, priority)` bucket when the cited set shares one, else on the
-  canonical primary template.
+  fleet, nearly all at `occurrence_count=1`. `fingerprint.EvidenceKey` hashes
+  one derived key instead: normalize the known masking leaks, then key on the
+  canonical primary template. **Never key on the `(module_id, priority)`
+  bucket again**: `v2`–`v4` did when the cited set shared one, and that
+  merged every multi-line finding of a module into one class — six unrelated
+  `nethvoice-proxy` problems on the dev fleet, one review decision and one
+  customer title. `v5` dropped it; a continuing problem's citation wobble is
+  now absorbed by `RefreshFindings` keeping it open and ALREADY KNOWN.
 - `model.LessTemplate` is the **single** definition of template order, shared by
   `prompt.SortedTemplates` and `EvidenceKey`. Two orderings that must agree will
   eventually disagree, and then a finding's identity stops matching the evidence

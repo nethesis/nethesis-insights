@@ -83,7 +83,7 @@ func TestNodeAttributionDoesNotChangeIdentity(t *testing.T) {
 // A class is the fingerprint without the system: the same condition on two
 // systems is two findings and one class.
 func TestClassIgnoresSystem(t *testing.T) {
-	mods, ev := []string{"nethvoice"}, []string{"bucket:nethvoice/4"}
+	mods, ev := []string{"nethvoice"}, []string{"primary:nethvoice/4/x"}
 	if Compute("sys1", mods, ev, "") == Compute("sys2", mods, ev, "") {
 		t.Fatal("fingerprints must differ across systems")
 	}

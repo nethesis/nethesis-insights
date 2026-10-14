@@ -31,24 +31,24 @@ func Normalize(moduleID, template string) string {
 //
 // v1 hashed every cited template, so a finding's identity moved whenever the
 // model cited a different subset of an unchanged condition. This returns a
-// single derived key instead, in three layers:
+// single derived key instead:
 //
 //  1. normalize each cited template, so a masking leak cannot split identity.
-//     This alone settles the observed case: every country-code variant of one
-//     scenario normalizes to the same text, so citing more of them changes
-//     nothing;
-//  2. if the normalized set is a single distinct template, key on it;
-//  3. if it is several distinct templates that all share one
-//     (module_id, priority) bucket, key on the bucket -- residual variance
-//     inside a bucket the model chose to cite as one condition is noise;
-//  4. otherwise key on the canonical primary template: the first of the
-//     normalized set under model.LessTemplate.
+//     Every country-code variant of one scenario normalizes to the same text,
+//     so citing more of them changes nothing;
+//  2. key on the canonical primary template: the first of the normalized set
+//     under model.LessTemplate.
 //
-// Layer 3 is deliberately the last resort rather than the common path. Applying
-// it whenever the cited set shares a bucket would key every single-citation
-// finding on its bucket alone, merging unrelated problems that happen to live in
-// the same module at the same priority -- and the host bucket carries hundreds
-// of distinct templates.
+// v4 had a layer between the two: several distinct templates sharing one
+// (module_id, priority) bucket keyed on the bucket. It merged every
+// multi-line finding of a module into one class -- six unrelated
+// nethvoice-proxy problems on the dev fleet (media relay down, SRTP,
+// malformed SIP, debug logging, Redis, SIP auth), one review decision and,
+// with class wording, one title for all of them. v5 dropped it. What it
+// bought -- stability when the model cites another subset of a continuing
+// problem's lines -- is now kept by RefreshFindings in the logs store, which
+// holds a finding open, and so listed as ALREADY KNOWN, for as long as its
+// lines keep arriving.
 //
 // The returned slice always has exactly one element, which is what Compute's
 // evidence list receives.
@@ -67,28 +67,7 @@ func EvidenceKey(cited []model.Template) []string {
 		return model.LessTemplate(normalized[i], normalized[j])
 	})
 
-	distinct := normalized[:0:0]
-	for i, t := range normalized {
-		if i == 0 || t.Template != normalized[i-1].Template ||
-			t.ModuleID != normalized[i-1].ModuleID || t.Priority != normalized[i-1].Priority {
-			distinct = append(distinct, t)
-		}
-	}
-
-	primary := distinct[0]
-	if len(distinct) > 1 {
-		sameBucket := true
-		for _, t := range distinct[1:] {
-			if t.ModuleID != primary.ModuleID || t.Priority != primary.Priority {
-				sameBucket = false
-				break
-			}
-		}
-		if sameBucket {
-			return []string{fmt.Sprintf("bucket:%s/%d", primary.ModuleID, primary.Priority)}
-		}
-	}
-
+	primary := normalized[0]
 	return []string{fmt.Sprintf("primary:%s/%d/%s",
 		primary.ModuleID, primary.Priority, strings.TrimSpace(primary.Template))}
 }

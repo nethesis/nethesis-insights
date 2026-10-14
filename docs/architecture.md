@@ -426,9 +426,9 @@ re-reported the finding — which the prompt tells it never to do. So a problem
 that never stopped went stale after `STALE_AFTER`, left ALREADY KNOWN, and the
 next paid window raised it again under whatever subset of its lines the model
 cited that time. On the dev fleet that split one SIP auth-failure condition on
-one system into two classes: `{INVITE, REGISTER}` keyed on the bucket, then,
-two days later and after going stale, `{REGISTER}` alone keyed on the primary
-template. It also made "came back on" a lie for a customer whose problem had
+one system into two classes: `{INVITE, REGISTER}` keyed on the (since
+removed, `v5`) bucket, then, two days later and after going stale,
+`{REGISTER}` alone keyed on the primary template. It also made "came back on" a lie for a customer whose problem had
 never gone away. Consequences to preserve:
 
 - **It runs before step 7**, so a finding it reopens is listed to the model as
@@ -1590,9 +1590,9 @@ the same SSH brute-force condition cited as `(BG/…) (DE/…) (NL/…)` in one
 window and `(CA/…) (HK/…)` in the next produced two different fingerprints and
 two findings, each stuck at `occurrence_count=1`.
 
-`v3` therefore hashes a single derived key — `fingerprint.EvidenceKey` — in
-three layers (`v4` keeps them and only widens the collapse in layer 1, see
-below):
+`fingerprint.EvidenceKey` therefore hashes a single derived key, in two
+steps (`v4` widened the collapse in step 1, see below; `v5` removed a layer
+between the two, see after the list):
 
 1. `fingerprint.Normalize` collapses the fields the collector's masking leaves
    literal. It is `model.CanonicalTemplate`, the same collapse the gate's
@@ -1641,11 +1641,25 @@ below):
    left as it is, so correctly masked lines keep their key; a leaked Call-ID
    in a line **without** a `callid=` field is not caught. The real fix is in
    the collector's masking.
-2. If every cited template shares one `(module_id, priority)` bucket, the key
-   is that bucket. Text variance *within* a bucket the model already chose to
-   cite as one condition is noise.
-3. Otherwise the key is the canonical primary template: the first of the
-   normalized set under `model.LessTemplate`.
+2. The key is the canonical primary template: the first of the normalized
+   set under `model.LessTemplate`.
+
+**Never key on the `(module_id, priority)` bucket.** `v2`–`v4` did, when the
+cited templates were several distinct ones sharing a bucket, on the theory
+that text variance within a bucket the model cited as one condition was
+noise. It was not: every multi-line finding of a module landed in one class.
+On the dev fleet the class `bucket:nethvoice-proxy/3` held six unrelated
+problems — media relay unavailable, SRTP negotiation, malformed SIP, a
+missing From header, debug logging, Redis, SIP auth failures — so one review
+decision covered all of them, the same finding's title changed with every
+re-report, and once a class carried one customer wording every customer of
+that class read "NethVoice proxy Redis connectivity failure". `v5` dropped
+the layer. What it bought — stability when the model cites another subset of
+a continuing problem's lines — is now kept by `RefreshFindings` (see
+"Findings live as long as their lines"): a continuing problem stays open and
+listed as ALREADY KNOWN, so the model is not asked to cite it again. A first
+report that cites `{B, C}` where an earlier one cited `{A, B}` still lands on
+another class; that is the accepted cost, and far rarer than the merge was.
 
 `model.LessTemplate` is the single definition of template order, used by both
 `prompt.Select` (to number the identifiers the model cites) and
@@ -1943,7 +1957,7 @@ Rules that are not visible from the code:
   So the prompt keeps listing them as already known and the model does not
   re-raise them on every paid call; dropping them would let a decision reach
   the prompt and would delete the only trace of a new problem landing in a
-  dismissed bucket class. It saves no money, by construction: the class is
+  dismissed class. It saves no money, by construction: the class is
   known only after the call, so it cannot decide whether to pay. A
   dismissed class is still found
   by `?key=` and on the queue's `dismissed` view; it is undone by delivering
@@ -1953,9 +1967,7 @@ Rules that are not visible from the code:
   their tag: security is a tag, not a visibility, and a new line the edge
   classifies as security hashes to a different class (`category` is in
   `fingerprint.Class`), so it can never recur inside a dismissed
-  non-security class. A class whose latest finding cites two or more
-  templates is probably a `bucket:` class, and dismissing it also hides
-  every later, different conclusion in that bucket; the form warns.
+  non-security class.
 - **A decision changes what the customer reads, never the finding row.**
   The severity override replaces `severity` in `ListFindings` only, and the
   class wording replaces `title`, `summary` and `suggested_action` there
