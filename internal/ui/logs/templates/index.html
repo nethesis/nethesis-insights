@@ -6,9 +6,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <h1>Findings</h1>
 <p><small>Problems the AI has reported, one row per distinct issue. Identity comes from a
 server-computed fingerprint (never the AI's wording), so the same problem recurring bumps
-<strong>occurrences</strong> instead of adding a new row. <strong>open</strong> means it's
-active or recent; <strong>stale</strong> means it hasn't reoccurred in a while and is
-presumed resolved &mdash; it can later reopen. Click a title for the summary, evidence,
+<strong>occurrences</strong> (the 15-minute windows its log lines appeared in) instead of adding
+a new row. <strong>open</strong> means its lines are still arriving; <strong>stale</strong> means
+none has arrived in a while and it is presumed resolved &mdash; it reopens when they come back. Click a title for the summary, evidence,
 suggested action and whether the customer sees it: a finding reaches the customer only once
 its class has been delivered on the <a href="{{.Base}}/review">review queue</a>. <strong>Nodes</strong> are the cluster machines the
 cited log lines came from in the most recent occurrence &mdash; where it is happening now, not

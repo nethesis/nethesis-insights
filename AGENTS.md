@@ -731,7 +731,10 @@ successful no-op, not an error.
 - `analyzer`: stub `llm`, temp-file SQLite. The load-bearing cases are — gated-out
   bundle writes an `analyses` row and never calls the LLM; recurrence bumps
   `occurrence_count` without inserting; absence past `STALE_AFTER` marks stale and
-  later recurrence reopens with `reopened_at`; an LLM failure leaves templates
+  later recurrence reopens with `reopened_at`; a finding whose lines keep
+  arriving stays open and in ALREADY KNOWN with no LLM call
+  (`TestContinuingProblemStaysKnownToTheModel` — `RefreshFindings` must run
+  before the prompt is rendered); an LLM failure leaves templates
   unrecorded so the retry still sees them as novel.
 - `threat`: the deepest table in the repo, because a bug here is a data-protection
   incident — every IP class (RFC1918, CGNAT, IMDS, multicast, IPv6 ULA, IPv6

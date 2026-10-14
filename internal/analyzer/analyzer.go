@@ -72,6 +72,7 @@ type Store interface {
 	OpenFindings(ctx context.Context, systemID string) ([]model.Finding, error)
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (logsstore.Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
+	RefreshFindings(ctx context.Context, systemID string, ts []model.Template, now int64) (int, error)
 }
 
 type Config struct {
@@ -234,6 +235,17 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 	// only ever appears in quiet windows would otherwise never get a name.
 	if err := a.store.UpsertNodes(ctx, b.SystemID, b.Nodes, now); err != nil {
 		return fmt.Errorf("analyzer: upsert nodes: %w", err)
+	}
+
+	// Keep the system's findings alive from this window's lines, for free:
+	// a finding whose evidence is still in the logs is seen now, and a stale
+	// one reopens. Like the roster, this is a fact about the window, so it
+	// runs on every path -- gated out, suppressed or paid -- and it must run
+	// before step 7 reads OpenFindings, so a finding it reopens is listed to
+	// the model as already known instead of being raised again under
+	// whatever subset of its lines the model cites this time.
+	if _, err := a.store.RefreshFindings(ctx, b.SystemID, b.Templates, now); err != nil {
+		return fmt.Errorf("analyzer: refresh findings: %w", err)
 	}
 
 	// 3. Read prior state BEFORE writing anything -- if templates were

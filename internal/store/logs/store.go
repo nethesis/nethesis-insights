@@ -16,6 +16,7 @@ import (
 	"fmt"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/uptrace/bun"
 
 	"github.com/nethesis/nethesis-insights/internal/model"
 	"github.com/nethesis/nethesis-insights/internal/platform/sqlitex"
@@ -564,12 +565,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f model.Finding, now int64) (
 			modules = excluded.modules,
 			evidence = excluded.evidence,
 			status = ?,
-			occurrence_count = findings.occurrence_count + 1,
+			occurrence_count = findings.occurrence_count + CASE WHEN findings.last_seen >= ? THEN 0 ELSE 1 END,
 			last_seen = ?,
 			nodes = excluded.nodes,
 			class_key = excluded.class_key%s
 	`
-	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.ClassKey), model.StatusOpen, now}
+	args := []any{id, f.SystemID, f.Fingerprint, f.Severity, f.Title, f.Summary, f.SuggestedAction, string(modulesJSON), string(evidenceJSON), model.StatusOpen, now, now, f.LLMModel, f.PromptVersion, string(nodesJSON), nullIfEmpty(f.ClassKey), model.StatusOpen, now, now}
 
 	var extraSet string
 	if outcome == OutcomeReopened {
@@ -633,6 +634,137 @@ func (s *Store) MarkStale(ctx context.Context, systemID string, olderThan int64)
 		return 0, fmt.Errorf("store: mark stale rows affected: %w", err)
 	}
 	return int(n), nil
+}
+
+// RefreshFindings keeps a system's findings alive from the lines its window
+// carried, with no LLM call: every finding of the system with at least one
+// evidence line among ts is seen now -- last_seen moves, the window counts
+// once in occurrence_count, a stale finding reopens, and nodes become the
+// nodes those lines came from this window. Its class's last_seen moves too.
+// It returns how many findings it touched.
+//
+// Without it a finding lived only as long as the model kept re-reporting it,
+// and the prompt tells the model never to re-report what it already knows:
+// a continuing problem went stale after STALE_AFTER, left the prompt's
+// ALREADY KNOWN list, and the next paid call raised it again -- citing
+// another subset of its lines, so on a fresh fingerprint and class. Run
+// before the prompt is rendered, so a finding this reopens is listed there.
+//
+// A line matches on model.CanonicalKey, the same key the gate's novelty and
+// the prompt's ALREADY KNOWN lookup use, tried under each of the finding's
+// modules because a stored evidence line does not say which one it came
+// from. Every status is a candidate, and a dismissed class's findings are
+// refreshed like any other: dismissal hides, it never stops bookkeeping.
+func (s *Store) RefreshFindings(ctx context.Context, systemID string, ts []model.Template, now int64) (int, error) {
+	if len(ts) == 0 {
+		return 0, nil
+	}
+	present := make(map[string][]int, len(ts))
+	for _, t := range ts {
+		k := model.CanonicalKey(t.ModuleID, t.Template)
+		present[k] = model.MergeNodeIDs(present[k], t.Nodes)
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	hits, err := findingsSeenIn(ctx, tx, systemID, present)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, h := range hits {
+		// SET reads the row as it was before the update, so the CASEs see
+		// the old status and last_seen. A window counts once: the model's
+		// re-report in the same Process (UpsertFinding, same now) does not
+		// count it again. Nodes are kept when this window's lines carry
+		// none (a collector that does not report them), rather than wiped.
+		nodesJSON, err := json.Marshal(model.SanitizeNodeIDs(h.nodes))
+		if err != nil {
+			return 0, fmt.Errorf("store: marshal nodes: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE findings SET
+				occurrence_count = occurrence_count + CASE WHEN last_seen >= ? THEN 0 ELSE 1 END,
+				last_seen = CASE WHEN last_seen > ? THEN last_seen ELSE ? END,
+				reopened_at = CASE WHEN status != ? THEN ? ELSE reopened_at END,
+				status = ?,
+				nodes = CASE WHEN ? THEN ? ELSE nodes END
+			WHERE id = ?
+		`, now, now, now, model.StatusOpen, now, model.StatusOpen,
+			len(h.nodes) > 0, string(nodesJSON), h.id); err != nil {
+			return 0, fmt.Errorf("store: refresh finding: %w", err)
+		}
+		if h.classKey != "" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE finding_classes SET last_seen = ? WHERE class_key = ? AND last_seen < ?
+			`, now, h.classKey, now); err != nil {
+				return 0, fmt.Errorf("store: refresh finding class: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit refresh findings: %w", err)
+	}
+	return len(hits), nil
+}
+
+// refreshHit is one finding RefreshFindings refreshes, with the nodes its
+// matching lines came from this window.
+type refreshHit struct {
+	id, classKey string
+	nodes        []int
+}
+
+// findingsSeenIn returns the system's findings with at least one evidence
+// line among present (model.CanonicalKey -> nodes), tried under each of the
+// finding's modules.
+func findingsSeenIn(ctx context.Context, tx bun.Tx, systemID string, present map[string][]int) ([]refreshHit, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, modules, evidence, class_key FROM findings WHERE system_id = ?`, systemID)
+	if err != nil {
+		return nil, fmt.Errorf("store: read findings to refresh: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var hits []refreshHit
+	for rows.Next() {
+		var id, modulesJSON, evidenceJSON string
+		var classKey sql.NullString
+		if err := rows.Scan(&id, &modulesJSON, &evidenceJSON, &classKey); err != nil {
+			return nil, fmt.Errorf("store: scan finding to refresh: %w", err)
+		}
+		var modules, evidence []string
+		if err := json.Unmarshal([]byte(modulesJSON), &modules); err != nil {
+			return nil, fmt.Errorf("store: unmarshal modules: %w", err)
+		}
+		if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+			return nil, fmt.Errorf("store: unmarshal evidence: %w", err)
+		}
+		matched := false
+		var nodes []int
+		for _, ev := range evidence {
+			for _, m := range modules {
+				if n, ok := present[model.CanonicalKey(m, ev)]; ok {
+					matched = true
+					nodes = model.MergeNodeIDs(nodes, n)
+				}
+			}
+		}
+		if matched {
+			hits = append(hits, refreshHit{id, classKey.String, nodes})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read findings to refresh: %w", err)
+	}
+	return hits, nil
 }
 
 // ListFindings is the customer read API's query: one system's findings whose

@@ -1121,13 +1121,18 @@ components:
           type: array
           items: { type: string }
         status: { type: string, enum: [open, stale] }
-        occurrence_count: { type: integer }
+        occurrence_count:
+          type: integer
+          description: >-
+            How many 15-minute windows the finding's log lines appeared in.
+            The server counts these itself from each window's lines; a
+            window counts once.
         first_seen: { type: integer, format: int64 }
         last_seen: { type: integer, format: int64 }
         reopened_at:
           type: ["integer", "null"]
           format: int64
-          description: Set when a finding that had gone stale (absent past STALE_AFTER) recurred.
+          description: Set when a finding that had gone stale (none of its lines seen for STALE_AFTER) saw its lines again.
         nodes:
           type: array
           items: { type: integer, minimum: 1 }

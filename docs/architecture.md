@@ -368,7 +368,11 @@ Two of the steps must not move:
 In order:
 
 1. **Claim the window** (`BeginAnalysis`) — a duplicate is a no-op.
-2. **Register the system** (`UpsertSystem`).
+2. **Register the system** (`UpsertSystem`), record the node roster
+   (`UpsertNodes`), and **refresh the system's findings from this window's
+   lines** (`RefreshFindings`) — see "Findings live as long as their lines"
+   below. Both are facts about the window, so they run on every path,
+   gated out, suppressed or paid.
 3. **Read prior state** — `KnownTemplates` — *before* writing anything. It
    is keyed by `model.CanonicalKey`, not by raw template text, and carries
    each template's `last_seen`, which the gate's silence rule reads.
@@ -381,7 +385,8 @@ In order:
    `analyses` ledger row) and return. No LLM call, no cost.
 7. Otherwise build one `prompt.Selection` from what the gate found,
    render the prompt (`prompt.Render`, including currently-open findings so the
-   model doesn't re-report them), take a slot from the budget's concurrency
+   model doesn't re-report them — step 2 has already kept open, or reopened,
+   every finding whose lines are in this window), take a slot from the budget's concurrency
    bound, and call the LLM.
    - A **transient** failure (`RecordAttemptError`) leaves the window
      claimable for retry.
@@ -402,6 +407,44 @@ In order:
    only path that writes templates after an LLM call, and it is what makes a
    failed call retry-safe: nothing looks "known" that wasn't actually
    processed.
+
+### Findings live as long as their lines
+
+A finding is **seen** whenever a window carries one of its evidence lines,
+and the server decides that, not the model. `RefreshFindings` matches every
+template in the bundle against every retained finding of the system on
+`model.CanonicalKey` — the key the gate's novelty and the prompt's ALREADY
+KNOWN lookup use, tried under each of the finding's modules because a stored
+evidence line does not say which one it came from — and for each match moves
+`last_seen`, counts the window once in `occurrence_count`, reopens a stale
+finding (`reopened_at`), replaces `nodes` with the nodes the matching lines
+came from (kept when the window carries none), and moves the class's
+`last_seen`. No LLM call is involved.
+
+Before it, only `UpsertFinding` moved `last_seen`, and only when the model
+re-reported the finding — which the prompt tells it never to do. So a problem
+that never stopped went stale after `STALE_AFTER`, left ALREADY KNOWN, and the
+next paid window raised it again under whatever subset of its lines the model
+cited that time. On the dev fleet that split one SIP auth-failure condition on
+one system into two classes: `{INVITE, REGISTER}` keyed on the bucket, then,
+two days later and after going stale, `{REGISTER}` alone keyed on the primary
+template. It also made "came back on" a lie for a customer whose problem had
+never gone away. Consequences to preserve:
+
+- **It runs before step 7**, so a finding it reopens is listed to the model as
+  already known in the same window instead of being raised afresh.
+- **A window counts once.** `occurrence_count` is the number of windows the
+  finding was seen in. `UpsertFinding` adds one only when the row's
+  `last_seen` is older than its `now`, so the model re-reporting a finding in
+  the window that refreshed it adds nothing; a window retried after a
+  transient LLM error runs later and may count twice, which is accepted.
+- **"Stale" now means the lines stopped**, for `STALE_AFTER`. A finding cited
+  from a line that appears in normal operation as well stays open as long as
+  that line keeps arriving: the model chose the line as the evidence.
+- **Every status is refreshed**, a dismissed class's findings included —
+  dismissal hides a finding, it does not stop its bookkeeping.
+- It touches findings only, never `system_templates`, so the two step-order
+  rules above are unaffected.
 
 ### Read: `GET /v1/findings` (public path `/logs/v1/findings`)
 
@@ -1022,7 +1065,7 @@ without a goroutine to leak.
 | `system_templates` | Every masked log-line template ever seen for a system — the gate's "is this new" memory. Keyed `(system_id, module_id, template_key)`, where `template_key` is `model.CanonicalTemplate` of the raw text and `module_id` is the module **family** (`model.ModuleFamily`) rather than the instance, so 82 `nethvoice*` instances emitting one cron line are one row. `template` keeps the raw text of the last variant seen, which is what the UI shows. `last_seen` never moves backwards (a late retry of an older window must not make a template look silent to the gate). Pruned past `TEMPLATE_RETENTION` by `maint.Runner`; see "Maintenance pass" for what that default still buys. |
 | `system_nodes` | The reporting cluster's node roster: `(system_id, node_id)` plus the `fqdn` that node reports for itself, and first/last-seen. A `system_id` is an NS8 *cluster*, so this is the dimension that lets a finding name a machine. It is the **only** table in this pipeline holding a customer-identifying string — see "Node attribution" below and "Data protection". Names live here and nowhere else: `findings` stores node ids and joins this table at read time. Pruned on the `TEMPLATE_RETENTION` cutoff by `maint.Runner`, which it shares rather than having a knob of its own. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window (`system_call_cap`, no reasons). Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
-| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
+| `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence (a model re-report or a `RefreshFindings` match) rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
 | `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every operator decision. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
 | `class_decisions` | Append-only audit trail of operator actions on classes: actor, action, detail, the class's `first_prompt_version`, time. Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
 | `class_texts` | Fleet-wide, one row per class key: the class's one customer-facing wording. `title`/`summary`/`suggested_action` are the **seed** — the first finding stored in the class, written with `ON CONFLICT DO NOTHING` and never changed; `title_override`/`summary_override`/`suggested_action_override` are the operator's, `NULL` for none. Its own table rather than columns on `finding_classes` because `CREATE TABLE IF NOT EXISTS` is the only schema mechanism, so a new column would never reach an existing database. Read by `ListFindings`, `ListAllFindings` and the review queue, never by `OpenFindings`. Orphan rows are deleted by `PruneClasses`. |

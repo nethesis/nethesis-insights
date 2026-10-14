@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -966,5 +967,65 @@ func TestFlexIsPricedAtHalfOnlyWhenTheProviderSaysSo(t *testing.T) {
 	}
 	if got := pricedCall(t, &llm.Stub{InputTokens: 1000, OutputTokens: 100, ServiceTier: "default"}); got != 150 {
 		t.Errorf("default: cost = %d micros, want 150", got)
+	}
+}
+
+// A problem that keeps going is never raised again. The model is told not to
+// re-report what it knows, so nothing it says keeps the finding alive; its
+// lines do. Without the refresh, the finding went stale after STALE_AFTER,
+// dropped out of ALREADY KNOWN and the next paid window raised it afresh --
+// under whatever subset of its lines the model cited, so on a new class.
+func TestContinuingProblemStaysKnownToTheModel(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	hour := int64(time.Hour / time.Millisecond)
+	clock := int64(1_000_000_000)
+	stub := &llm.Stub{Content: `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"Known problem","summary":"s","suggested_action":"a","evidence":["T1"]}]}`}
+	a := New(st, stub, testBudget(st), testConfig(), func() int64 { return clock })
+
+	problem := model.Template{Template: "auth failure for <USER>", Count: 3, ModuleID: "mod1", Priority: 3}
+	window := func(start int64, ts ...model.Template) model.Bundle {
+		return model.Bundle{
+			SchemaVersion: model.SchemaVersion, SystemID: "sys1", CollectorVersion: "1.0",
+			Window: model.Window{Start: start, End: start + 100}, Templates: ts,
+		}
+	}
+
+	if err := a.Process(ctx, window(100, problem)); err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+	// Two quiet days in which only the problem's own line arrives: each
+	// window is gated out, and no model is asked anything.
+	for i, h := range []int64{20, 40} {
+		clock += 20 * hour
+		if err := a.Process(ctx, window(int64(1000*(i+2)), problem)); err != nil {
+			t.Fatalf("quiet window at +%dh: %v", h, err)
+		}
+	}
+	if stub.Calls != 1 {
+		t.Fatalf("quiet windows called the model: %d calls", stub.Calls)
+	}
+
+	open, err := st.OpenFindings(ctx, "sys1")
+	if err != nil {
+		t.Fatalf("OpenFindings: %v", err)
+	}
+	if len(open) != 1 || open[0].OccurrenceCount != 3 {
+		t.Fatalf("want one open finding seen in 3 windows, got %+v", open)
+	}
+
+	// A new line makes the next window paid: the model must be told the
+	// problem is already known, with the identifier its line has now.
+	clock += 10 * hour
+	stub.Content = `{"window_assessment":"nominal","findings":[]}`
+	novel := model.Template{Template: "a new line", Count: 1, ModuleID: "mod1", Priority: 3}
+	if err := a.Process(ctx, window(5000, problem, novel)); err != nil {
+		t.Fatalf("paid window: %v", err)
+	}
+	prompt := stub.LastRequest.UserPrompt
+	known := prompt[strings.Index(prompt, "ALREADY KNOWN (do not report these again)"):]
+	if !strings.Contains(known, "Known problem") || !strings.Contains(known, "evidence: T") {
+		t.Fatalf("the continuing problem is missing from ALREADY KNOWN:\n%s", known)
 	}
 }

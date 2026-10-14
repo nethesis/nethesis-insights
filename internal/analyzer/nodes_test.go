@@ -74,7 +74,10 @@ func TestRecurrenceReplacesTheNodeSetRatherThanAccumulating(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	stub := &llm.Stub{Content: findingResponse}
-	a := New(s, stub, testBudget(s), testConfig(), func() int64 { return 1000 })
+	// The clock advances: a window counts once in occurrence_count, and two
+	// windows processed at the same instant would look like one.
+	clock := int64(1000)
+	a := New(s, stub, testBudget(s), testConfig(), func() int64 { clock += 1000; return clock })
 
 	roster := []model.NodeInfo{
 		{NodeID: 1, FQDN: "a.example.org"},

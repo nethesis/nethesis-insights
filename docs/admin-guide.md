@@ -394,7 +394,7 @@ depth. It never logs a credential: the model API key appears only as
 | `LLM_PRICE_CACHED_INPUT_PER_MTOK` | list price of the input the provider served from its prompt cache (default: half of `LLM_PRICE_INPUT_PER_MTOK`, which is `gpt-4o-mini`'s discount; `gpt-6-luna`'s cached price is a tenth of its input price) |
 | `PIPELINE_EXCLUDE_MODULES` | modules dropped from every bundle before analysis (default `crowdsec`, which has its own pipeline). Matches a module **family** or an exact instance id — configure the family, since NS8 numbers instances per cluster and `crowdsec1` excludes nothing on a node running `crowdsec3` |
 | `PIPELINE_EXCLUDE_SERVICES` | syslog identifiers dropped the same way, matched against the `[tag]` on each masked log line (default `insights,alert-proxy`). `insights` stops a co-located server from analysing its own logs; `alert-proxy` stops the fleet re-reporting alerts your monitoring stack has already raised and already sent you. The tag is matched on every line, not only host ones — which is how `alert-proxy` is excluded without excluding the `metrics` module it runs inside. Note `PIPELINE_EXCLUDE_MODULES=alert-proxy` would match nothing: it is not a module |
-| `STALE_AFTER` | how long without a recurrence before a finding is presumed resolved (default `24h`) |
+| `STALE_AFTER` | how long none of a finding's log lines may arrive before it is presumed resolved (default `24h`) |
 | `ADMIN_API_KEY` | password for the logs dashboard's review decisions — secret, the same value `threatd` reads. Unset means the review queue is read-only and its routes answer `405` |
 | `QUEUE_SIZE` | bundles buffered before ingest answers 503 (default `256`) |
 | `QUEUE_WORKERS` | concurrent analyses (default `2`) |
@@ -1244,6 +1244,16 @@ underlying problem shows up again next window, it's recognized as *the same
 finding* rather than reported as a new one — its occurrence count goes up
 instead.
 
+The server also keeps a finding alive by itself. Every 15-minute window, it
+checks whether any of the log lines a finding was raised from showed up again.
+If so, the finding is "seen" in that window: its last-seen time moves, its
+occurrence count goes up by one, and a stale finding reopens. No AI call is
+made for this. The AI is told not to report a problem it already knows about,
+so without this check a problem that never stopped would go stale after
+`STALE_AFTER`, be forgotten, and be reported again — sometimes as a second,
+separate finding. The occurrence count is therefore the number of 15-minute
+windows the problem's lines appeared in.
+
 Getting that right takes a little more than ignoring the AI's wording. The AI
 also picks *which* templates to cite as evidence, and it does not pick the same
 ones every time: one window it cites the brute-force attempts from four
@@ -1255,11 +1265,11 @@ AI cites no longer splits one problem into many.
 
 A finding is:
 
-- **open** — actively occurring, or has occurred recently;
-- **stale** — hasn't reoccurred in a while (see `STALE_AFTER`), so it's
+- **open** — its log lines are still arriving, or arrived recently;
+- **stale** — none of its log lines arrived for `STALE_AFTER`, so it's
   presumed resolved;
-- **reopened** — was stale, then happened again; a `reopened_at` timestamp
-  marks when.
+- **reopened** — was stale, then its lines came back; a `reopened_at`
+  timestamp marks when.
 
 This is why the same misconfigured service doesn't flood you with a new
 alert every 15 minutes forever — it's the *same* finding, just bumped.
