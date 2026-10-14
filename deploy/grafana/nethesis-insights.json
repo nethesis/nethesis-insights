@@ -1241,7 +1241,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "none",
           "min": 0,
           "decimals": 0,
           "color": {
@@ -1979,7 +1979,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "none",
           "min": 0,
           "decimals": 0,
           "color": {
@@ -2177,7 +2177,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "none",
           "min": 0,
           "decimals": 0,
           "color": {
