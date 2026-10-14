@@ -707,6 +707,18 @@ func (s *Store) RefreshFindings(ctx context.Context, systemID string, ts []model
 			`, now, h.classKey, now); err != nil {
 				return 0, fmt.Errorf("store: refresh finding class: %w", err)
 			}
+			// A class with no wording yet takes this finding's. Seeding
+			// only in UpsertFinding left such a class unworded for good
+			// once this refresh kept its findings known: the model is
+			// then never asked to re-report them. First writer wins, as
+			// there.
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO class_texts (class_key, title, summary, suggested_action, created_at)
+				SELECT class_key, title, summary, suggested_action, ? FROM findings WHERE id = ?
+				ON CONFLICT(class_key) DO NOTHING
+			`, now, h.id); err != nil {
+				return 0, fmt.Errorf("store: seed class text: %w", err)
+			}
 		}
 	}
 

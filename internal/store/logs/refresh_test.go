@@ -138,6 +138,40 @@ func TestRefreshCountsAWindowOnce(t *testing.T) {
 	}
 }
 
+// A class with no wording -- older than class_texts, or never re-reported
+// by the model because this refresh keeps it known -- takes the wording of
+// the finding the refresh touched. One that has a wording keeps it.
+func TestRefreshSeedsAMissingClassWording(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	refreshFinding(t, s, "sys1", nil)
+	mustDo(t, func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM class_texts WHERE class_key = 'v4:c1'`)
+		return err
+	}())
+	line := []model.Template{{ModuleID: "sshd1", Template: "failed password for <USER> from <IP> (DE/<NUM>)"}}
+
+	_, err := s.RefreshFindings(ctx, "sys1", line, 9000)
+	mustDo(t, err)
+	c, _, err := s.GetClass(ctx, "v4:c1")
+	mustDo(t, err)
+	if c.Text.Seed != (Wording{Title: "t", Summary: "s", SuggestedAction: "a"}) {
+		t.Fatalf("class wording = %+v, want the finding's", c.Text.Seed)
+	}
+
+	mustDo(t, func() error {
+		_, err := s.db.ExecContext(ctx, `UPDATE findings SET title = 'reworded'`)
+		return err
+	}())
+	_, err = s.RefreshFindings(ctx, "sys1", line, 10000)
+	mustDo(t, err)
+	c, _, err = s.GetClass(ctx, "v4:c1")
+	mustDo(t, err)
+	if c.Text.Seed.Title != "t" {
+		t.Fatalf("a refresh replaced an existing class wording with %q", c.Text.Seed.Title)
+	}
+}
+
 // Nodes become the nodes this window's matching lines came from, and are
 // kept when the window says nothing about nodes.
 func TestRefreshReplacesNodesFromTheWindow(t *testing.T) {
