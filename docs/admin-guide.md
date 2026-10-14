@@ -1263,6 +1263,14 @@ each stuck at an occurrence count of 1. The server now reduces the cited
 evidence to one stable key before fingerprinting it, so the wobble in what the
 AI cites no longer splits one problem into many.
 
+Across machines the server goes one step further. If one of the lines the AI
+cited is already the main line of an existing class (see the next section) —
+whatever its review state, dismissed included — the new finding joins that
+class instead of starting a new one. So the same problem cited slightly
+differently on two machines is still reviewed once. The flip side: which
+class a finding lands in can depend on which machine reported the problem
+first.
+
 A finding is:
 
 - **open** — its log lines are still arriving, or arrived recently;

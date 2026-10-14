@@ -103,6 +103,52 @@ func TestEvidenceKeyEmptyIsNil(t *testing.T) {
 	}
 }
 
+// EvidenceCandidates lists each distinct normalized cited line once, in
+// model.LessTemplate order whatever the citation order, and its first entry
+// is EvidenceKey.
+func TestEvidenceCandidates(t *testing.T) {
+	invite := tpl("nethvoice-proxy", 3, "a: invite auth failed")
+	register := tpl("nethvoice-proxy", 3, "b: register auth failed")
+	host := tpl("", 6, "sshd: failed password")
+	us := tpl("crowdsec", 3, "ssh-bf by ip <IP> (US/<NUM>)")
+	de := tpl("crowdsec", 3, "ssh-bf by ip <IP> (DE/<NUM>)")
+
+	for _, tc := range []struct {
+		name  string
+		cited []model.Template
+		want  []string
+	}{
+		{"empty", nil, nil},
+		{"one line", []model.Template{register}, []string{
+			"primary:nethvoice-proxy/3/b: register auth failed",
+		}},
+		{"sorted under LessTemplate", []model.Template{register, us, invite, host}, []string{
+			"primary:/6/sshd: failed password",
+			"primary:crowdsec/3/ssh-bf by ip <IP> (<CC>/<NUM>)",
+			"primary:nethvoice-proxy/3/a: invite auth failed",
+			"primary:nethvoice-proxy/3/b: register auth failed",
+		}},
+		{"normalized duplicates once", []model.Template{us, de, us}, []string{
+			"primary:crowdsec/3/ssh-bf by ip <IP> (<CC>/<NUM>)",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EvidenceCandidates(tc.cited)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d candidates %v, want %d %v", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if len(got[i]) != 1 || got[i][0] != tc.want[i] {
+					t.Errorf("candidate %d: got %v, want [%s]", i, got[i], tc.want[i])
+				}
+			}
+			if key := EvidenceKey(tc.cited); len(got) > 0 && key[0] != got[0][0] {
+				t.Errorf("EvidenceKey %v is not the first candidate %v", key, got[0])
+			}
+		})
+	}
+}
+
 // Normalize must not rewrite text it does not understand: a lowercase or
 // longer token is not a country code. Its full rule set, and the cases where
 // collapsing would be wrong, are covered in model.CanonicalTemplate's tests --

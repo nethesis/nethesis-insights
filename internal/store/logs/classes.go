@@ -424,6 +424,41 @@ func scanClass(row interface{ Scan(...any) error }, c *Class, extra ...any) erro
 	return nil
 }
 
+// ExistingClasses reports which of keys name a stored class, at any
+// visibility -- dismissed included. The analyzer asks it with the class
+// each of a finding's cited lines would key on, and joins the first that
+// exists (fingerprint.EvidenceCandidates). A key absent from the result does
+// not exist.
+func (s *Store) ExistingClasses(ctx context.Context, keys []string) (map[string]bool, error) {
+	found := make(map[string]bool, len(keys))
+	if len(keys) == 0 {
+		return found, nil
+	}
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = k
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT class_key FROM finding_classes WHERE class_key IN (`+in+`)`,
+		args...) // #nosec G202 -- only "?" placeholders are concatenated
+	if err != nil {
+		return nil, fmt.Errorf("store: existing classes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("store: scan existing class: %w", err)
+		}
+		found[k] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: existing classes: %w", err)
+	}
+	return found, nil
+}
+
 // GetClass reads one finding_classes row, with its wording.
 func (s *Store) GetClass(ctx context.Context, key string) (Class, bool, error) {
 	var c Class

@@ -658,3 +658,26 @@ func TestListClassesUnknownSortKeepsTheDefaultOrder(t *testing.T) {
 		}
 	}
 }
+
+// ExistingClasses names every stored class among the keys, whatever its
+// visibility -- a dismissed class attracts a finding citing its line as
+// much as a delivered one -- and nothing else.
+func TestExistingClassesSeesEveryVisibility(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedClassFinding(t, s, "sys1", "fp-a", "v7:pending", "low", "p", false, 1000)
+	seedClassFinding(t, s, "sys1", "fp-b", "v7:dismissed", "low", "d", false, 1000)
+	mustDo(t, s.SetClassVisibility(ctx, "v7:dismissed", VisibilityDismissed, "op", 2000))
+
+	got, err := s.ExistingClasses(ctx, []string{"v7:pending", "v7:dismissed", "v7:absent"})
+	mustDo(t, err)
+	if !got["v7:pending"] || !got["v7:dismissed"] || got["v7:absent"] || len(got) != 2 {
+		t.Fatalf("expected the pending and dismissed classes only, got %v", got)
+	}
+
+	empty, err := s.ExistingClasses(ctx, nil)
+	mustDo(t, err)
+	if len(empty) != 0 {
+		t.Fatalf("expected nothing for no keys, got %v", empty)
+	}
+}

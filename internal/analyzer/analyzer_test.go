@@ -6,12 +6,14 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/budget"
+	"github.com/nethesis/nethesis-insights/internal/fingerprint"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
 	"github.com/nethesis/nethesis-insights/internal/model"
@@ -1027,5 +1029,74 @@ func TestContinuingProblemStaysKnownToTheModel(t *testing.T) {
 	known := prompt[strings.Index(prompt, "ALREADY KNOWN (do not report these again)"):]
 	if !strings.Contains(known, "Known problem") || !strings.Contains(known, "evidence: T") {
 		t.Fatalf("the continuing problem is missing from ALREADY KNOWN:\n%s", known)
+	}
+}
+
+// citedClassKey runs one window of systemID carrying templates, the model
+// citing every one of them, and returns the class key of the one finding.
+func citedClassKey(t *testing.T, st *logsstore.Store, systemID string, templates ...model.Template) string {
+	t.Helper()
+	ctx := context.Background()
+	ids := make([]string, len(templates))
+	for i := range templates {
+		ids[i] = fmt.Sprintf("%q", fmt.Sprintf("T%d", i+1))
+	}
+	reply := `{"window_assessment":"incident","findings":[` +
+		`{"severity":"high","title":"SIP connections time out","summary":"s",` +
+		`"suggested_action":"a","modules":[],"evidence":[` + strings.Join(ids, ",") + `]}]}`
+	a := New(st, &llm.Stub{Content: reply, Model: "m"}, testBudget(st), testConfig(), func() int64 { return 1000 })
+	if err := a.Process(ctx, model.Bundle{
+		SchemaVersion:    model.SchemaVersion,
+		SystemID:         systemID,
+		CollectorVersion: "1.0",
+		Window:           model.Window{Start: 100, End: 200},
+		Templates:        templates,
+	}); err != nil {
+		t.Fatalf("%s: %v", systemID, err)
+	}
+	found, err := st.OpenFindings(ctx, systemID)
+	if err != nil {
+		t.Fatalf("OpenFindings(%s): %v", systemID, err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected one finding on %s, got %d: %+v", systemID, len(found), found)
+	}
+	return found[0].ClassKey
+}
+
+// The Kamailio case from the dev fleet: one system cites only
+// tcpconn_main_timeout(), another also handle_tcpconn_ev(), which sorts
+// first. The second finding joins the class the first created, because it
+// cites that class's primary line.
+func TestFindingJoinsAnExistingClassItCites(t *testing.T) {
+	st := newTestStore(t)
+	w := model.Template{Template: "<3> [kamailio] ERROR: handle_tcpconn_ev(): connect failed", Count: 3, ModuleID: "nethvoice-proxy", Priority: 3}
+	x := model.Template{Template: "<3> [kamailio] ERROR: tcpconn_main_timeout(): connect timeout", Count: 3, ModuleID: "nethvoice-proxy", Priority: 3}
+	if !model.LessTemplate(w, x) {
+		t.Fatal("fixture: W must sort before X, or this tests nothing")
+	}
+
+	first := citedClassKey(t, st, "sys1", x)
+	second := citedClassKey(t, st, "sys2", w, x)
+	if first != second {
+		t.Fatalf("a finding citing an existing class's primary line landed on another class:\n first=%s\nsecond=%s", first, second)
+	}
+	want := fingerprint.Class([]string{"nethvoice-proxy"}, fingerprint.EvidenceKey([]model.Template{x}), "")
+	if second != want {
+		t.Fatalf("expected the class keyed on X %s, got %s", want, second)
+	}
+}
+
+// With no class to join, a finding keys on its first line under
+// model.LessTemplate, exactly as fingerprint.EvidenceKey says.
+func TestFindingWithNoExistingClassKeysOnTheFirstLine(t *testing.T) {
+	st := newTestStore(t)
+	w := model.Template{Template: "<3> [kamailio] ERROR: handle_tcpconn_ev(): connect failed", Count: 3, ModuleID: "nethvoice-proxy", Priority: 3}
+	x := model.Template{Template: "<3> [kamailio] ERROR: tcpconn_main_timeout(): connect timeout", Count: 3, ModuleID: "nethvoice-proxy", Priority: 3}
+
+	got := citedClassKey(t, st, "sys2", w, x)
+	want := fingerprint.Class([]string{"nethvoice-proxy"}, fingerprint.EvidenceKey([]model.Template{w}), "")
+	if got != want {
+		t.Fatalf("expected the class keyed on W %s, got %s", want, got)
 	}
 }

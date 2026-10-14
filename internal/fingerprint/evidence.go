@@ -50,9 +50,39 @@ func Normalize(moduleID, template string) string {
 // holds a finding open, and so listed as ALREADY KNOWN, for as long as its
 // lines keep arriving.
 //
+// EvidenceKey is the first of EvidenceCandidates, the key a finding gets when
+// none of its lines is already the primary of a class. The analyzer prefers
+// an existing class's line over it; see EvidenceCandidates.
+//
 // The returned slice always has exactly one element, which is what Compute's
 // evidence list receives.
 func EvidenceKey(cited []model.Template) []string {
+	candidates := EvidenceCandidates(cited)
+	if len(candidates) == 0 {
+		return nil
+	}
+	return candidates[0]
+}
+
+// EvidenceCandidates returns the evidence key each distinct normalized cited
+// line would give the finding as its primary, in model.LessTemplate order and
+// deduplicated: candidate 0 is EvidenceKey. Each element has exactly one
+// string, ready for Compute and Class.
+//
+// It exists for a cross-system wobble that EvidenceKey alone cannot absorb:
+// the model on one system cites {X} and on another {W, X}, W sorting first,
+// and one condition lands on two classes. On the dev fleet, Kamailio
+// connection failures cited tcpconn_main_timeout() on some systems and also
+// handle_tcpconn_ev() (which sorts first) on others; a SIP auth failure was
+// cited as the REGISTER line alone on one system and INVITE+REGISTER on the
+// rest. The analyzer therefore keys a finding on the first candidate that is
+// already the primary of a stored class, else on candidate 0.
+//
+// That choice needs the store, so it is made by the analyzer and this stays
+// pure: it only lists the lines a finding could be keyed on. Every candidate
+// is a line the finding actually cites, so preferring one never invents
+// evidence -- it only picks which cited line names the condition.
+func EvidenceCandidates(cited []model.Template) [][]string {
 	if len(cited) == 0 {
 		return nil
 	}
@@ -67,7 +97,15 @@ func EvidenceKey(cited []model.Template) []string {
 		return model.LessTemplate(normalized[i], normalized[j])
 	})
 
-	primary := normalized[0]
-	return []string{fmt.Sprintf("primary:%s/%d/%s",
-		primary.ModuleID, primary.Priority, strings.TrimSpace(primary.Template))}
+	out := make([][]string, 0, len(normalized))
+	seen := make(map[string]bool, len(normalized))
+	for _, t := range normalized {
+		key := fmt.Sprintf("primary:%s/%d/%s", t.ModuleID, t.Priority, strings.TrimSpace(t.Template))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, []string{key})
+	}
+	return out
 }

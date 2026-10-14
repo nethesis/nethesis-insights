@@ -398,7 +398,9 @@ In order:
    the **same** `Selection` used to render) — this is the *only* path from
    model output to stored data, and it is what keeps model-authored prose out
    of the fingerprint.
-9. Compute the fingerprint (`fingerprint.Compute`) and the class
+9. Choose the evidence key — the first cited line that is already a class's
+   primary (`ExistingClasses`), else the first cited line — then compute the
+   fingerprint (`fingerprint.Compute`) and the class
    (`fingerprint.Class`, over the same derived fields) and `UpsertFinding` —
    insert, bump the occurrence count, or reopen a stale finding, and in the
    same transaction create or touch its `finding_classes` row. Each finding
@@ -1655,8 +1657,11 @@ between the two, see after the list):
    makes the second position a Call-ID, and the single token directly
    before ` port <N>]` inside one bracket the third. A Call-ID in any other
    position is not caught; the collector's masking is the place for it.
-2. The key is the canonical primary template: the first of the normalized
-   set under `model.LessTemplate`.
+2. The key is the canonical primary template: among the distinct normalized
+   lines in `model.LessTemplate` order (`fingerprint.EvidenceCandidates`),
+   the first that is **already the primary of a stored class**, else the
+   first of them (`fingerprint.EvidenceKey`). See "Joining a class the
+   finding cites" below.
 
 **Never key on the `(module_id, priority)` bucket.** `v2`–`v4` did, when the
 cited templates were several distinct ones sharing a bucket, on the theory
@@ -1673,7 +1678,37 @@ a continuing problem's lines — is now kept by `RefreshFindings` (see
 "Findings live as long as their lines"): a continuing problem stays open and
 listed as ALREADY KNOWN, so the model is not asked to cite it again. A first
 report that cites `{B, C}` where an earlier one cited `{A, B}` still lands on
-another class; that is the accepted cost, and far rarer than the merge was.
+another class — the class is keyed on `A`, which `{B, C}` does not cite;
+that is the accepted cost, and far rarer than the merge was.
+
+**Joining a class the finding cites.** `RefreshFindings` is per system, so
+it does nothing for the same wobble across systems: the model on one system
+cites `{X}`, on another `{W, X}` with `W` sorting first, and one condition
+used to land on two classes. On the dev fleet, Kamailio connection failures
+cited `tcpconn_main_timeout()` on some systems and also
+`handle_tcpconn_ev()`, which sorts first, on others; a SIP auth failure was
+cited as the `REGISTER` line alone on one system and `INVITE`+`REGISTER` on
+the rest. So the analyzer computes `fingerprint.Class` for each candidate
+from `EvidenceCandidates`, asks the store which exist
+(`ExistingClasses`, one `SELECT … WHERE class_key IN (…)`, skipped for a
+single candidate), and keys the finding on the first that does — else on the
+first candidate, which is `EvidenceKey`. The fingerprint and the class are
+computed over that one chosen key, so they cannot disagree. `fingerprint`
+stays pure: it lists the candidates, the analyzer makes the choice.
+
+This makes identity **depend on what was stored first**: the same citation
+keys on `X` when `X`'s class exists and on `W` when it does not. That is
+accepted because it only ever joins a class whose primary line the finding
+itself cites, under the same module set and category (both are hashed into
+the class key), and it never invents a line. A system's own finding is
+rarely re-keyed: `RefreshFindings` keeps it open and listed as ALREADY
+KNOWN while its lines keep arriving, so the model is not asked to cite it
+again, and its own class is itself a candidate whenever its line is cited.
+Any visibility attracts, **dismissed included**: a new finding citing a
+dismissed class's primary line joins that class and is hidden with it.
+This narrows the wobble without removing it: once both `W`'s and `X`'s
+classes exist (a system that cited `W` alone, say), `{W, X}` joins `W` and
+`{X}` joins `X`.
 
 `model.LessTemplate` is the single definition of template order, used by both
 `prompt.Select` (to number the identifiers the model cites) and
@@ -1687,8 +1722,9 @@ fleet-wide — that must be a deliberate versioned migration (bump the
 **The class is the fingerprint minus the system.**
 `fingerprint.Class(modules, evidence, category)` hashes the same fields the
 same way, with the same `Version`, but no `system_id`, and returns
-`Version + ":" + hex`. The analyzer computes `EvidenceKey` once per finding
-and passes it to both, so the two cannot drift. Module ids are already
+`Version + ":" + hex`. The analyzer chooses the evidence key once per
+finding (see "Joining a class the finding cites") and passes it to both, so
+the two cannot drift. Module ids are already
 families on that path, so "database connection timeout" on thirty NethVoice
 clusters is thirty findings and **one** class. A class inherits every
 property above: derived from cited templates only, never from model text,

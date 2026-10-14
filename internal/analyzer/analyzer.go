@@ -73,6 +73,7 @@ type Store interface {
 	UpsertFinding(ctx context.Context, f model.Finding, now int64) (logsstore.Outcome, error)
 	MarkStale(ctx context.Context, systemID string, olderThan int64) (int, error)
 	RefreshFindings(ctx context.Context, systemID string, ts []model.Template, now int64) (int, error)
+	ExistingClasses(ctx context.Context, keys []string) (map[string]bool, error)
 }
 
 type Config struct {
@@ -471,11 +472,14 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		// hash made the same condition a new finding every window. The full
 		// cited list is still stored on the row -- it is what the operator
 		// reads -- it just does not decide identity.
-		evidenceKey := fingerprint.EvidenceKey(cited)
-		fp := fingerprint.Compute(b.SystemID, modules, evidenceKey, category)
+		evidenceKey, class, err := a.chooseEvidenceKey(ctx, cited, modules, category)
+		if err != nil {
+			return fmt.Errorf("analyzer: choose evidence key: %w", err)
+		}
 		// The class is the same identity without the system: what an
-		// operator reviews, once, for every system that raises it.
-		class := fingerprint.Class(modules, evidenceKey, category)
+		// operator reviews, once, for every system that raises it. Both are
+		// computed over the one chosen key, so they cannot disagree.
+		fp := fingerprint.Compute(b.SystemID, modules, evidenceKey, category)
 
 		outcome, err := a.store.UpsertFinding(ctx, model.Finding{
 			SystemID:        b.SystemID,
@@ -523,6 +527,50 @@ func (a *Analyzer) Process(ctx context.Context, b model.Bundle) error {
 		model:        resp.Model,
 		durationMs:   int(time.Since(start).Milliseconds()),
 	})
+}
+
+// chooseEvidenceKey picks the line a finding is keyed on, and returns that
+// key with the class it gives: the first of the finding's cited lines, in
+// model.LessTemplate order, that is already the primary of a stored class
+// (any visibility, dismissed included), else the first line, which is
+// fingerprint.EvidenceKey.
+//
+// It absorbs a cross-system citation wobble: the model on one system cites
+// {X}, on another {W, X} with W sorting first, and the same condition used to
+// land on two classes -- on the dev fleet, Kamailio connection failures with
+// and without handle_tcpconn_ev(), and a SIP auth failure cited as REGISTER
+// alone on one system and INVITE+REGISTER on the others.
+//
+// This makes identity depend on what was stored first: the same citation
+// keys on X if X's class exists, on W if it does not. That is accepted
+// because it only ever joins a class whose primary line the finding itself
+// cites, under the same modules and category, and never invents a line. A
+// system's own earlier finding keeps its class too: that class exists, and
+// RefreshFindings holds the finding open and listed as ALREADY KNOWN while
+// its lines keep arriving, so the model is not asked to cite it again.
+func (a *Analyzer) chooseEvidenceKey(ctx context.Context, cited []model.Template,
+	modules []string, category string) ([]string, string, error) {
+	candidates := fingerprint.EvidenceCandidates(cited)
+	if len(candidates) == 0 {
+		return nil, fingerprint.Class(modules, nil, category), nil
+	}
+	classes := make([]string, len(candidates))
+	for i, c := range candidates {
+		classes[i] = fingerprint.Class(modules, c, category)
+	}
+	if len(candidates) == 1 {
+		return candidates[0], classes[0], nil
+	}
+	existing, err := a.store.ExistingClasses(ctx, classes)
+	if err != nil {
+		return nil, "", err
+	}
+	for i, c := range candidates {
+		if existing[classes[i]] {
+			return c, classes[i], nil
+		}
+	}
+	return candidates[0], classes[0], nil
 }
 
 // costUSD is what one successful call cost. A provider that reports what it

@@ -551,6 +551,13 @@ length-prefixed fields, sorted/deduped lists, `fingerprint.Version` prefix
   `nethvoice-proxy` problems on the dev fleet, one review decision and one
   customer title. `v5` dropped it; a continuing problem's citation wobble is
   now absorbed by `RefreshFindings` keeping it open and ALREADY KNOWN.
+- The analyzer keys a finding on the first cited line (`LessTemplate` order,
+  `fingerprint.EvidenceCandidates`) that is **already a class's primary** —
+  any visibility, dismissed included — else on `EvidenceKey`, so `{W, X}`
+  joins the class `{X}` created on another system. Identity therefore depends
+  on what was stored first; accepted because it only joins a class whose line
+  the finding cites. `fingerprint` stays pure; the store lookup is
+  `ExistingClasses`.
 - `model.LessTemplate` is the **single** definition of template order, shared by
   `prompt.SortedTemplates` and `EvidenceKey`. Two orderings that must agree will
   eventually disagree, and then a finding's identity stops matching the evidence
