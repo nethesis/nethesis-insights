@@ -325,6 +325,13 @@ func TestCanonicalTemplateCollapsesCallIDTail(t *testing.T) {
 		{"id placeholder then letters", "<ID>-abcdefgh"},
 		{"wholly literal", "a84b4c76e66710"},
 		{"literal at host", "zrtxbvn@<IP>"},
+		// The shapes the collector already masked, each its own template
+		// and, on the dev fleet, its own class on each system (v5).
+		{"masked id at host", "<ID>@<IP>"},
+		{"masked hex pair at host", "<HEX>-<HEX>@<IP>"},
+		{"masked uuid", "<UUID>"},
+		{"masked number", "<NUM>"},
+		{"redacted blob", "<redacted-blob>"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,29 +347,56 @@ func TestCanonicalTemplateCollapsesCallIDTail(t *testing.T) {
 	}
 }
 
-// The call-id rule is keyed on the callid= field, never on the shape of a
-// token after a hyphen. Masked ids with a stable suffix, hyphenated words and
-// a Call-ID the collector already masked must come through unchanged.
+// The Call-ID before "<METHOD>-<CSeq>" is rewritten with no callid= field
+// in the line, and a CSeq the collector masked as <HEX> folds to <NUM>.
+func TestCanonicalTemplateCollapsesTheRequestCallID(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{
+			`<3> [kamailio] ERROR: fevigort37u6sbhqkm2p9396@<IP> INVITE-<NUM> Malformed SIP request`,
+			`<3> [kamailio] ERROR: <ID> INVITE-<NUM> Malformed SIP request`,
+		},
+		{
+			`<3> [kamailio] WARNING: <script>: [DEV] - <UUID> OPTIONS-<NUM> - in RELAY route`,
+			`<3> [kamailio] WARNING: <script>: [DEV] - <ID> OPTIONS-<NUM> - in RELAY route`,
+		},
+		{
+			`<3> [kamailio] WARNING: <script>: [SECURITY-AUTHFAIL] <redacted-blob> REGISTER-<HEX> - event=auth_failure`,
+			`<3> [kamailio] WARNING: <script>: [SECURITY-AUTHFAIL] <ID> REGISTER-<NUM> - event=auth_failure`,
+		},
+		{
+			`<3> [kamailio] WARNING: <script>: (route[DISPATCHER_FAILURE]) <ID> REGISTER-<NUM> - DISPATCHER_FAILURE`,
+			`<3> [kamailio] WARNING: <script>: (route[DISPATCHER_FAILURE]) <ID> REGISTER-<NUM> - DISPATCHER_FAILURE`,
+		},
+	} {
+		got := CanonicalTemplate("nethvoice-proxy4", tc.in)
+		if got != tc.want {
+			t.Errorf("request call-id:\n  in=%q\n got=%q\nwant=%q", tc.in, got, tc.want)
+		}
+		if again := CanonicalTemplate("nethvoice-proxy4", got); again != got {
+			t.Errorf("not idempotent:\n once=%q\ntwice=%q", got, again)
+		}
+	}
+}
+
+// Both call-id rules are keyed on position, never on the shape of a token
+// after a hyphen: masked ids with a stable suffix, hyphenated words and a
+// method name that is not followed by a CSeq are left alone, and so is the
+// rest of a line around a callid= field.
 func TestCanonicalTemplateCallIDRuleIsNarrow(t *testing.T) {
 	for _, in := range []string{
-		// The correctly masked REGISTER form keeps the key it always had.
-		`<3> [kamailio] <NUM>(<PID>) WARNING: <script>: [SECURITY-AUTHFAIL] <ID>@<IP> REGISTER-<NUM> - event=auth_failure method=REGISTER status=<NUM> src_ip=<IP> user=<USER> callid=<ID>@<IP>`,
-		// No callid= field: a stable suffix on a masked id is not touched,
-		// and neither is the same leak without the field that names it.
 		`<6> [podman] container <HEX>-infra died`,
-		`<3> [kamailio] [SECURITY-AUTHFAIL] <HEX>-dseadsfjqujt INVITE-<NUM> - event=auth_failure`,
 		`<6> [webapp] cache-control set to no-store`,
+		`<3> [kamailio] ERROR: rejected INVITE from <IP>`,
+		`<3> [kamailio] ERROR: CANCEL-ALL requested by <USER>`,
 	} {
 		if got := CanonicalTemplate("", in); got != in {
-			t.Errorf("rewritten without a leaking callid=:\n in=%q\ngot=%q", in, got)
+			t.Errorf("rewritten with no Call-ID in it:\n in=%q\ngot=%q", in, got)
 		}
 	}
 
-	// Only whole-token occurrences of the value are rewritten: a word that
-	// merely contains it is left alone.
-	in := `<3> [kamailio] callid=abc failed for abcd and xabc, retry abc`
-	want := `<3> [kamailio] callid=<ID> failed for abcd and xabc, retry <ID>`
+	in := `<3> [kamailio] callid=abc failed for abcd, status=<NUM> retry abc`
+	want := `<3> [kamailio] callid=<ID> failed for abcd, status=<NUM> retry abc`
 	if got := CanonicalTemplate("", in); got != want {
-		t.Errorf("token boundaries:\n got=%q\nwant=%q", got, want)
+		t.Errorf("callid= rewrote more than its value:\n got=%q\nwant=%q", got, want)
 	}
 }

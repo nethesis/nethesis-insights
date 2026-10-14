@@ -231,8 +231,8 @@ func TestOwnInstanceInTextIsNotNovel(t *testing.T) {
 }
 
 const (
-	sipKnown = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: fevigort37u6sbhqkm2p9396@<IP> INVITE-<NUM> Malformed SIP request from <IP>:<PORT>`
-	sipNew   = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: 16emkwe6stxzzm2az0fu6n7l@<IP> INVITE-<NUM> Malformed SIP request from <IP>:<PORT>`
+	sipKnown = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: fevigort37u6sbhqkm2p9396@<IP> dropped: Malformed SIP request from <IP>:<PORT>`
+	sipNew   = `<3> [kamailio] <NUM>(<PID>) ERROR: <script>: 16emkwe6stxzzm2az0fu6n7l@<IP> dropped: Malformed SIP request from <IP>:<PORT>`
 )
 
 // The case the similarity check exists for: a SIP call-id the masking leaves

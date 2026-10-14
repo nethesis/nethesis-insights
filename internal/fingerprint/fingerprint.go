@@ -11,7 +11,7 @@ import (
 	"sort"
 )
 
-const Version = "v5"
+const Version = "v6"
 
 // Identity hashes a single derived key, never the set of templates the model
 // chose to cite. Hashing the cited set made identity depend on the model's

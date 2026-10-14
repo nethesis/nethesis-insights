@@ -1631,16 +1631,24 @@ between the two, see after the list):
    — a new template on every call. Being a security line, it is never matched
    as near-known, and the tail is letters only, so it would read as a plain
    word anyway: each one fired `security_new` and could land on a fresh
-   class. The rule is keyed on the `callid=` field (`(?i)\bcall-?id=`), never
-   on the value's shape: a value still holding a letter or digit outside the
-   edge's placeholders becomes `<ID>`, and so does every other whole-token
-   occurrence of that same value in the line (Kamailio logs it twice, as the
-   `$ci` prefix and in the field). A "word after `<HEX>-`" shape rule was
-   rejected because it also takes stable suffixes such as `<HEX>-infra`. A
-   value that is already only placeholders (`<ID>@<IP>`, the REGISTER form) is
-   left as it is, so correctly masked lines keep their key; a leaked Call-ID
-   in a line **without** a `callid=` field is not caught. The real fix is in
-   the collector's masking.
+   class.
+
+   `v6` rewrites **every** Call-ID, the collector's own placeholders
+   included, by position: the value of a `callid=` field
+   (`(?i)\bcall-?id=`), and the token Kamailio's script logs before
+   `<METHOD>-<CSeq>` (`$ci $rm-$cs`, for the SIP request methods only), whose
+   CSeq becomes `<NUM>` because the collector masks a large one as `<HEX>`.
+   `v4`–`v5` rewrote only a value still holding literal text, to keep
+   correctly masked lines on their key — and that key was the problem: each
+   user agent mints Call-IDs in its own shape, the collector masks each shape
+   to a different placeholder (`<ID>@<IP>`, `<HEX>-<HEX>@<IP>`, `<UUID>`,
+   `<NUM>`, `<redacted-blob>`), so one SIP auth failure arrived as up to
+   seven templates and the same condition on four systems landed on four
+   classes. Both rules are keyed on position, never on a value's shape: a
+   "word after `<HEX>-`" rule would also take stable suffixes such as
+   `<HEX>-infra`, and the method list is what makes the second position a
+   Call-ID. A Call-ID in any other position is not caught; the collector's
+   masking is the place for it.
 2. The key is the canonical primary template: the first of the normalized
    set under `model.LessTemplate`.
 
