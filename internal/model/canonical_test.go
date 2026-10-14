@@ -378,6 +378,59 @@ func TestCanonicalTemplateCollapsesTheRequestCallID(t *testing.T) {
 	}
 }
 
+// rtpengine logs the Call-ID inside "[<call-id> port <N>]", and the
+// collector masks each user agent's shape to a different placeholder: one
+// SRTP condition was three templates and, on the dev fleet, three classes
+// on three systems. Every shape collapses to one key; the "[<HEX>.<NUM>]"
+// before it is left alone.
+func TestCanonicalTemplateCollapsesTheRTPEngineCallID(t *testing.T) {
+	const srtp = `<3> [rtpengine] [<HEX>.<NUM>] ERR: [%s port %s]: [core] SRTP output wanted, but no crypto suite was negotiated`
+	const want = `<3> [rtpengine] [<HEX>.<NUM>] ERR: [<ID> port <NUM>]: [core] SRTP output wanted, but no crypto suite was negotiated`
+
+	for _, tc := range []struct{ name, id, port string }{
+		{"hex pair at host", "<HEX>-<HEX>@<IP>", "<NUM>"},
+		{"id at host", "<ID>@<IP>", "<NUM>"},
+		{"uuid", "<UUID>", "<NUM>"},
+		{"literal id and port", "a84b4c76e66710@192.0.2.10", "30000"},
+		{"masked port", "<UUID>", "<PORT>"},
+		{"already canonical", "<ID>", "<NUM>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CanonicalTemplate("nethvoice-proxy4", fmt.Sprintf(srtp, tc.id, tc.port))
+			if got != want {
+				t.Errorf("rtpengine call-id not collapsed:\n got=%q\nwant=%q", got, want)
+			}
+			if again := CanonicalTemplate("nethvoice-proxy4", got); again != got {
+				t.Errorf("not idempotent:\n once=%q\ntwice=%q", got, again)
+			}
+		})
+	}
+
+	srtcp := `<3> [rtpengine] [<HEX>.<NUM>] WARNING: [<HEX>-<HEX>@<IP> port <NUM>]: [rtcp] Discarded invalid SRTCP packet: authentication failed`
+	wantSRTCP := `<3> [rtpengine] [<HEX>.<NUM>] WARNING: [<ID> port <NUM>]: [rtcp] Discarded invalid SRTCP packet: authentication failed`
+	if got := CanonicalTemplate("nethvoice-proxy4", srtcp); got != wantSRTCP {
+		t.Errorf("srtcp:\n got=%q\nwant=%q", got, wantSRTCP)
+	}
+}
+
+// The rtpengine rule is keyed on the bracket shape: a bracket without
+// " port <N>" at its end, or with more than one token before it, is left
+// alone.
+func TestCanonicalTemplateRTPEngineRuleIsNarrow(t *testing.T) {
+	for _, in := range []string{
+		`<3> [rtpengine] [<HEX>.<NUM>] ERR: [core] SRTP output wanted`,
+		`<3> [rtpengine] [<HEX>.<NUM>] ERR: [<UUID>]: [core] SRTP output wanted`,
+		`<3> [rtpengine] ERR: [<UUID> port]: [core] SRTP output wanted`,
+		`<3> [rtpengine] ERR: [<UUID> port <NUM> extra]: [core] SRTP output wanted`,
+		`<3> [rtpengine] ERR: [listening on port <NUM>]: [core] bind failed`,
+		`<3> [sshd] Connection from <IP> port <NUM> closed`,
+	} {
+		if got := CanonicalTemplate("", in); got != in {
+			t.Errorf("rewritten with no rtpengine Call-ID in it:\n in=%q\ngot=%q", in, got)
+		}
+	}
+}
+
 // Both call-id rules are keyed on position, never on the shape of a token
 // after a hyphen: masked ids with a stable suffix, hyphenated words and a
 // method name that is not followed by a CSeq are left alone, and so is the

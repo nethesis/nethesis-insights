@@ -1644,11 +1644,17 @@ between the two, see after the list):
    to a different placeholder (`<ID>@<IP>`, `<HEX>-<HEX>@<IP>`, `<UUID>`,
    `<NUM>`, `<redacted-blob>`), so one SIP auth failure arrived as up to
    seven templates and the same condition on four systems landed on four
-   classes. Both rules are keyed on position, never on a value's shape: a
-   "word after `<HEX>-`" rule would also take stable suffixes such as
-   `<HEX>-infra`, and the method list is what makes the second position a
-   Call-ID. A Call-ID in any other position is not caught; the collector's
-   masking is the place for it.
+   classes. `v7` adds a third position, rtpengine's `[<call-id> port <N>]`
+   prefix (`\[[^\s\[\]]+ port (?:<NUM>|<PORT>|\d+)\]` →
+   `[<ID> port <NUM>]`): its SRTP and SRTCP errors arrived as
+   `[<HEX>-<HEX>@<IP> port <NUM>]`, `[<ID>@<IP> port <NUM>]` and
+   `[<UUID> port <NUM>]`, one template per user agent, and one condition
+   landed on three classes on three systems. Every rule is keyed on
+   position, never on a value's shape: a "word after `<HEX>-`" rule would
+   also take stable suffixes such as `<HEX>-infra`, the method list is what
+   makes the second position a Call-ID, and the single token directly
+   before ` port <N>]` inside one bracket the third. A Call-ID in any other
+   position is not caught; the collector's masking is the place for it.
 2. The key is the canonical primary template: the first of the normalized
    set under `model.LessTemplate`.
 

@@ -114,6 +114,13 @@ var (
 	// then the SIP method and the CSeq number joined by a hyphen. The token
 	// before a SIP method so joined is that Call-ID. See replaceCallIDs.
 	sipRequest = regexp.MustCompile(`(^|\s)\S+ (INVITE|REGISTER|OPTIONS|NOTIFY|SUBSCRIBE|PUBLISH|MESSAGE|REFER|INFO|UPDATE|PRACK|CANCEL|BYE|ACK)-(?:<NUM>|<HEX>|\d+)`)
+
+	// rtpengine prefixes every line about a call with "[<call-id> port <N>]":
+	// the Call-ID and the media port, inside one bracket. The bracket shape,
+	// a single token then " port " and a number, is what makes the token a
+	// Call-ID. The "[<HEX>.<NUM>]" before it on the same lines has no
+	// " port " and is left alone. See replaceCallIDs.
+	rtpCallID = regexp.MustCompile(`\[[^\s\[\]]+ port (?:<NUM>|<PORT>|\d+)\]`)
 )
 
 // sourceFileSuffix lists the trailing labels that make a dotted token a file
@@ -178,8 +185,9 @@ func splitPriority(template string) (prefix, rest string) {
 }
 
 // replaceCallIDs rewrites every SIP Call-ID in the line to <ID>, wherever it
-// stands: the value of a callid= field, and the token Kamailio's script logs
-// before "<METHOD>-<CSeq>" ($ci $rm-$cs), whose CSeq becomes <NUM>.
+// stands: the value of a callid= field, the token Kamailio's script logs
+// before "<METHOD>-<CSeq>" ($ci $rm-$cs), whose CSeq becomes <NUM>, and the
+// token rtpengine logs in "[<call-id> port <N>]", whose port becomes <NUM>.
 //
 // Every value is rewritten, the collector's own placeholders included. Each
 // user agent mints Call-IDs in its own shape and the collector masks each
@@ -190,14 +198,21 @@ func splitPriority(template string) (prefix, rest string) {
 // to keep correctly masked lines on their key; that key was the problem.
 // The CSeq is folded because the collector masks a large one as <HEX>.
 //
-// Both rules are keyed on position, never on a value's shape: a "word after
+// The rtpengine position was the third (v7): its SRTP and SRTCP errors
+// arrived as one template per user agent -- [<HEX>-<HEX>@<IP> port <NUM>],
+// [<ID>@<IP> port <NUM>], [<UUID> port <NUM>] -- and one condition landed on
+// three classes on three systems.
+//
+// Every rule is keyed on position, never on a value's shape: a "word after
 // <HEX>-" rule would also take <HEX>-infra and every other stable suffix,
 // and a letters-only token is what the plain words this file refuses to
 // touch look like. The SIP method list is what makes the second position a
-// Call-ID. The output, <ID> and <NUM>, is a fixed point of both.
+// Call-ID, and the " port <N>]" bracket the third. The output, <ID> and
+// <NUM>, is a fixed point of all three.
 func replaceCallIDs(s string) string {
 	s = callIDField.ReplaceAllString(s, "${1}<ID>")
-	return sipRequest.ReplaceAllString(s, "${1}<ID> ${2}-<NUM>")
+	s = sipRequest.ReplaceAllString(s, "${1}<ID> ${2}-<NUM>")
+	return rtpCallID.ReplaceAllString(s, "[<ID> port <NUM>]")
 }
 
 // replaceOwnInstance rewrites the emitting module's own instance id to its
