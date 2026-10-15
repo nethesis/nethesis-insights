@@ -165,11 +165,16 @@ type reviewPageData struct {
 	// PendingKeys are the pending rows shown, which the group forms post as
 	// the classes to decide: the operator decides what the page displayed.
 	PendingKeys []string
-	Sort        string
-	Dir         string
-	Headers     []reviewHeader
-	CanWrite    bool
-	Severities  []string
+	// Next[i] is the key of the row after Rows[i] ("" for the last), which
+	// the class form posts so "Save and next" can open it. Open is the class
+	// whose dialog renders already open: there is no script to open one.
+	Next       []string
+	Open       string
+	Sort       string
+	Dir        string
+	Headers    []reviewHeader
+	CanWrite   bool
+	Severities []string
 	// The class form's wording boxes carry the same caps the handler
 	// enforces, so a browser stops the operator before the server refuses.
 	MaxWordingTitle int
@@ -202,10 +207,18 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pending []string
-	for _, c := range rows {
+	next := make([]string, len(rows))
+	for i, c := range rows {
 		if c.Visibility == logsstore.VisibilityPending {
 			pending = append(pending, c.Key)
 		}
+		if i+1 < len(rows) {
+			next[i] = rows[i+1].Key
+		}
+	}
+	open := strings.TrimSpace(q.Get("open"))
+	if len(open) > maxClassKeyLen {
+		open = ""
 	}
 	s.chrome.Render(w, "review.html", reviewPageData{
 		PageData:     s.chrome.PageData(r, "review"),
@@ -217,6 +230,8 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 		GroupActions: groupActions,
 		Choices:      classChoices,
 		PendingKeys:  pending,
+		Next:         next,
+		Open:         open,
 		Sort:         sort,
 		Dir:          dir,
 		Headers:      s.reviewHeaders(view.Key, key, group, sort, dir),
@@ -464,7 +479,8 @@ func cleanDocRef(raw string) (string, bool) {
 
 // reviewReturn is where a decision redirects: back to the queue view, filter
 // and sort order the form was submitted from, re-validated rather than
-// echoed.
+// echoed. "Save and next" adds ?open= for the row that followed, so the
+// queue comes back with that class's dialog already open.
 func (s *server) reviewReturn(r *http.Request) string {
 	q := url.Values{}
 	if v := r.PostFormValue("view"); v != "" {
@@ -479,6 +495,11 @@ func (s *server) reviewReturn(r *http.Request) string {
 	if sort, dir := sanitizeClassSort(r.PostFormValue("sort"), r.PostFormValue("dir")); sort != "" {
 		q.Set("sort", sort)
 		q.Set("dir", dir)
+	}
+	if r.PostFormValue("then") == "next" {
+		if n, ok := formKey(r, "next"); ok {
+			q.Set("open", n)
+		}
 	}
 	target := s.chrome.Link("/review")
 	if len(q) > 0 {

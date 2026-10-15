@@ -1313,8 +1313,12 @@ A decision applies to the whole class: every finding in it, on every machine,
 now and whenever it recurs — including machines that report it for the first
 time next month, which get it delivered with no new review. It never applies
 to just the one finding you happened to be looking at. Click a class's title
-to open it: one form holds every decision below, filled in with what the
-class has now. Change what you need and press **Save** once; only what you
+to open it. The top shows the class's state, modules, counts and evidence;
+"What the AI wrote" and "Details" open on a click. One form below holds every
+decision, filled in with what the class has now. Change what you need and
+press **Save and next** to save and go straight to the next class in the
+list (with the same view, filter and order), or **Save and close** to save
+and go back to the list; **Close** leaves without saving. Only what you
 changed is recorded on `/review/audit`, one line per setting. The
 visibility choices are:
 

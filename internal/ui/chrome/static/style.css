@@ -206,3 +206,66 @@ label.suggested {
   font-weight: 600;
   color: var(--pico-primary);
 }
+
+/* The class review dialog is read once per class, many classes in a row, so
+   it is denser than Pico's form defaults: the whole class and its form fit
+   about one screen. Scoped to the article so other dialogs keep Pico's size. */
+dialog > article.class-review {
+  --pico-spacing: 0.75rem;
+  --pico-form-element-spacing-vertical: 0.375rem;
+  --pico-form-element-spacing-horizontal: 0.625rem;
+  font-size: 0.875rem;
+}
+.class-review :is(input, select, textarea, button) {
+  font-size: inherit;
+}
+.class-review header p {
+  margin-bottom: 0;
+}
+.class-review .class-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  margin-top: 0.25rem;
+}
+.class-review .evidence {
+  margin-bottom: var(--pico-spacing);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-code-background-color);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.class-review details {
+  margin-bottom: 0.25rem;
+}
+.class-review details dl {
+  margin-top: 0.5rem;
+}
+.class-review details:last-of-type {
+  margin-bottom: var(--pico-spacing);
+}
+.class-review fieldset.inline label {
+  display: inline-block;
+  margin-right: 1.25rem;
+}
+/* Pico blocks any <small> right after an input (a field's help text), which
+   broke "(suggested)" onto its own line beside its radio. */
+.class-review fieldset.inline label small {
+  display: inline;
+  margin: 0;
+}
+.class-review label:has([role="switch"]) {
+  margin-bottom: var(--pico-spacing);
+}
+.class-review .dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.class-review .dialog-actions button {
+  width: auto;
+  margin: 0;
+}

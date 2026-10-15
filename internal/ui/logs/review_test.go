@@ -731,13 +731,11 @@ func TestReviewFormCarriesTheClassWording(t *testing.T) {
 	body := get(t, newWriteTestServer(t, r, &fakeWriter{}), "/review?view=all").Body.String()
 	for _, want := range []string{
 		`<span>Customer title</span></button>`,
-		`Title the customer sees <small>(edited)</small>`,
-		`<dt>Summary the customer sees</dt><dd class="prose">AI summary</dd>`,
+		"Title <small>(edited)</small>\n" + `<input type="text" name="title" value="Customer title" maxlength="500">`,
 		`<dt>Latest AI summary</dt><dd class="prose">latest AI summary</dd>`,
-		`<input type="text" name="title" value="Customer title" maxlength="500">`,
-		`<textarea name="summary" rows="4" maxlength="5000">AI summary</textarea>`,
-		`<textarea name="suggested_action" rows="3" maxlength="5000">AI action</textarea>`,
-		`A blank box restores the`,
+		`<textarea name="summary" rows="2" maxlength="5000">AI summary</textarea>`,
+		`<textarea name="suggested_action" rows="2" maxlength="5000">AI action</textarea>`,
+		`a blank box restores the`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review page lacks %s", want)
@@ -747,8 +745,22 @@ func TestReviewFormCarriesTheClassWording(t *testing.T) {
 	if strings.Contains(body, "Latest AI suggested action") {
 		t.Error("an unchanged suggested action was shown twice")
 	}
-	if strings.Contains(body, "Summary the customer sees <small>(edited)</small>") {
+	if strings.Contains(body, "Summary <small>(edited)</small>") {
 		t.Error("an unedited field was marked edited")
+	}
+	// The form's boxes are the customer wording; a read-only copy above
+	// them only doubled the dialog's length.
+	if strings.Contains(body, "Summary the customer sees") {
+		t.Error("the writable dialog repeats the wording read-only")
+	}
+	ro := get(t, newTestServer(t, r, nil), "/review?view=all").Body.String()
+	for _, want := range []string{
+		`Title the customer sees <small>(edited)</small>`,
+		`<dt>Summary the customer sees</dt><dd class="prose">AI summary</dd>`,
+	} {
+		if !strings.Contains(ro, want) {
+			t.Errorf("read-only dialog lacks %s", want)
+		}
 	}
 }
 
@@ -763,5 +775,57 @@ func TestReviewAcceptsWordingAtTheLimit(t *testing.T) {
 	}
 	if len(w.calls) != 1 {
 		t.Fatalf("store calls %v", w.calls)
+	}
+}
+
+// Each class form posts the row after it, and "Save and next" sends the
+// queue back with that class's dialog already open -- no script can open
+// one after a reload. The last row has no next, so it offers only Save and
+// close.
+func TestReviewSaveAndNextOpensTheFollowingClass(t *testing.T) {
+	r := seededReader()
+	r.classes = []logsstore.ClassRow{
+		{Class: logsstore.Class{Key: "v3:a", Visibility: logsstore.VisibilityPending}},
+		{Class: logsstore.Class{Key: "v3:b", Visibility: logsstore.VisibilityPending}},
+	}
+	w := &fakeWriter{}
+	h := newWriteTestServer(t, r, w)
+	body := get(t, h, "/review").Body.String()
+	if n := strings.Count(body, `name="next"`); n != 1 {
+		t.Fatalf("%d next fields, want 1 (every row but the last)", n)
+	}
+	if !strings.Contains(body, `name="next" value="v3:b"`) {
+		t.Error("the first row's form does not name the second")
+	}
+	if n := strings.Count(body, `value="next">Save and next</button>`); n != 1 {
+		t.Errorf("%d Save and next buttons, want 1", n)
+	}
+	if n := strings.Count(body, `>Save and close</button>`); n != 2 {
+		t.Errorf("%d Save and close buttons, want 2", n)
+	}
+	if strings.Contains(body, `closedby="any" open>`) || strings.Contains(body, "autofocus") {
+		t.Error("a dialog renders open without ?open=")
+	}
+
+	form := url.Values{"key": {"v3:a"}, "next": {"v3:b"}, "then": {"next"}, "visibility": {"customer"}, "view": {"pending"}}
+	rec := do(h, writeReq("/review/decide", form))
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || loc != "/review?open=v3%3Ab&view=pending" {
+		t.Fatalf("save and next: got %d %q", rec.Code, loc)
+	}
+	form.Set("then", "close")
+	rec = do(h, writeReq("/review/decide", form))
+	if loc := rec.Header().Get("Location"); loc != "/review?view=pending" {
+		t.Fatalf("save and close: got %q", loc)
+	}
+	if len(w.calls) != 2 {
+		t.Fatalf("store calls %v, want both saves", w.calls)
+	}
+
+	body = get(t, h, "/review?open=v3:b").Body.String()
+	if n := strings.Count(body, `closedby="any" open>`); n != 1 || !strings.Contains(body, `<dialog id="class-v3:b" closedby="any" open>`) {
+		t.Errorf("?open=v3:b rendered %d open dialogs, want only v3:b's", n)
+	}
+	if n := strings.Count(body, "autofocus"); n != 1 {
+		t.Errorf("%d autofocus attributes, want 1 (the open dialog's checked choice)", n)
 	}
 }
