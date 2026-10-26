@@ -6,7 +6,7 @@
 #   set -a; . /etc/insights/deploy.env; set +a
 #   envsubst '$INSIGHTS_HOST $ACME_EMAIL $METRICS_SCRAPER' < traefik.yaml.tmpl > /etc/traefik/traefik.yaml
 # INSIGHTS_HOST and ACME_EMAIL are both deploy-time inputs -- see
-# dynamic.yaml.tmpl for the six Host() matchers INSIGHTS_HOST also drives.
+# dynamic.yaml.tmpl for every Host() matcher INSIGHTS_HOST also drives.
 # Both Traefik files are templates deliberately: templating one and leaving
 # the other static is a trap, since the static one looks editable in place
 # and either the edit is silently overwritten on the next render or it is

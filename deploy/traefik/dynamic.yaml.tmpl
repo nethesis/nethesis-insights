@@ -11,8 +11,8 @@
 # rather than edited into it. All files there share one namespace: nothing
 # else may redefine a router, service or middleware named here.
 # Naming the variables in envsubst's argument matters: unquoted, it would
-# also expand Traefik's own ${...} syntax. INSIGHTS_HOST drives the six
-# Host() matchers below and the ACME certificate domain, and nothing else --
+# also expand Traefik's own ${...} syntax. INSIGHTS_HOST drives every
+# Host() matcher below and the ACME certificate domain, and nothing else --
 # if a second consumer appears, it reads the same variable rather than
 # repeating the literal. METRICS_SCRAPER (render.sh defaults it) fills the
 # metrics-allow middleware's one source range.
@@ -70,6 +70,17 @@ http:
     ng-blacklist-auth:
       forwardAuth:
         address: "http://127.0.0.1:9590/auth/service/ng-blacklist"
+    # The same check for NS8 CrowdSec nodes, which carry their own
+    # entitlement for the feed. A second middleware rather than a second
+    # entitlement on ng-blacklist-auth: forwardAuth takes one address, and
+    # NethSecurity's client keeps calling the /blocklist/v1/ routes, so the
+    # NS8 nodes get their own path (/blocklist/crowdsec/v1/) and this check
+    # rides on it. authd needs no change: the name is one more path segment
+    # inside its [a-z0-9-] charset, cached under its own key like
+    # ng-blacklist is.
+    crowdsec-threat-shield-auth:
+      forwardAuth:
+        address: "http://127.0.0.1:9590/auth/service/crowdsec-advanced-threat-shield"
     operator-auth:
       basicAuth:
         usersFile: /etc/traefik/operators.htpasswd
@@ -83,6 +94,11 @@ http:
     strip-blocklist:
       stripPrefix:
         prefixes: ["/blocklist"]
+    # Strips the whole NS8 CrowdSec prefix, so threatd sees the same
+    # /v1/... paths whichever client called.
+    strip-blocklist-crowdsec:
+      stripPrefix:
+        prefixes: ["/blocklist/crowdsec"]
     strip-sizing:
       stripPrefix:
         prefixes: ["/sizing"]
@@ -130,7 +146,7 @@ http:
         prefix: "/metrics"
 
   routers:
-    # Priority is explicit on all twelve: /blocklist/v1/feed, /blocklist/v1/
+    # Priority is explicit on all fifteen: /blocklist/v1/feed, /blocklist/v1/
     # and /blocklist/ all share a prefix, and getting the order backwards
     # would put operator BasicAuth on the ingest path, the fleet's system
     # credentials on the operator UI, or -- the silent one -- the plain
@@ -142,7 +158,7 @@ http:
     # later router sharing a prefix with one of these does not fall back to
     # Traefik's rule-specificity-length tiebreak by accident.
     #
-    # entryPoints is pinned to websecure on all twelve for the same reason:
+    # entryPoints is pinned to websecure on all fifteen for the same reason:
     # without it a router also attaches to web (plain :80), and its safety
     # over cleartext then rests on the web entrypoint's redirect router
     # happening to carry a higher default priority than this file's explicit
@@ -190,6 +206,46 @@ http:
       priority: 200
       middlewares: [rate-limit, system-auth, strip-blocklist]
       service: blocklist-api
+    # The NS8 CrowdSec copy of the three routes above, under its own prefix
+    # so the node can use one base URL (/blocklist/crowdsec/v1/) for all of
+    # them. Same threatd, same handlers, same blocklist-api service; only
+    # the entitlement on the feed and allowlist-requests differs
+    # (crowdsec-advanced-threat-shield instead of ng-blacklist). The
+    # NethSecurity routes above are left exactly as they were: its client
+    # keeps calling /blocklist/v1/ and is not changed by this.
+    #
+    # Exact Path matches at 250, for the same reasons as blocklist-entitled.
+    blocklist-crowdsec-entitled:
+      rule: "Host(`${INSIGHTS_HOST}`) && (Path(`/blocklist/crowdsec/v1/feed`) || Path(`/blocklist/crowdsec/v1/allowlist-requests`))"
+      entryPoints: [websecure]
+      priority: 250
+      middlewares: [rate-limit, crowdsec-threat-shield-auth, strip-blocklist-crowdsec]
+      service: blocklist-api
+    # POST /blocklist/crowdsec/v1/events, on the plain subscription check for
+    # the same reason as blocklist-api: every subscriber reports. A prefix
+    # over /v1/ like blocklist-api's, and never over the whole
+    # /blocklist/crowdsec/ namespace: strip-blocklist-crowdsec would turn
+    # /blocklist/crowdsec/metrics into threatd's /metrics, which must answer
+    # METRICS_SCRAPER only.
+    blocklist-crowdsec-api:
+      rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/crowdsec/v1/`)"
+      entryPoints: [websecure]
+      priority: 200
+      middlewares: [rate-limit, system-auth, strip-blocklist-crowdsec]
+      service: blocklist-api
+    # Everything else under /blocklist/crowdsec, so it never falls through to
+    # blocklist-ui: a node's system credential would otherwise meet the
+    # operator BasicAuth, and the UI would see /crowdsec/... as one of its
+    # own paths. It strips only /blocklist, so threatd sees /crowdsec/...,
+    # matches none of its routes and answers 404 -- never /healthz or
+    # /metrics, which a full strip would reach. Above blocklist-ui, below
+    # the two routers above.
+    blocklist-crowdsec-fence:
+      rule: "Host(`${INSIGHTS_HOST}`) && (Path(`/blocklist/crowdsec`) || PathPrefix(`/blocklist/crowdsec/`))"
+      entryPoints: [websecure]
+      priority: 150
+      middlewares: [rate-limit, system-auth, strip-blocklist]
+      service: blocklist-api
     blocklist-ui:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist`)"
       entryPoints: [websecure]
@@ -210,7 +266,7 @@ http:
       service: sizing-ui
     # Exact-path matches (Path, not PathPrefix): each /metrics/<name> is a
     # single scrape endpoint with no children, so there is nothing to
-    # prefix-match and no ambiguity with the six routers above -- none of
+    # prefix-match and no ambiguity with the routers above -- none of
     # them start with /metrics. Priority 300, above the API/UI tier, purely
     # so a later change to those never has to reason about this group too.
     metrics-logs:

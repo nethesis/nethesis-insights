@@ -186,6 +186,18 @@ var services = []struct {
 		},
 	},
 	{
+		// The same threatd routes a second time, under the prefix NS8
+		// CrowdSec nodes call: Traefik strips /blocklist/crowdsec there and
+		// checks their own entitlement on the feed and allowlist requests.
+		name:   "threatd (NS8 CrowdSec)",
+		prefix: "/blocklist/crowdsec",
+		routes: []struct{ path, method string }{
+			{"/v1/events", "post"},
+			{"/v1/feed", "get"},
+			{"/v1/allowlist-requests", "post"},
+		},
+	},
+	{
 		name:   "sizingd",
 		prefix: "/sizing",
 		routes: []struct{ path, method string }{

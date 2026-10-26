@@ -477,12 +477,29 @@ a redirect where it pointed.
 
 **Two Threat Shield routes need more than a subscription.** Every machine with
 a subscription sends data to the server; only a machine with the Threat Shield
-entitlement can download the list. So `GET /blocklist/v1/feed` and
-`POST /blocklist/v1/allowlist-requests` are validated against
-`AUTH_VALIDATE_URL/service/ng-blacklist` rather than `AUTH_VALIDATE_URL`, while
-`POST /blocklist/v1/events` and every log and sizing route use the plain check.
-The node sends exactly the same credential either way — there is no second
-token to distribute — and it is the proxy that picks which check runs.
+entitlement can download the list. The feed and the allowlist request are
+validated against `AUTH_VALIDATE_URL/service/<entitlement>` rather than
+`AUTH_VALIDATE_URL`, while sending events and every log and sizing route use
+the plain check. The node sends exactly the same credential either way — there
+is no second token to distribute — and it is the proxy that picks which check
+runs.
+
+Two kinds of machine download the list, and each has its own entitlement, so
+each has its own address:
+
+| Client | Calls | Entitlement checked for the feed and allowlist requests |
+|---|---|---|
+| NethSecurity firewall | `/blocklist/v1/events`, `/blocklist/v1/feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` |
+| NS8 node running CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/events`, `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` |
+
+Both addresses reach the same server and return the same list. Only the
+entitlement differs, and each one is checked on its own: a firewall with
+`ng-blacklist` gets `403` on the NS8 address, and the other way round. Sending
+events needs only a subscription on either address.
+
+`ns8-crowdsec` has to use `/blocklist/crowdsec/v1/` as its base address. An NS8
+node still calling `/blocklist/v1/` keeps reporting its bans, but gets `403` on
+the feed unless it also happens to carry `ng-blacklist`.
 
 A subscriber without the entitlement gets **`403`, not `401`**. The difference
 is the whole point: `401` means the credential is wrong and somebody should go
@@ -548,9 +565,12 @@ prefix on the one served hostname:
 |---|---|
 | `POST /logs/v1/bundles` | the [`ns8-insights`](https://github.com/NethServer/ns8-insights) module ships a 15-minute bundle for the whole cluster |
 | `GET /logs/v1/findings` | a node reads its own findings, never anyone else's |
-| `POST /blocklist/v1/events` | `ns8-crowdsec` reports ban decisions |
-| `GET /blocklist/v1/feed` | a node fetches the consensus blocklist — **needs the Threat Shield entitlement** |
-| `POST /blocklist/v1/allowlist-requests` | a node asks for an address to be left alone — **needs the Threat Shield entitlement** |
+| `POST /blocklist/crowdsec/v1/events` | `ns8-crowdsec` reports ban decisions |
+| `GET /blocklist/crowdsec/v1/feed` | `ns8-crowdsec` fetches the consensus blocklist — **needs the `crowdsec-advanced-threat-shield` entitlement** |
+| `POST /blocklist/crowdsec/v1/allowlist-requests` | `ns8-crowdsec` asks for an address to be left alone — **needs the `crowdsec-advanced-threat-shield` entitlement** |
+| `POST /blocklist/v1/events` | a NethSecurity firewall reports its own blocks |
+| `GET /blocklist/v1/feed` | a NethSecurity firewall fetches the consensus blocklist — **needs the `ng-blacklist` entitlement** |
+| `POST /blocklist/v1/allowlist-requests` | a NethSecurity firewall asks for an address to be left alone — **needs the `ng-blacklist` entitlement** |
 | `POST /sizing/v1/reports` | a cluster leader posts a complete UTC day |
 
 `POST /logs/v1/bundles` answers immediately with "accepted" or "try later",
@@ -1435,7 +1455,8 @@ collected, counted and handed back.
 ### How it works, in four steps
 
 1. **A node reports its bans.** When CrowdSec bans an address, the node posts
-   that decision to `POST /blocklist/v1/events` using the same subscription
+   that decision to `POST /blocklist/crowdsec/v1/events` (a NethSecurity
+   firewall uses `POST /blocklist/v1/events`) using the same subscription
    credential it uses for log bundles.
 
 2. **The server throws most of it away.** Before anything is stored, every
@@ -1457,8 +1478,10 @@ collected, counted and handed back.
 
 4. **Nodes fetch the result.** Entitled nodes, that is: this is the one step
    that needs the Threat Shield entitlement and not merely a subscription (see
-   "Authentication"). `GET /blocklist/v1/feed` returns a plain list of
-   addresses, which the node imports into CrowdSec. Every entitled node gets
+   "Authentication" for which entitlement each kind of machine needs).
+   `GET /blocklist/crowdsec/v1/feed` (or `GET /blocklist/v1/feed` for a
+   NethSecurity firewall) returns a plain list of addresses, which the node
+   imports into CrowdSec. Every entitled node gets
    the same list — there is no per-customer or per-tier filtering of it.
 
 ### The safety net
@@ -1515,7 +1538,8 @@ Sometimes the fleet agrees about an address that is not actually an attacker —
 a partner's security scanner, a shared resolver, a customer's own gateway. Two
 things exist for that.
 
-A node can **ask**: `POST /blocklist/v1/allowlist-requests` puts the address in
+A node can **ask**: `POST /blocklist/crowdsec/v1/allowlist-requests` (or
+`POST /blocklist/v1/allowlist-requests` from a firewall) puts the address in
 a review queue, ranked by how many different machines asked for it. Forty
 customers all hitting the same shared resolver floats it to the top; a single
 opportunistic request sinks.

@@ -28,6 +28,24 @@ behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
 the request reaches it, so these two paths are what a client sends and
 `/v1/events`/`/v1/feed` are what the server's own route table says.
 
+### Base URL per client
+
+The same routes are served under two base URLs, one per client. Each base URL
+checks its own entitlement on the feed; everything else is identical — same
+handlers, same bodies, same answers, same feed.
+
+| client | base URL | entitlement for the feed |
+|---|---|---|
+| NS8 CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/` | `crowdsec-advanced-threat-shield` |
+| NethSecurity firewall | `/blocklist/v1/` | `ng-blacklist` |
+
+**`ns8-crowdsec` must switch its base URL to `/blocklist/crowdsec/v1/`** for
+all three calls. On the old `/blocklist/v1/` base URL an NS8 node reporting
+events keeps working, but the feed answers `403` unless the node also carries
+NethSecurity's `ng-blacklist` entitlement. The rest of this document writes
+paths with the `/blocklist/v1/` base URL; for `ns8-crowdsec` read
+`/blocklist/crowdsec/v1/` in its place.
+
 ## Authentication
 
 HTTP Basic, `system_id:auth_token`, the same credential as `/logs/v1/bundles`
@@ -41,12 +59,18 @@ may download the list.
 
 | path | validated against |
 |---|---|
+| `POST /blocklist/crowdsec/v1/events` | `https://my.nethesis.it/auth` |
+| `GET /blocklist/crowdsec/v1/feed` | `https://my.nethesis.it/auth/service/crowdsec-advanced-threat-shield` |
+| `POST /blocklist/crowdsec/v1/allowlist-requests` | `https://my.nethesis.it/auth/service/crowdsec-advanced-threat-shield` |
 | `POST /blocklist/v1/events` | `https://my.nethesis.it/auth` |
 | `GET /blocklist/v1/feed` | `https://my.nethesis.it/auth/service/ng-blacklist` |
 | `POST /blocklist/v1/allowlist-requests` | `https://my.nethesis.it/auth/service/ng-blacklist` |
 
+The two entitlements are checked and cached separately: holding one does not
+open the other base URL's feed.
+
 (`https://my.nethesis.it/auth` is the default; the deployment sets it with
-`AUTH_VALIDATE_URL`. `/blocklist/v1/allowlist-requests` is documented in full
+`AUTH_VALIDATE_URL`. `allowlist-requests` is documented in full
 in `docs/api/openapi.yaml`; it is listed here only for the entitlement rule,
 which is the feed's — only a node consuming the feed can be harmed by a false
 positive in it.)
@@ -59,8 +83,8 @@ credential, `503` when the validator itself is unreachable. A `503` is
 retryable; a `401` is not.
 
 **`403` on the feed means "not entitled", not "bad credential".** The
-credential is valid and works for `/blocklist/v1/events`; this system simply
-does not carry the Threat Shield entitlement. A client must not retry it, must
+credential is valid and works for `events`; this system simply does not carry
+the Threat Shield entitlement that base URL checks. A client must not retry it, must
 not treat it as a credential problem, and must not prompt for a new token — the
 resolution is commercial, not technical. It is also not a transient failure, so
 the "never write an empty list on error" rule below applies to it unchanged: on

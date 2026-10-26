@@ -25,7 +25,11 @@ info:
       reported by enough distinct systems. Reporting and consuming are
       separately authorised: every subscriber posts events, only a node
       carrying the Threat Shield entitlement may fetch the feed or ask for
-      an allowlist entry.
+      an allowlist entry. The same three routes are served twice, once per
+      client and entitlement: NethSecurity firewalls call `/blocklist/v1/`
+      (`ng-blacklist`), NS8 CrowdSec nodes call `/blocklist/crowdsec/v1/`
+      (`crowdsec-advanced-threat-shield`). Both reach the same handlers and
+      the same feed; only the proxy's entitlement check differs.
     - **Fleet sizing** (`sizingd`, prefix `/sizing`: `/sizing/v1/reports`): a
       third pipeline, also with no LLM, no gate, no fingerprint and no queue.
       NS8 cluster leaders post one complete-UTC-day workload and performance
@@ -64,8 +68,10 @@ tags:
     description: >-
       CrowdSec ban-decision ingest and the fleet-consensus blocklist feed.
       Same credentials as the log pipeline; the feed and the allowlist
-      request additionally require the Threat Shield entitlement
-      (`entitledBasicAuth`).
+      request additionally require the Threat Shield entitlement --
+      `ng-blacklist` on `/blocklist/v1/` (`entitledBasicAuth`, NethSecurity),
+      `crowdsec-advanced-threat-shield` on `/blocklist/crowdsec/v1/`
+      (`crowdsecEntitledBasicAuth`, NS8 CrowdSec).
   - name: sizing
     description: NS8 cluster workload/performance report ingest, same credentials as the log pipeline.
   - name: observability
@@ -624,6 +630,83 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "temporarily unavailable" }
 
+  # The NS8 CrowdSec copy of the three routes above. Same threatd handlers,
+  # same bodies and answers; Traefik strips /blocklist/crowdsec instead of
+  # /blocklist, and the feed and allowlist requests check the
+  # crowdsec-advanced-threat-shield entitlement instead of ng-blacklist.
+  # Responses and bodies are references to the NethSecurity operations, so
+  # the two cannot drift.
+  /blocklist/crowdsec/v1/events:
+    post:
+      operationId: postThreatEventsCrowdsec
+      tags: [threat-shield]
+      summary: Report a batch of CrowdSec ban decisions (NS8 CrowdSec path)
+      description: |
+        Identical to `POST /blocklist/v1/events` -- same body, same drop
+        rules, same answers, same plain subscription check. It exists so an
+        NS8 CrowdSec node can use one base URL, `/blocklist/crowdsec/v1/`,
+        for all three Threat Shield calls.
+      security:
+        - basicAuth: []
+      requestBody:
+        $ref: "#/paths/~1blocklist~1v1~1events/post/requestBody"
+      responses:
+        "202": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/202" }
+        "400": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/400" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/401" }
+        "403": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/403" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1events/post/responses/503" }
+
+  /blocklist/crowdsec/v1/feed:
+    get:
+      operationId: getBlocklistCrowdsec
+      tags: [threat-shield]
+      summary: Fetch the fleet-consensus blocklist feed (NS8 CrowdSec path)
+      description: |
+        The same feed as `GET /blocklist/v1/feed`, byte for byte, with the
+        same caching, `ETag` and never-serve-blank rules. Only the
+        entitlement differs: this path requires
+        `crowdsec-advanced-threat-shield`, the NS8 CrowdSec entitlement,
+        where `/blocklist/v1/feed` requires NethSecurity's `ng-blacklist`.
+        See the `crowdsecEntitledBasicAuth` scheme.
+      security:
+        - crowdsecEntitledBasicAuth: []
+      parameters:
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/0"
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/1"
+      responses:
+        "200": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/200" }
+        "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
+        "403": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/403" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
+
+  /blocklist/crowdsec/v1/allowlist-requests:
+    post:
+      operationId: postAllowlistRequestCrowdsec
+      tags: [threat-shield]
+      summary: Request a CIDR be added to the allowlist (NS8 CrowdSec path)
+      description: |
+        Identical to `POST /blocklist/v1/allowlist-requests`, the same
+        review queue, checked against the NS8 CrowdSec entitlement
+        (`crowdsec-advanced-threat-shield`) like
+        `/blocklist/crowdsec/v1/feed`. See the `crowdsecEntitledBasicAuth`
+        scheme.
+      security:
+        - crowdsecEntitledBasicAuth: []
+      requestBody:
+        $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/requestBody"
+      responses:
+        "202": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/202" }
+        "400": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/400" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/401" }
+        "403": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/403" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/405" }
+        "429": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/429" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1allowlist-requests/post/responses/503" }
+
   /sizing/v1/reports:
     post:
       operationId: postSizingReports
@@ -935,7 +1018,9 @@ components:
       description: >-
         The same `system_id:auth_token` credential as `basicAuth`, checked
         against `AUTH_VALIDATE_URL`**`/service/ng-blacklist`** instead: a
-        subscription *and* the Threat Shield entitlement. A subscriber
+        subscription *and* the Threat Shield entitlement as NethSecurity
+        firewalls carry it. Used by the `/blocklist/v1/` feed and allowlist
+        requests. A subscriber
         without the entitlement is `403`, kept distinct from the `401` a
         wrong credential gets, because the two send an administrator to
         opposite places -- buy the entitlement, or fix the credential.
@@ -944,6 +1029,18 @@ components:
         proxy (a second `forwardAuth` middleware) and cached under a key
         that includes the service, so a node whose ingest credential is
         already cached as valid still gets the entitlement checked.
+    crowdsecEntitledBasicAuth:
+      type: http
+      scheme: basic
+      description: >-
+        `entitledBasicAuth` for NS8 CrowdSec nodes: the same credential,
+        checked against
+        `AUTH_VALIDATE_URL`**`/service/crowdsec-advanced-threat-shield`**,
+        the entitlement those nodes carry for the feed. Used by the
+        `/blocklist/crowdsec/v1/` feed and allowlist requests. Same `401`,
+        `403` and `503` rules, and cached under its own key, so holding
+        `ng-blacklist` does not open this path, nor this entitlement the
+        `/blocklist/v1/` one.
   schemas:
     Error:
       type: object
