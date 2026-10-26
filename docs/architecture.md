@@ -90,7 +90,8 @@ What it deliberately does not do:
 
 ```
 edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
-   │ /logs/v1/bundles       │ /blocklist/v1/events       │ /sizing/v1/reports
+   │ /logs/v1/bundles       │ /blocklist/crowdsec/v1/*   │ /sizing/v1/reports
+   │                        │ (NethSecurity: /blocklist/v1/*)
    ▼                        ▼                            ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                               Traefik                                 │
@@ -119,7 +120,9 @@ edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
              ┌──────┴──────┐
              │    authd     │──► AUTH_VALIDATE_URL (external,
              │ cache + TTL  │    default https://my.nethesis.it/auth)
-             └─────────────┘    └► …/service/ng-blacklist for the feed
+             └─────────────┘    └► …/service/ng-blacklist (NethSecurity) or
+                                   …/service/crowdsec-advanced-threat-shield
+                                   (NS8 CrowdSec) for the feed
 ```
 
 One cluster ships one bundle per 15-minute window, from the
@@ -758,8 +761,10 @@ empty body means "no threats" and silently disables protection.
 **This route requires the Threat Shield entitlement**, and so does
 `POST /v1/allowlist-requests`; `POST /v1/events` requires only a subscription.
 Nothing in this handler implements that — it is a second `forwardAuth`
-middleware in front of it, pointing at `authd`'s `/auth/service/ng-blacklist`.
-An unentitled subscriber gets `403`, which is not `401` and not retryable; see
+middleware in front of it, pointing at `authd`'s `/auth/service/ng-blacklist`
+on `/blocklist/v1/feed` (NethSecurity) and at
+`/auth/service/crowdsec-advanced-threat-shield` on
+`/blocklist/crowdsec/v1/feed` (NS8 CrowdSec). An unentitled subscriber gets `403`, which is not `401` and not retryable; see
 "Entitlements: a second route, one cache" under Authentication.
 
 ### Sizing ingest: `POST /v1/reports` (public path `/sizing/v1/reports`)
@@ -2139,7 +2144,7 @@ run.
 | Failure | Consequence |
 |---|---|
 | validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window. A stale entry replays as the verdict it was, so an unentitled node stays `403` rather than being promoted by an outage |
-| subscriber without the Threat Shield entitlement | `403` on `/blocklist/v1/feed` and `/blocklist/v1/allowlist-requests`, never `401`; `POST /blocklist/v1/events` is unaffected, so the node keeps contributing to consensus while it cannot consume it |
+| subscriber without the Threat Shield entitlement | `403` on the feed and `allowlist-requests` of the base URL whose entitlement it lacks (`/blocklist/v1/`: `ng-blacklist`; `/blocklist/crowdsec/v1/`: `crowdsec-advanced-threat-shield`), never `401`; `events` is unaffected on either, so the node keeps contributing to consensus while it cannot consume it |
 | `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
 | LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
 | `LLM_SERVICE_TIER` capacity unavailable (a `429` from the provider) | the call is repeated once without the tier, at the standard price (and the cost ledger prices it so, from the answer's `service_tier`), rather than handed back as a transient error: a failed window is analysed again only if the edge happens to resend it |
@@ -2305,6 +2310,32 @@ and consuming are different privileges: narrowing the reporting pool to
 entitled nodes would shrink the evidence base that promotion's
 three-distinct-systems rule is measured against, while leaving the feed open
 would give away the thing being sold.
+
+**Two clients, two entitlements, two base URLs.** NethSecurity firewalls carry
+`ng-blacklist` and call `/blocklist/v1/`; NS8 CrowdSec nodes carry
+`crowdsec-advanced-threat-shield` and call `/blocklist/crowdsec/v1/`. A
+`forwardAuth` middleware takes one address, so one route cannot accept either
+entitlement, and NethSecurity's client is not ours to change: the NS8 nodes
+got their own path, with its own middleware, instead. Both paths reach the same
+`threatd` handlers and the same snapshot. In `deploy/traefik/dynamic.yaml.tmpl`:
+
+| router | match | check | priority |
+|---|---|---|---|
+| `blocklist-entitled` | `Path` `/blocklist/v1/feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` | 250 |
+| `blocklist-crowdsec-entitled` | `Path` `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` | 250 |
+| `blocklist-crowdsec-api` | `PathPrefix` `/blocklist/crowdsec/v1/` (events) | subscription | 200 |
+| `blocklist-api` | `PathPrefix` `/blocklist/v1/` (events) | subscription | 200 |
+| `blocklist-crowdsec-fence` | rest of `/blocklist/crowdsec` | subscription | 150 |
+| `blocklist-ui` | `PathPrefix` `/blocklist` | operator BasicAuth | 100 |
+
+The CrowdSec routes strip `/blocklist/crowdsec`, so `threatd` sees `/v1/...`
+from either client. That full strip is why `blocklist-crowdsec-api` stops at
+`/v1/`: over the whole `/blocklist/crowdsec/` namespace it would turn
+`/blocklist/crowdsec/metrics` into `threatd`'s own `/metrics`, which answers
+`METRICS_SCRAPER` only. The fence covers what is left, so nothing under
+`/blocklist/crowdsec` falls through to `blocklist-ui`, where a node's system
+credential would meet the operator BasicAuth. It strips only `/blocklist`, so
+`threatd` sees `/crowdsec/...` and answers `404`.
 
 Three properties of that design are load-bearing:
 

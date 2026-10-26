@@ -155,6 +155,23 @@ Threat Shield rules that are as load-bearing as the gate's:
   binary. Never narrow event reporting to entitled nodes: promotion is measured
   against three *distinct* systems, and shrinking the reporting pool weakens
   the rule the feed's value rests on.
+- **One base URL per client, each with its own entitlement.** NethSecurity
+  firewalls call `/blocklist/v1/` and need `ng-blacklist`; NS8 CrowdSec nodes
+  call `/blocklist/crowdsec/v1/` and need `crowdsec-advanced-threat-shield`.
+  Both reach the same threatd handlers and the same feed — the split is
+  Traefik routers and middlewares only (`blocklist-entitled` and
+  `blocklist-crowdsec-entitled` in `deploy/traefik/dynamic.yaml.tmpl`), and
+  threatd never learns which ran. A second path rather than a second
+  entitlement on one route because `forwardAuth` takes one address and
+  NethSecurity's client is not ours to change. Two parts are load-bearing.
+  **The CrowdSec events route is a prefix over `/blocklist/crowdsec/v1/`,
+  never over `/blocklist/crowdsec/`**: its middleware strips the whole
+  `/blocklist/crowdsec`, so a wider prefix would hand any subscriber threatd's
+  `/metrics` and `/healthz`. **`blocklist-crowdsec-fence` catches the rest of
+  that namespace** at priority 150, strips only `/blocklist` and lets threatd
+  404 on `/crowdsec/...`, so nothing under it falls through to `blocklist-ui`
+  and its operator BasicAuth. `ns8-crowdsec` must use the `/blocklist/crowdsec/v1/`
+  base URL; `docs/api/openapi_test.go` lists the threatd routes once per prefix.
 - **Never serve blank.** `GET /blocklist/v1/feed` answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.
