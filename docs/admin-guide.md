@@ -239,8 +239,11 @@ dashboard, which is why each operator gets their own line:
     chmod 640 /etc/traefik/operators.htpasswd
 
 An unrecognized username is rejected by the proxy before the request reaches a
-dashboard. The actor is a readable trail, not an authorization boundary:
-anyone holding the key can claim any name.
+dashboard. To add an operator later, append a line the same way and run
+`systemctl restart traefik`: the proxy reads this file only when it loads its
+configuration, so a new line is not honoured until then. The actor is a
+readable trail, not an authorization boundary: anyone holding the key can
+claim any name.
 
 ### 6. Set the hostname and render the proxy configuration
 
