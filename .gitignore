@@ -4,3 +4,4 @@ bin/
 *.db-wal
 coverage.out
 .serena/
+plan.md
