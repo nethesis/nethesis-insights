@@ -100,7 +100,7 @@ func (q *fakeQueue) Publish(w Work) error {
 }
 
 func threatServer(st Store, q Publisher, snap *blocklist.Snapshot) http.Handler {
-	return NewServer(st, q, snap, trustedProxy, Config{
+	return NewServer(st, q, snap, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
 	}, nil, nil)
@@ -111,7 +111,7 @@ func threatServer(st Store, q Publisher, snap *blocklist.Snapshot) http.Handler 
 func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
 	reg := metrics.NewRegistry("threatd")
 	rec := metrics.NewHTTP(reg)
-	h := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, trustedProxy, Config{MaxDecisions: 500}, metrics.Handler(reg), rec)
+	h := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, nil, trustedProxy, Config{MaxDecisions: 500}, metrics.Handler(reg), rec)
 
 	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	hw := httptest.NewRecorder()
@@ -232,7 +232,7 @@ func TestThreatIngestFeedsEventCountersOnlyForAcceptedReports(t *testing.T) {
 		decision("203.0.113.7", "crowdsecurity/ssh-bf", "crowdsec"),
 		decision("10.0.0.1", "crowdsecurity/ssh-bf", "crowdsec"))
 
-	full := NewServer(&fakeThreatStore{}, &fakeQueue{err: ingestq.ErrFull}, nil, trustedProxy, cfg, nil, nil)
+	full := NewServer(&fakeThreatStore{}, &fakeQueue{err: ingestq.ErrFull}, nil, nil, trustedProxy, cfg, nil, nil)
 	if rec := postThreat(t, full, body, true); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
 	}
@@ -240,7 +240,7 @@ func TestThreatIngestFeedsEventCountersOnlyForAcceptedReports(t *testing.T) {
 		t.Fatalf("a refused report was counted: %+v", fed)
 	}
 
-	ok := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, trustedProxy, cfg, nil, nil)
+	ok := NewServer(&fakeThreatStore{}, &fakeQueue{}, nil, nil, trustedProxy, cfg, nil, nil)
 	if rec := postThreat(t, ok, body, true); rec.Code != http.StatusAccepted {
 		t.Fatalf("status: got %d, want 202", rec.Code)
 	}
@@ -346,7 +346,7 @@ func TestThreatIngestRequiresAuthentication(t *testing.T) {
 // system_id.
 func TestIngestRefusesARequestThatDidNotComeThroughTheProxy(t *testing.T) {
 	q := &fakeQueue{}
-	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions}, nil, nil)
+	h := NewServer(&fakeThreatStore{}, q, nil, nil, trustedProxy, Config{MaxDecisions: threat.DefaultMaxDecisions}, nil, nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{"decisions":[]}`))
 	r.RemoteAddr = "203.0.113.7:4444"
@@ -432,7 +432,7 @@ func TestThreatIngestDropsDecisionsOlderThanMaxEventAge(t *testing.T) {
 	stale.CreatedAt = "2026-08-20T09:59:00Z" // eight days before threatNow
 	body := reportBody(t, testSystemID, stale, decision("203.0.113.9", "crowdsecurity/ssh-bf", "crowdsec"))
 
-	h := NewServer(&fakeThreatStore{}, q, nil, trustedProxy, Config{
+	h := NewServer(&fakeThreatStore{}, q, nil, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		MaxEventAge:  168 * time.Hour,
 		Now:          func() int64 { return threatNow },
@@ -820,6 +820,34 @@ func TestBlocklistRefusesWithNoSnapshotWired(t *testing.T) {
 	rec := getBlocklist(t, threatServer(&fakeThreatStore{}, nil, nil), true, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d, want 503", rec.Code)
+	}
+}
+
+// /v1/basic-feed is served from its own snapshot, with the same headers,
+// and answers 503 when none is wired, exactly like /v1/feed.
+func TestBasicFeedIsServedFromItsOwnSnapshot(t *testing.T) {
+	full := generatedSnapshot(t, "203.0.113.7", threatNow)
+	basic := generatedSnapshot(t, "198.51.100.9", threatNow)
+	get := func(h http.Handler) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/basic-feed", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.SetBasicAuth(testSystemID, testSecret)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	h := NewServer(&fakeThreatStore{}, nil, full, basic, trustedProxy, Config{MaxDecisions: 500}, nil, nil)
+	rec := get(h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != string(basic.View().Body) || rec.Header().Get("ETag") != basic.View().ETag {
+		t.Fatalf("served something other than the basic snapshot:\n%s", rec.Body.String())
+	}
+
+	if rec := get(threatServer(&fakeThreatStore{}, nil, full)); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no basic snapshot wired: got %d, want 503", rec.Code)
 	}
 }
 

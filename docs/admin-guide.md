@@ -427,6 +427,7 @@ in `systemctl status threatd`.
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
+| `BLOCKLIST_BASIC_INTERVAL` | how often the basic feed — the one for subscribers without the Threat Shield add-on — takes on newly listed addresses (default `24h`, which means once a day at midnight UTC). Removals are never delayed. Must be positive: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
 | `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
@@ -480,7 +481,9 @@ a redirect where it pointed.
 
 **Two Threat Shield routes need more than a subscription.** Every machine with
 a subscription sends data to the server; only a machine with the Threat Shield
-entitlement can download the list. The feed and the allowlist request are
+entitlement can download the list as it stands right now. Every other
+subscriber can download the *basic* feed instead, which needs only the
+subscription (see "Threat Shield" below). The feed and the allowlist request are
 validated against `AUTH_VALIDATE_URL/service/<entitlement>` rather than
 `AUTH_VALIDATE_URL`, while sending events and every log and sizing route use
 the plain check. The node sends exactly the same credential either way — there
@@ -492,13 +495,14 @@ each has its own address:
 
 | Client | Calls | Entitlement checked for the feed and allowlist requests |
 |---|---|---|
-| NethSecurity firewall | `/blocklist/v1/events`, `/blocklist/v1/feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` |
-| NS8 node running CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/events`, `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` |
+| NethSecurity firewall | `/blocklist/v1/events`, `/blocklist/v1/feed`, `/blocklist/v1/basic-feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` |
+| NS8 node running CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/events`, `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/basic-feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` |
 
 Both addresses reach the same server and return the same list. Only the
 entitlement differs, and each one is checked on its own: a firewall with
 `ng-blacklist` gets `403` on the NS8 address, and the other way round. Sending
-events needs only a subscription on either address.
+events and downloading `basic-feed` need only a subscription on either
+address.
 
 `ns8-crowdsec` has to use `/blocklist/crowdsec/v1/` as its base address. An NS8
 node still calling `/blocklist/v1/` keeps reporting its bans, but gets `403` on
@@ -508,8 +512,9 @@ A subscriber without the entitlement gets **`403`, not `401`**. The difference
 is the whole point: `401` means the credential is wrong and somebody should go
 looking at the node's configuration, `403` means the credential is fine and the
 customer needs the entitlement. Neither is retryable, but they end in different
-places. If a customer reports that the blocklist stopped updating, check for
-`403` first — the node will still be reporting its own bans successfully, which
+places. A node without the entitlement should be configured to use
+`basic-feed` instead, which never answers `403`. If a customer reports that
+the blocklist stopped updating, check for `403` first — the node will still be reporting its own bans successfully, which
 makes the credential look healthy from every other angle.
 
 Adding a future entitlement is a Traefik change, not a release: `authd` builds
@@ -574,9 +579,11 @@ prefix on the one served hostname:
 | `GET /logs/v1/findings` | a node reads its own findings, never anyone else's |
 | `POST /blocklist/crowdsec/v1/events` | `ns8-crowdsec` reports ban decisions |
 | `GET /blocklist/crowdsec/v1/feed` | `ns8-crowdsec` fetches the consensus blocklist — **needs the `crowdsec-advanced-threat-shield` entitlement** |
+| `GET /blocklist/crowdsec/v1/basic-feed` | `ns8-crowdsec` without the entitlement fetches the basic blocklist — subscription only |
 | `POST /blocklist/crowdsec/v1/allowlist-requests` | `ns8-crowdsec` asks for an address to be left alone — **needs the `crowdsec-advanced-threat-shield` entitlement** |
 | `POST /blocklist/v1/events` | a NethSecurity firewall reports its own blocks |
 | `GET /blocklist/v1/feed` | a NethSecurity firewall fetches the consensus blocklist — **needs the `ng-blacklist` entitlement** |
+| `GET /blocklist/v1/basic-feed` | a NethSecurity firewall without the entitlement fetches the basic blocklist — subscription only |
 | `POST /blocklist/v1/allowlist-requests` | a NethSecurity firewall asks for an address to be left alone — **needs the `ng-blacklist` entitlement** |
 | `POST /sizing/v1/reports` | a cluster leader posts a complete UTC day |
 
@@ -1484,13 +1491,26 @@ collected, counted and handed back.
    24 hours after the last sighting, so an address that has been reassigned to
    somebody innocent does not stay blocked forever.
 
-4. **Nodes fetch the result.** Entitled nodes, that is: this is the one step
-   that needs the Threat Shield entitlement and not merely a subscription (see
-   "Authentication" for which entitlement each kind of machine needs).
+4. **Nodes fetch the result.** A node with the Threat Shield entitlement (see
+   "Authentication" for which entitlement each kind of machine needs) calls
    `GET /blocklist/crowdsec/v1/feed` (or `GET /blocklist/v1/feed` for a
-   NethSecurity firewall) returns a plain list of addresses, which the node
-   imports into CrowdSec. Every entitled node gets
-   the same list — there is no per-customer or per-tier filtering of it.
+   NethSecurity firewall) and gets a plain list of addresses, which it
+   imports into CrowdSec. The list is refreshed every few minutes. Every
+   entitled node gets the same list — there is no per-customer filtering of
+   it.
+
+   A node **without** the entitlement calls `basic-feed` in place of `feed`
+   (`GET /blocklist/crowdsec/v1/basic-feed`, or
+   `GET /blocklist/v1/basic-feed` for a firewall) and needs only its
+   subscription. It gets the same list with one difference: a newly published
+   address is added to it only at the next midnight UTC (with the default
+   `BLOCKLIST_BASIC_INTERVAL` of `24h`), so it shows up anywhere from a few
+   minutes to a day later than on the full feed. That freshness is what the
+   add-on buys. Removals are **not** delayed: an address that expires, or that
+   an operator puts on the allowlist, leaves both lists within minutes, so a
+   customer without the add-on is never left blocking an address that has
+   already been cleared. Restarting the server does not change what the
+   basic feed contains.
 
 ### The safety net
 
@@ -1524,8 +1544,8 @@ and it is a human decision rather than an automatic one.
 ### One thing the server refuses to do
 
 If the server has not yet successfully computed a list — it has just started,
-or the database is unhappy — the feed answers "unavailable" rather than
-returning an empty list. This is deliberate: to a node importing the file, an
+or the database is unhappy — the feed (and the basic feed) answers
+"unavailable" rather than returning an empty list. This is deliberate: to a node importing the file, an
 empty list does not read as "I don't know," it reads as "there are no threats,"
 which would quietly switch the protection off. For the same reason, if a
 computation fails the server keeps serving the *previous* list, timestamped so

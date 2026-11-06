@@ -182,6 +182,7 @@ var services = []struct {
 		routes: []struct{ path, method string }{
 			{"/v1/events", "post"},
 			{"/v1/feed", "get"},
+			{"/v1/basic-feed", "get"},
 			{"/v1/allowlist-requests", "post"},
 		},
 	},
@@ -194,6 +195,7 @@ var services = []struct {
 		routes: []struct{ path, method string }{
 			{"/v1/events", "post"},
 			{"/v1/feed", "get"},
+			{"/v1/basic-feed", "get"},
 			{"/v1/allowlist-requests", "post"},
 		},
 	},

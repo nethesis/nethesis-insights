@@ -172,6 +172,19 @@ type threatIngestResponse struct {
 // reads it as a file, `cscli decisions import --format values` reads it as a
 // list.
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
+	s.serveFeed(w, r, s.snap)
+}
+
+// handleBasicFeed serves the basic feed: the same list, taking on new
+// addresses only once per BLOCKLIST_BASIC_INTERVAL (see
+// blocklist.BasicCutoff). The handler is identical to handleFeed's; what
+// differs is the Traefik route in front of it, which checks only the system
+// credential, never an entitlement.
+func (s *server) handleBasicFeed(w http.ResponseWriter, r *http.Request) {
+	s.serveFeed(w, r, s.basic)
+}
+
+func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, snap *blocklist.Snapshot) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -183,8 +196,8 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var view blocklist.View
-	if s.snap != nil {
-		view = s.snap.View()
+	if snap != nil {
+		view = snap.View()
 	}
 	if !view.Ready {
 		// No successful consensus pass yet. An empty body would mean "no
