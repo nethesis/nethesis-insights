@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"sort"
 	"time"
@@ -107,10 +108,15 @@ func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 // hand every subscriber the full list each time threatd restarted. An entry
 // that expires and is later promoted again gets a new first_listed_at and
 // waits for the next boundary again, which is correct: it was off the list.
+//
+// A non-positive interval fails closed: the cutoff is the minimum int64, so
+// nothing qualifies and the basic feed is empty. threatd refuses to start
+// with one, but a caller that skipped that check must not hand the live
+// list out without the entitlement.
 func BasicCutoff(now int64, interval time.Duration) int64 {
 	iv := interval.Milliseconds()
 	if iv <= 0 {
-		return now
+		return math.MinInt64
 	}
 	return now - now%iv
 }

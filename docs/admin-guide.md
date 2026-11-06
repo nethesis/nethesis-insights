@@ -427,7 +427,7 @@ in `systemctl status threatd`.
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
-| `BLOCKLIST_BASIC_INTERVAL` | how often the basic feed — the one for subscribers without the Threat Shield add-on — takes on newly listed addresses (default `24h`, which means once a day at midnight UTC). Removals are never delayed. Must be positive: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
+| `BLOCKLIST_BASIC_INTERVAL` | how often the basic feed — the one for subscribers without the Threat Shield add-on — takes on newly listed addresses (default `24h`, which means once a day at midnight UTC; pick a value that divides 24h to keep a fixed time of day). Removals are never delayed. Must be positive: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
 | `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
@@ -1510,7 +1510,9 @@ collected, counted and handed back.
    an operator puts on the allowlist, leaves both lists within minutes, so a
    customer without the add-on is never left blocking an address that has
    already been cleared. Restarting the server does not change what the
-   basic feed contains.
+   basic feed contains. In practice the basic feed carries the attackers the
+   fleet keeps seeing: an address reported for a few minutes and then never
+   again usually expires before, or soon after, it reaches the basic feed.
 
 ### The safety net
 

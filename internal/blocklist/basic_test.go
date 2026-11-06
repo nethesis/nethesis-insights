@@ -5,6 +5,7 @@ package blocklist
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestBasicCutoffAlignsToTheEpoch(t *testing.T) {
 		{"exactly on the boundary", midnight, 24 * time.Hour, midnight},
 		{"one millisecond before the boundary", midnight - 1, 24 * time.Hour, midnight - 24*hour},
 		{"hourly interval", now + 30*minute, time.Hour, now},
-		{"non-positive interval publishes everything", now, 0, now},
+		{"non-positive interval publishes nothing", now, 0, math.MinInt64},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
