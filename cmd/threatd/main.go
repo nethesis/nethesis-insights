@@ -116,6 +116,11 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 	if cfg.IngestRetention <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be positive, got %s", cfg.IngestRetention))
 	}
+	if cfg.BasicInterval <= 0 {
+		// BasicCutoff would publish every entry the moment it is listed,
+		// handing the full feed out without the entitlement.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_INTERVAL must be positive, got %s", cfg.BasicInterval))
+	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
 	}
@@ -163,6 +168,11 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	add(err)
 	blocklistMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_MAX_ENTRIES", 50000)
 	add(err)
+	// The basic feed, served to every subscriber without an entitlement,
+	// takes on new addresses once a day: what the entitlement buys is the
+	// list as it stands now.
+	blocklistBasicInterval, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_INTERVAL", 24*time.Hour)
+	add(err)
 	threatRetention, err := svc.GetenvDurationStrict("THREAT_EVENT_RETENTION", 168*time.Hour)
 	add(err)
 	threatMaxDecisions, err := svc.GetenvIntStrict("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
@@ -202,6 +212,8 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 		TTL:        blocklistTTL,
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
+
+		BasicInterval: blocklistBasicInterval,
 
 		IngestRetention:           threatIngestRetention,
 		AllowlistRequestRetention: allowlistRequestRetention,
@@ -285,7 +297,8 @@ func main() {
 
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
-	consensus := blocklist.New(s, snapshot, consensusCfg)
+	basicSnapshot := blocklist.NewSnapshot()
+	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg)
 
 	// The queue's handler is bound to the store here, before either the queue
 	// or the API server exists: the queue's handler must be fixed at
@@ -300,7 +313,7 @@ func main() {
 		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in the published blocklist feed."},
 	)
 
-	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
+	handler := threatapi.NewServer(s, ingestQueue, snapshot, basicSnapshot, trusted, threatapi.Config{
 		MaxDecisions:               limits.MaxDecisions,
 		MaxAllowlistRequestsPerSys: limits.MaxAllowlistPerSystem,
 		MaxEventAge:                consensusCfg.Retention,
@@ -335,6 +348,7 @@ func main() {
 		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(consensusCfg.MinSystems)},
 		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
+		{Name: "BLOCKLIST_BASIC_INTERVAL", Value: consensusCfg.BasicInterval.String()},
 		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
 		{Name: "THREAT_INGEST_RETENTION", Value: consensusCfg.IngestRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},

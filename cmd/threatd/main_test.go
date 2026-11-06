@@ -33,6 +33,7 @@ func validConsensus() blocklist.Config {
 		Retention:                 168 * time.Hour,
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
+		BasicInterval:             24 * time.Hour,
 	}
 }
 
@@ -89,6 +90,10 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		// same pass's ExpireBlocklist would delete it.
 		{name: "ttl below window", mutateCfg: func(c *blocklist.Config) { c.TTL = 30 * time.Minute }, interval: time.Minute, wantVar: "BLOCKLIST_TTL"},
 		{name: "zero max entries", mutateCfg: func(c *blocklist.Config) { c.MaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_MAX_ENTRIES"},
+		// A zero delay publishes every entry the moment it is listed: the
+		// full feed, handed out without the entitlement.
+		{name: "zero basic interval", mutateCfg: func(c *blocklist.Config) { c.BasicInterval = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_INTERVAL"},
+		{name: "negative basic interval", mutateCfg: func(c *blocklist.Config) { c.BasicInterval = -time.Hour }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_INTERVAL"},
 		// Events pruned before the window closes are never counted.
 		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},
 		{name: "zero request retention", mutateCfg: func(c *blocklist.Config) { c.AllowlistRequestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_ALLOWLIST_REQUEST_RETENTION"},
@@ -138,6 +143,7 @@ func setValidThreatdEnv(t *testing.T) {
 		"BLOCKLIST_MIN_SYSTEMS":                    "3",
 		"BLOCKLIST_TTL":                            "24h",
 		"BLOCKLIST_MAX_ENTRIES":                    "50000",
+		"BLOCKLIST_BASIC_INTERVAL":                 "24h",
 		"THREAT_EVENT_RETENTION":                   "168h",
 		"THREAT_INGEST_RETENTION":                  "2160h",
 		"THREAT_MAX_DECISIONS_PER_REQUEST":         "500",

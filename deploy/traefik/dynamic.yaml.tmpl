@@ -200,6 +200,11 @@ http:
     # every subscriber reports, and narrowing the reporting pool to entitled
     # nodes would shrink the evidence base that promotion's three-distinct-
     # systems rule is measured against.
+    #
+    # GET /blocklist/v1/basic-feed is here too, deliberately: it is the
+    # list every subscriber may download without the entitlement, taking on
+    # new addresses once per BLOCKLIST_BASIC_INTERVAL. It must never be
+    # added to blocklist-entitled's Path list.
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
       entryPoints: [websecure]
@@ -222,7 +227,9 @@ http:
       middlewares: [rate-limit, crowdsec-threat-shield-auth, strip-blocklist-crowdsec]
       service: blocklist-api
     # POST /blocklist/crowdsec/v1/events, on the plain subscription check for
-    # the same reason as blocklist-api: every subscriber reports. A prefix
+    # the same reason as blocklist-api: every subscriber reports. GET
+    # /blocklist/crowdsec/v1/basic-feed rides here for the same reason it
+    # rides blocklist-api: it needs no entitlement. A prefix
     # over /v1/ like blocklist-api's, and never over the whole
     # /blocklist/crowdsec/ namespace: strip-blocklist-crowdsec would turn
     # /blocklist/crowdsec/metrics into threatd's /metrics, which must answer

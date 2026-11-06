@@ -19,13 +19,16 @@ info:
       problem is never re-raised.
     - **Threat Shield** (`threatd`, prefix `/blocklist`:
       `/blocklist/v1/events`, `/blocklist/v1/feed`,
-      `/blocklist/v1/allowlist-requests`): a separate pipeline with no LLM
+      `/blocklist/v1/basic-feed`, `/blocklist/v1/allowlist-requests`): a
+      separate pipeline with no LLM
       and no fingerprint. Edges report CrowdSec ban decisions; the server
       publishes a fleet-consensus blocklist once an address is independently
       reported by enough distinct systems. Reporting and consuming are
       separately authorised: every subscriber posts events, only a node
       carrying the Threat Shield entitlement may fetch the feed or ask for
-      an allowlist entry. The same three routes are served twice, once per
+      an allowlist entry. Every subscriber may fetch the basic feed: the
+      same list, taking on new addresses only once a day. The same routes
+      are served twice, once per
       client and entitlement: NethSecurity firewalls call `/blocklist/v1/`
       (`ng-blacklist`), NS8 CrowdSec nodes call `/blocklist/crowdsec/v1/`
       (`crowdsec-advanced-threat-shield`). Both reach the same handlers and
@@ -404,8 +407,9 @@ paths:
       summary: Fetch the fleet-consensus blocklist feed
       description: |
         Plain text, one public attacker address per line, with two comment
-        lines of header. Every subscriber fetches the same global list --
-        there is no per-tier feed and no per-system filtering. `HEAD` is
+        lines of header. Every entitled node fetches the same global list --
+        there is no per-system filtering. Subscribers without the
+        entitlement fetch `/blocklist/v1/basic-feed` instead. `HEAD` is
         also accepted and returns the same headers with no body.
 
         Promotion rule: an address is published once `BLOCKLIST_MIN_SYSTEMS`
@@ -516,6 +520,57 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "blocklist not generated yet" }
+
+  /blocklist/v1/basic-feed:
+    get:
+      operationId: getBlocklistBasic
+      tags: [threat-shield]
+      summary: Fetch the basic blocklist feed (no entitlement needed)
+      description: |
+        The feed for subscribers without the Threat Shield entitlement. Same
+        format, caching, `ETag` and never-serve-blank rules as
+        `GET /blocklist/v1/feed`; it needs only the subscription credential
+        every node already uses to post events.
+
+        **Only additions are delayed.** An address is served here once it
+        was first listed before the most recent refresh boundary: the
+        current time rounded down to a multiple of
+        `BLOCKLIST_BASIC_INTERVAL` (default 24h, so 00:00 UTC). A new
+        address therefore reaches this feed up to one interval after it
+        reaches `/blocklist/v1/feed`. Removals are not delayed: an address
+        that expires or is allowlisted leaves both feeds on the same
+        consensus pass. The feed is still regenerated on every pass, so
+        poll it like the full feed; most polls answer `304`.
+
+        The header's rule line ends in `/ new entries every 24h0m0s`, and
+        the two feeds never share an `ETag`.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/0"
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/1"
+      responses:
+        "200":
+          description: The current basic feed.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+            Vary:
+              schema: { type: string }
+          content:
+            text/plain:
+              schema: { type: string }
+              example: |
+                # nethesis threat shield v1
+                # generated: 2026-08-28T10:05:00Z  entries: 1620  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries every 24h0m0s
+                198.51.100.44
+                203.0.113.12
+        "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
 
   /blocklist/v1/allowlist-requests:
     post:
@@ -680,6 +735,27 @@ paths:
         "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
         "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
         "403": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/403" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
+
+  /blocklist/crowdsec/v1/basic-feed:
+    get:
+      operationId: getBlocklistBasicCrowdsec
+      tags: [threat-shield]
+      summary: Fetch the basic blocklist feed (NS8 CrowdSec path)
+      description: |
+        The same basic feed as `GET /blocklist/v1/basic-feed`, byte for
+        byte, under the NS8 CrowdSec base URL. Needs only the subscription
+        credential, no entitlement.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/0"
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/1"
+      responses:
+        "200": { $ref: "#/paths/~1blocklist~1v1~1basic-feed/get/responses/200" }
+        "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
         "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
         "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
 
