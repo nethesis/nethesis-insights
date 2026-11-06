@@ -814,8 +814,22 @@ are load-bearing:
   poll with the other's body.
 
 `BLOCKLIST_BASIC_INTERVAL` is validated positive at startup: a zero
-interval would make the cutoff `now` and publish every entry the pass that
-lists it — the full feed, without the entitlement.
+interval would publish every entry the pass that lists it — the full feed,
+without the entitlement. `BasicCutoff` also fails closed on its own (a
+non-positive interval yields an empty basic feed), so a caller that skips
+the startup check cannot leak the live list. Boundaries are epoch multiples
+of the interval, so only an interval that divides 24h refreshes at fixed
+times of day.
+
+**The basic feed carries persistent attackers, by construction.** An entry
+expires `BLOCKLIST_TTL` after its last report, and it reaches the basic feed
+only at the next boundary. With the defaults (both 24h) an address reported
+for a few minutes and then never again is on the basic feed for at most the
+gap between its listing time-of-day and midnight — possibly minutes — while
+one the fleet keeps reporting stays on it. That is accepted rather than
+worked around: lengthening the basic feed's TTL would publish addresses the
+full feed has already dropped, and short-lived attacks are exactly what the
+live feed is for.
 
 **This route needs only a subscription.** It has no Traefik router of its
 own: `/blocklist/v1/basic-feed` and `/blocklist/crowdsec/v1/basic-feed`
