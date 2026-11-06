@@ -16,17 +16,20 @@ client needs to build a request. The reasoning behind each rule is in
 - [Authentication](#authentication)
 - [`POST /blocklist/v1/events`](#post-blocklistv1events)
 - [`GET /blocklist/v1/feed`](#get-blocklistv1feed)
+- [`GET /blocklist/v1/basic-feed`](#get-blocklistv1basic-feed)
 - [Promotion rule](#promotion-rule)
 
 | method | path | who | needs |
 |---|---|---|---|
 | `POST` | `/blocklist/v1/events` | the edge reports ban decisions | a subscription |
 | `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed | a subscription **and** the Threat Shield entitlement |
+| `GET`  | `/blocklist/v1/basic-feed` | the edge fetches the same feed, new entries up to a day late | a subscription |
 
 `threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
 behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
-the request reaches it, so these two paths are what a client sends and
-`/v1/events`/`/v1/feed` are what the server's own route table says.
+the request reaches it, so these paths are what a client sends and
+`/v1/events`/`/v1/feed`/`/v1/basic-feed` are what the server's own route
+table says.
 
 ### Base URL per client
 
@@ -40,7 +43,7 @@ handlers, same bodies, same answers, same feed.
 | NethSecurity firewall | `/blocklist/v1/` | `ng-blacklist` |
 
 **`ns8-crowdsec` must switch its base URL to `/blocklist/crowdsec/v1/`** for
-all three calls. On the old `/blocklist/v1/` base URL an NS8 node reporting
+every call. On the old `/blocklist/v1/` base URL an NS8 node reporting
 events keeps working, but the feed answers `403` unless the node also carries
 NethSecurity's `ng-blacklist` entitlement. The rest of this document writes
 paths with the `/blocklist/v1/` base URL; for `ns8-crowdsec` read
@@ -54,16 +57,18 @@ Traefik calls `authd`, a shared forward-auth cache, before either request
 reaches a pipeline.
 
 **Reporting and downloading are authorised separately.** Every machine with a
-subscription sends data; only a machine carrying the Threat Shield entitlement
-may download the list.
+subscription sends data and may download the basic feed; only a machine
+carrying the Threat Shield entitlement may download the list as it stands now.
 
 | path | validated against |
 |---|---|
 | `POST /blocklist/crowdsec/v1/events` | `https://my.nethesis.it/auth` |
 | `GET /blocklist/crowdsec/v1/feed` | `https://my.nethesis.it/auth/service/crowdsec-advanced-threat-shield` |
+| `GET /blocklist/crowdsec/v1/basic-feed` | `https://my.nethesis.it/auth` |
 | `POST /blocklist/crowdsec/v1/allowlist-requests` | `https://my.nethesis.it/auth/service/crowdsec-advanced-threat-shield` |
 | `POST /blocklist/v1/events` | `https://my.nethesis.it/auth` |
 | `GET /blocklist/v1/feed` | `https://my.nethesis.it/auth/service/ng-blacklist` |
+| `GET /blocklist/v1/basic-feed` | `https://my.nethesis.it/auth` |
 | `POST /blocklist/v1/allowlist-requests` | `https://my.nethesis.it/auth/service/ng-blacklist` |
 
 The two entitlements are checked and cached separately: holding one does not
@@ -75,14 +80,18 @@ in `docs/api/openapi.yaml`; it is listed here only for the entitlement rule,
 which is the feed's — only a node consuming the feed can be harmed by a false
 positive in it.)
 
-There is still no per-tier feed: an entitled node fetches the same global list
-as every other entitled node.
+There are exactly two tiers, and both see the same global list: an entitled
+node fetches `feed`, every other subscriber fetches `basic-feed`, which
+differs only in taking on new addresses later. There is no per-customer
+filtering of either.
 
-All three endpoints are fail-closed on authentication: `401` on a rejected
+Every endpoint is fail-closed on authentication: `401` on a rejected
 credential, `503` when the validator itself is unreachable. A `503` is
 retryable; a `401` is not.
 
-**`403` on the feed means "not entitled", not "bad credential".** The
+**`403` on the feed means "not entitled", not "bad credential".** A client
+that gets it should be configured to poll `basic-feed` instead, which never
+answers `403`. The
 credential is valid and works for `events`; this system simply does not carry
 the Threat Shield entitlement that base URL checks. A client must not retry it, must
 not treat it as a credential problem, and must not prompt for a new token — the
@@ -315,6 +324,40 @@ cscli decisions import -i threat-shield.txt --format values \
       --duration 24h --scenario nethesis/threat-shield
 cscli decisions delete --scenario nethesis/threat-shield
 ```
+
+## `GET /blocklist/v1/basic-feed`
+
+The same feed for a subscriber without the Threat Shield entitlement: same
+format, same headers, same `ETag`/`304`/gzip behaviour, same `503` before the
+first pass and the same client rules. It differs in one way: **a newly listed
+address is added only at the next refresh boundary**, by default once a day at
+00:00 UTC (`BLOCKLIST_BASIC_INTERVAL`, `24h`), so it appears 0–24 hours after
+it appears on `feed`. Removals are not delayed — an address that expires or is
+allowlisted leaves both feeds on the same five-minute pass — so the basic
+feed is always a subset of `feed`.
+
+The header's rule line names the delay:
+
+```
+# nethesis threat shield v1
+# generated: 2026-08-28T10:05:00Z  entries: 1790  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries every 24h0m0s
+```
+
+The delay is part of the rule and so of the `ETag`: the two feeds never share
+one, even when their entries agree, so a client switching from one to the
+other gets a `200`, never a `304` against the other feed's tag.
+
+| status | meaning |
+|---|---|
+| `200` | the current basic feed |
+| `304` | unchanged since the client's `ETag` |
+| `401` | invalid credential |
+| `405` | method other than `GET` or `HEAD` |
+| `429` | rate limited by the edge proxy |
+| `503` | validator unreachable, or no snapshot generated yet |
+
+Polling it more often than daily is still useful: removals take effect every
+pass, and a `304` costs almost nothing.
 
 ## Promotion rule
 

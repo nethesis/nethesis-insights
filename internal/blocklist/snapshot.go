@@ -25,14 +25,24 @@ import (
 
 // Rule is the promotion rule in force, rendered into the feed header so a
 // consumer can see what the list means without reading our documentation.
+//
+// Delay is set only on the basic feed (see Runner and BasicCutoff): it
+// is how often that feed takes on new addresses. Being part of the rule, it
+// is also part of the ETag, so the two feeds never share a tag even when
+// their entries happen to agree.
 type Rule struct {
 	MinSystems int
 	Window     time.Duration
 	TTL        time.Duration
+	Delay      time.Duration
 }
 
 func (r Rule) String() string {
-	return fmt.Sprintf("%d systems / %s window / %s ttl", r.MinSystems, r.Window, r.TTL)
+	s := fmt.Sprintf("%d systems / %s window / %s ttl", r.MinSystems, r.Window, r.TTL)
+	if r.Delay > 0 {
+		s += fmt.Sprintf(" / new entries every %s", r.Delay)
+	}
+	return s
 }
 
 // Snapshot holds the rendered feed. Every field is replaced together, under

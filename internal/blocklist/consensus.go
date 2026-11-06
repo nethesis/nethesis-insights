@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"sort"
 	"time"
@@ -41,9 +42,9 @@ const MinSystemsFloor = 3
 //
 // Runner trusts a validated Config: threatd's startup validation
 // (validateConfig in cmd/threatd/main.go) refuses to start with a
-// non-positive MaxEntries, Retention, IngestRetention or
-// AllowlistRequestRetention, so Run does not guard any of them a second
-// time. A test that builds a Config literal must therefore set every field
+// non-positive MaxEntries, Retention, IngestRetention,
+// AllowlistRequestRetention or BasicInterval, so Run does not guard any of
+// them a second time. A test that builds a Config literal must therefore set every field
 // it exercises -- see testConfig in consensus_test.go -- rather than lean on
 // a zero value silently skipping a step.
 type Config struct {
@@ -66,6 +67,11 @@ type Config struct {
 	// a request deletes its rows, so without this an unreviewed one lives
 	// for the life of the deployment.
 	AllowlistRequestRetention time.Duration
+
+	// BasicInterval is how often the basic feed takes on new addresses
+	// (BLOCKLIST_BASIC_INTERVAL). It is read only when Runner has a
+	// basic snapshot to fill; see BasicCutoff.
+	BasicInterval time.Duration
 }
 
 func (c Config) rule() Rule {
@@ -76,11 +82,55 @@ func (c Config) rule() Rule {
 type Runner struct {
 	store Reader
 	snap  *Snapshot
+	basic *Snapshot
 	cfg   Config
 }
 
-func New(r Reader, snap *Snapshot, cfg Config) *Runner {
-	return &Runner{store: r, snap: snap, cfg: cfg}
+// New builds a Runner that regenerates snap on every pass and, when basic
+// is non-nil, the basic feed alongside it (see BasicCutoff).
+func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
+	return &Runner{store: r, snap: snap, basic: basic, cfg: cfg}
+}
+
+// BasicCutoff is the most recent refresh boundary of the basic feed at
+// now: now rounded down to a multiple of interval since the Unix epoch, so a
+// 24h interval refreshes at 00:00 UTC. The basic feed publishes a live
+// entry only if it was first listed before this boundary.
+//
+// Only additions are delayed. The basic feed is filtered out of the same
+// live rows the full feed is rendered from, on every pass, so an address
+// that expires or is newly allowlisted leaves both feeds on the same pass:
+// holding a wrong entry back for a day would make the free tier the one
+// that keeps blocking a legitimate address after an operator exempted it.
+//
+// It is computed from first_listed_at rather than from a copy kept in
+// memory so that it survives a restart unchanged -- an in-memory copy would
+// hand every subscriber the full list each time threatd restarted. An entry
+// that expires and is later promoted again gets a new first_listed_at and
+// waits for the next boundary again, which is correct: it was off the list.
+//
+// A non-positive interval fails closed: the cutoff is the minimum int64, so
+// nothing qualifies and the basic feed is empty. threatd refuses to start
+// with one, but a caller that skipped that check must not hand the live
+// list out without the entitlement.
+func BasicCutoff(now int64, interval time.Duration) int64 {
+	iv := interval.Milliseconds()
+	if iv <= 0 {
+		return math.MinInt64
+	}
+	return now - now%iv
+}
+
+// basicRows is the subset of live the basic feed publishes at now.
+func basicRows(live []threatstore.BlocklistRow, interval time.Duration, now int64) []threatstore.BlocklistRow {
+	cutoff := BasicCutoff(now, interval)
+	out := make([]threatstore.BlocklistRow, 0, len(live))
+	for _, row := range live {
+		if row.FirstListedAt < cutoff {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // candidate is one attacker address folded across every system that reported
@@ -93,7 +143,8 @@ type candidate struct {
 	lastSeen  int64
 }
 
-// Run executes promote -> expire -> unlist -> prune -> regenerate.
+// Run executes promote -> expire -> unlist -> prune -> regenerate (the full
+// feed, then the basic one).
 //
 // Order matters twice: the unlist must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it
@@ -175,6 +226,15 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	}
 	if err := r.snap.Generate(live, r.cfg.rule(), capped, now); err != nil {
 		return err
+	}
+	// From the same capped live rows, so the basic feed is always a subset
+	// of the full one and every removal reaches both on this pass.
+	if r.basic != nil {
+		rule := r.cfg.rule()
+		rule.Delay = r.cfg.BasicInterval
+		if err := r.basic.Generate(basicRows(live, r.cfg.BasicInterval, now), rule, capped, now); err != nil {
+			return err
+		}
 	}
 
 	slog.Info("blocklist consensus pass",

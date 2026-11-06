@@ -26,6 +26,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
   - [Threat ingest: `POST /v1/events`](#threat-ingest-post-v1events-public-path-blocklistv1events)
   - [Consensus pass](#consensus-blocklistrunnerrun)
   - [Feed: `GET /v1/feed`](#feed-get-v1feed-public-path-blocklistv1feed)
+  - [Basic feed: `GET /v1/basic-feed`](#basic-feed-get-v1basic-feed-public-path-blocklistv1basic-feed)
   - [Sizing ingest: `POST /v1/reports`](#sizing-ingest-post-v1reports-public-path-sizingv1reports)
   - [Cohort pass](#cohort-pass-baselinerunnerrun)
   - [Operator UI](#operator-ui)
@@ -101,6 +102,7 @@ edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
 └──────────┬────────────────────────┬───────────────────────┬──────────┘
            │ /v1/bundles            │ /v1/events            │ /v1/reports
            │ /v1/findings           │ /v1/feed              │
+           │                        │ /v1/basic-feed      │
            │                        │ /v1/allowlist-requests│
            ▼                        ▼                       ▼
    ┌────────────────┐      ┌─────────────────┐      ┌─────────────────┐
@@ -122,7 +124,7 @@ edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
              │ cache + TTL  │    default https://my.nethesis.it/auth)
              └─────────────┘    └► …/service/ng-blacklist (NethSecurity) or
                                    …/service/crowdsec-advanced-threat-shield
-                                   (NS8 CrowdSec) for the feed
+                                   (NS8 CrowdSec) for the live feed
 ```
 
 One cluster ships one bundle per 15-minute window, from the
@@ -240,13 +242,13 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses` and `system_nodes` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
-| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate. `Snapshot` holds the rendered feed behind an `RWMutex`. |
+| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate the full feed and then the basic one from the same rows (`BasicCutoff`). `Snapshot` holds one rendered feed behind an `RWMutex`; `threatd` holds two. |
 | `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the per-system ingest accounting. |
 | `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and `IsPlatform` (which families are ignorable when testing "solo"). Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
 | `internal/store/sizing` | sizingd's only store package: ingest, the cohort pass's inputs and outputs, and the rollups that outlive the daily rows. |
 | `internal/api/logs` | HTTP handlers for `POST /v1/bundles`, `GET /v1/findings`, `/healthz`, `/metrics` (registered unprefixed; Traefik adds `/logs` to the first two, and routes `/metrics` separately under `/metrics/logs` -- see "Metrics" below). |
-| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran (Traefik adds `/blocklist` to the first three; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
+| `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `GET /v1/basic-feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran, and the two feed handlers differ only in the snapshot they read (Traefik adds `/blocklist` to the first four; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
@@ -716,7 +718,7 @@ load-bearing:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent, and the audit
    trail is never pruned.
-10. The snapshot is regenerated from the live entries. `ListBlocklist` returns
+10. The snapshots are regenerated from the live entries. `ListBlocklist` returns
     them most recently seen first and is asked for one row past
     `BLOCKLIST_MAX_ENTRIES`, only to learn whether the cap binds; when it
     does, the addresses seen longest ago are cut, a warning is logged and the
@@ -725,11 +727,16 @@ load-bearing:
     ago. `BLOCKLIST_MAX_ENTRIES` is validated positive at startup, so `Run`
     always asks for `MaxEntries + 1`. `ListBlocklist` itself treats
     `limit <= 0` as every live entry rather than the UI listings' 200-row
-    default, which used to cap the feed silently.
+    default, which used to cap the feed silently. The full feed is generated
+    first; the basic feed is then filtered out of **the same capped rows**
+    (`basicRows`; see "Basic feed" below), so it is always a subset of the full feed and
+    every removal of steps 5 and 6 reaches both on this pass.
 
-An error in steps 1–6 or 10 aborts the pass and returns; all three prunes
-(7, 8, 9) are logged and skipped instead, because housekeeping must not stop
-the feed reflecting promotions already made. A malformed allowlist row is the
+An error in steps 1–6 or 10 aborts the pass and returns (if the full feed
+generated and the basic one did not, the basic feed keeps its previous
+snapshot, like any failed pass); all three prunes (7, 8, 9) are logged and
+skipped instead, because housekeeping must not stop the feed reflecting
+promotions already made. A malformed allowlist row is the
 one housekeeping-shaped thing that *does* abort: skipping it would fail open
 and publish an address someone had explicitly excluded.
 
@@ -766,6 +773,71 @@ on `/blocklist/v1/feed` (NethSecurity) and at
 `/auth/service/crowdsec-advanced-threat-shield` on
 `/blocklist/crowdsec/v1/feed` (NS8 CrowdSec). An unentitled subscriber gets `403`, which is not `401` and not retryable; see
 "Entitlements: a second route, one cache" under Authentication.
+
+### Basic feed: `GET /v1/basic-feed` (public path `/blocklist/v1/basic-feed`)
+
+The same list for subscribers without the add-on, served by
+`handleBasicFeed` through the same `serveFeed` code as `/v1/feed` —
+`ETag`, gzip, `304`, `503` before the first pass — from a second
+`blocklist.Snapshot` that `Runner.Run` fills on every pass. What the
+entitlement buys is the list **as it stands now**; this one takes on new
+addresses once per `BLOCKLIST_BASIC_INTERVAL` (default `24h`).
+
+```
+BasicCutoff(now, interval) = now - now mod interval     (unix millis)
+basic feed = { live row r : r.first_listed_at < BasicCutoff(now) }
+```
+
+The cutoff is `now` rounded down to a multiple of the interval since the
+Unix epoch, so the default refreshes at 00:00 UTC and a new address reaches
+the basic feed between 0 and 24 hours after the full one. Three properties
+are load-bearing:
+
+- **Only additions are delayed.** The filter runs on every pass over the
+  same capped live rows the full feed was just rendered from, so an address
+  that expires (step 5) or is newly allowlisted (step 6, `Runner.unlist`)
+  leaves both feeds on the same pass. Delaying removals too — a copy of the
+  full feed frozen once a day — would make the free tier the one that keeps
+  blocking a legitimate address for up to a day after an operator exempted
+  it, and a wrong entry is exactly what removal exists to correct.
+- **It is derived from `first_listed_at`, not from state kept in memory.**
+  `first_listed_at` is stored and survives a restart, so the basic feed
+  after a restart is the same set as before it. A once-a-day in-memory copy
+  would be empty at startup and refilled from the live list, handing every
+  subscriber the full feed each time `threatd` restarted. An entry that
+  expires and is later promoted again gets a new `first_listed_at` and
+  waits for the next boundary again — correct, since it was off the list.
+- **The delay is part of the rule.** `Rule.Delay` is set only on the basic
+  snapshot and renders into the header as `… / new entries every 24h0m0s`;
+  since the `ETag` hashes the rule, the two feeds never share a tag even when
+  their entry sets agree, so a cache keyed on it cannot answer one feed's
+  poll with the other's body.
+
+`BLOCKLIST_BASIC_INTERVAL` is validated positive at startup: a zero
+interval would publish every entry the pass that lists it — the full feed,
+without the entitlement. `BasicCutoff` also fails closed on its own (a
+non-positive interval yields an empty basic feed), so a caller that skips
+the startup check cannot leak the live list. Boundaries are epoch multiples
+of the interval, so only an interval that divides 24h refreshes at fixed
+times of day.
+
+**The basic feed carries persistent attackers, by construction.** An entry
+expires `BLOCKLIST_TTL` after its last report, and it reaches the basic feed
+only at the next boundary. With the defaults (both 24h) an address reported
+for a few minutes and then never again is on the basic feed for at most the
+gap between its listing time-of-day and midnight — possibly minutes — while
+one the fleet keeps reporting stays on it. That is accepted rather than
+worked around: lengthening the basic feed's TTL would publish addresses the
+full feed has already dropped, and short-lived attacks are exactly what the
+live feed is for.
+
+**This route needs only a subscription.** It has no Traefik router of its
+own: `/blocklist/v1/basic-feed` and `/blocklist/crowdsec/v1/basic-feed`
+fall under the subscription-only `blocklist-api` and
+`blocklist-crowdsec-api` `PathPrefix` routers, because the entitled routers
+match the exact `Path`s `/feed` and `/allowlist-requests` and nothing else.
+That is deliberate, and it is why a new consumer route must never be added to
+the entitled routers by prefix.
 
 ### Sizing ingest: `POST /v1/reports` (public path `/sizing/v1/reports`)
 
@@ -2144,7 +2216,7 @@ run.
 | Failure | Consequence |
 |---|---|
 | validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window. A stale entry replays as the verdict it was, so an unentitled node stays `403` rather than being promoted by an outage |
-| subscriber without the Threat Shield entitlement | `403` on the feed and `allowlist-requests` of the base URL whose entitlement it lacks (`/blocklist/v1/`: `ng-blacklist`; `/blocklist/crowdsec/v1/`: `crowdsec-advanced-threat-shield`), never `401`; `events` is unaffected on either, so the node keeps contributing to consensus while it cannot consume it |
+| subscriber without the Threat Shield entitlement | `403` on the feed and `allowlist-requests` of the base URL whose entitlement it lacks (`/blocklist/v1/`: `ng-blacklist`; `/blocklist/crowdsec/v1/`: `crowdsec-advanced-threat-shield`), never `401`; `events` and `basic-feed` are unaffected on either, so the node keeps contributing to consensus and still consumes the list, only with new addresses up to `BLOCKLIST_BASIC_INTERVAL` late |
 | `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
 | LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
 | `LLM_SERVICE_TIER` capacity unavailable (a `429` from the provider) | the call is repeated once without the tier, at the standard price (and the cost ledger prices it so, from the answer's `service_tier`), rather than handed back as a transient error: a failed window is analysed again only if the edge happens to resend it |
@@ -2306,10 +2378,13 @@ is the only user today — every subscriber posts ban decisions through
 `POST /blocklist/v1/events`, but `GET /blocklist/v1/feed` and
 `POST /blocklist/v1/allowlist-requests` are routed through a second
 `forwardAuth` middleware pointing at `/auth/service/ng-blacklist`. Reporting
-and consuming are different privileges: narrowing the reporting pool to
-entitled nodes would shrink the evidence base that promotion's
-three-distinct-systems rule is measured against, while leaving the feed open
-would give away the thing being sold.
+and consuming the live list are different privileges: narrowing the reporting
+pool to entitled nodes would shrink the evidence base that promotion's
+three-distinct-systems rule is measured against, while leaving the live feed
+open would give away the thing being sold. What is sold is freshness, not
+access: `GET /blocklist/v1/basic-feed` stays on the subscription check and
+serves the same list with new addresses up to a day late (see "Basic feed"
+under Request flow).
 
 **Two clients, two entitlements, two base URLs.** NethSecurity firewalls carry
 `ng-blacklist` and call `/blocklist/v1/`; NS8 CrowdSec nodes carry
@@ -2317,14 +2392,14 @@ would give away the thing being sold.
 `forwardAuth` middleware takes one address, so one route cannot accept either
 entitlement, and NethSecurity's client is not ours to change: the NS8 nodes
 got their own path, with its own middleware, instead. Both paths reach the same
-`threatd` handlers and the same snapshot. In `deploy/traefik/dynamic.yaml.tmpl`:
+`threatd` handlers and the same two snapshots. In `deploy/traefik/dynamic.yaml.tmpl`:
 
 | router | match | check | priority |
 |---|---|---|---|
 | `blocklist-entitled` | `Path` `/blocklist/v1/feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` | 250 |
 | `blocklist-crowdsec-entitled` | `Path` `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` | 250 |
-| `blocklist-crowdsec-api` | `PathPrefix` `/blocklist/crowdsec/v1/` (events) | subscription | 200 |
-| `blocklist-api` | `PathPrefix` `/blocklist/v1/` (events) | subscription | 200 |
+| `blocklist-crowdsec-api` | `PathPrefix` `/blocklist/crowdsec/v1/` (events, basic-feed) | subscription | 200 |
+| `blocklist-api` | `PathPrefix` `/blocklist/v1/` (events, basic-feed) | subscription | 200 |
 | `blocklist-crowdsec-fence` | rest of `/blocklist/crowdsec` | subscription | 150 |
 | `blocklist-ui` | `PathPrefix` `/blocklist` | operator BasicAuth | 100 |
 
@@ -2335,7 +2410,10 @@ from either client. That full strip is why `blocklist-crowdsec-api` stops at
 `METRICS_SCRAPER` only. The fence covers what is left, so nothing under
 `/blocklist/crowdsec` falls through to `blocklist-ui`, where a node's system
 credential would meet the operator BasicAuth. It strips only `/blocklist`, so
-`threatd` sees `/crowdsec/...` and answers `404`.
+`threatd` sees `/crowdsec/...` and answers `404`. The entitled routers are
+exact `Path` matches on purpose: `basic-feed` reaches the subscription-only
+`PathPrefix` routers precisely because nothing at priority 250 matches it,
+which a prefix there would break.
 
 Three properties of that design are load-bearing:
 
@@ -2448,7 +2526,11 @@ is tested against a temp-file SQLite store rather than a mock, because the
 grouping *is* the SQL: the boundary cases (two systems do not promote, three
 do; one system reporting three times does not; one system across two
 categories is still one system) cannot be checked against a fake that
-reimplements the query.
+reimplements the query. The basic feed is tested the same way
+(`internal/blocklist/basic_test.go`): a new entry is withheld until the next
+boundary, an allowlisted or expired one leaves both feeds on the same pass,
+every pass runs on a fresh `Runner` and fresh snapshots, as a restarted
+`threatd` would, and the two feeds' `ETag`s differ.
 
 ## Known limits
 
