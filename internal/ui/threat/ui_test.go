@@ -49,6 +49,7 @@ type fakeReader struct {
 	audit            []threatstore.AllowlistAuditRow
 	downloads        []threatstore.FeedDownloadDayRow
 	downloadsSince   atomic.Int64 // the since FeedDownloadStats was last called with
+	downloadsErr     error        // when set, FeedDownloadStats alone returns it
 
 	err error // when set, every method returns this error instead
 
@@ -121,6 +122,9 @@ func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]threatstore.
 
 func (f *fakeReader) FeedDownloadStats(_ context.Context, since int64, _ int) ([]threatstore.FeedDownloadDayRow, error) {
 	f.downloadsSince.Store(since)
+	if f.downloadsErr != nil {
+		return nil, f.downloadsErr
+	}
 	return f.downloads, f.err
 }
 
@@ -506,6 +510,30 @@ func TestStatsPageShowsFeedDownloads(t *testing.T) {
 	empty := get(t, newTestServerWithFeed(t, threatReader(), nil), "/stats").Body.String()
 	if !strings.Contains(empty, "no feed downloads recorded yet") {
 		t.Fatal("/stats with no downloads should say so")
+	}
+}
+
+// The feed-download table is a side table: when it cannot be read, /stats
+// still renders the daily totals and the ingest accounting, and says the
+// download numbers are unavailable instead of failing the whole page.
+func TestStatsPageDegradesWhenFeedDownloadsFail(t *testing.T) {
+	r := threatReader()
+	r.downloadsErr = errStore
+	rec := get(t, newTestServerWithFeed(t, r, nil), "/stats")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/stats status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Feed download stats unavailable") {
+		t.Fatalf("/stats should say feed downloads are unavailable:\n%s", body)
+	}
+	if strings.Contains(body, "no feed downloads recorded yet") {
+		t.Fatal("/stats should not claim no downloads were recorded when the read failed")
+	}
+	for _, want := range []string{"crowdsecurity/ssh-bf", "Ingest accounting", "sys-1"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/stats is missing %q after a feed-download failure:\n%s", want, body)
+		}
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"context"
 	"embed"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -485,9 +486,11 @@ type statsPageData struct {
 	Daily  []dayGroup
 	Ingest []threatstore.ThreatIngestRow
 	// Downloads is the feed-download table, newest day first; Today marks
-	// the UTC day still in progress.
-	Downloads []threatstore.FeedDownloadDayRow
-	Today     string
+	// the UTC day still in progress. DownloadsFailed replaces the table
+	// with a short note when it could not be read.
+	Downloads       []threatstore.FeedDownloadDayRow
+	DownloadsFailed bool
+	Today           string
 	// ComputedAt is when dailyStats last actually scanned threat_events --
 	// not "now": the cache can be up to statsCacheTTL old. Zero (never
 	// computed) renders nothing, the same convention chrome.FmtTime uses.
@@ -560,18 +563,23 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	since := s.now() - int64(feedDownloadsDays-1)*24*time.Hour.Milliseconds()
+	// The feed-download table degrades on its own: it is a side table, and
+	// failing the page for it would hide the threat totals and the ingest
+	// accounting that were read fine.
 	downloads, err := s.reader.FeedDownloadStats(r.Context(), since, feedDownloadsLimit)
-	if err != nil {
-		s.chrome.StoreError(w, "stats", err)
-		return
+	downloadsFailed := err != nil
+	if downloadsFailed {
+		slog.Error("ui: feed download stats failed", "page", "stats", "error", err)
+		downloads = nil
 	}
 	s.chrome.Render(w, "stats.html", statsPageData{
-		PageData:   s.chrome.PageData(r, "stats"),
-		Daily:      daily,
-		Ingest:     ingest,
-		Downloads:  downloads,
-		Today:      threatstore.DayString(s.now()),
-		ComputedAt: computedAt,
+		PageData:        s.chrome.PageData(r, "stats"),
+		Daily:           daily,
+		Ingest:          ingest,
+		Downloads:       downloads,
+		DownloadsFailed: downloadsFailed,
+		Today:           threatstore.DayString(s.now()),
+		ComputedAt:      computedAt,
 	})
 }
 

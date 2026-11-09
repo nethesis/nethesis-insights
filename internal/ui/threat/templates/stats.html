@@ -47,6 +47,9 @@ five minutes.{{end}}</small></p>
 add-on, basic: every other subscriber), and how often they got the list or
 were told their copy was still current; today's numbers catch up every few
 minutes.</small></p>
+{{if .DownloadsFailed}}
+<p>Feed download stats unavailable right now.</p>
+{{else}}
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
@@ -69,6 +72,7 @@ minutes.</small></p>
 </tbody>
 </table>
 </figure>
+{{end}}
 
 <h2>Ingest accounting</h2>
 <p><small>What each node contributed, and what was dropped before storage.
