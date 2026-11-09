@@ -45,8 +45,9 @@ five minutes.{{end}}</small></p>
 <h2>Feed downloads</h2>
 <p><small>How many machines fetched each feed per day (full: Threat Shield
 add-on, basic: every other subscriber), and how often they got the list or
-were told their copy was still current; today's numbers catch up every few
-minutes.</small></p>
+were told their copy was still current. A machine counts only if it got one
+of those two answers; Requests counts every request, refused ones included.
+Today's numbers catch up every few minutes.</small></p>
 {{if .DownloadsFailed}}
 <p>Feed download stats unavailable right now.</p>
 {{else}}

@@ -109,9 +109,9 @@ func (s *Store) Init(ctx context.Context) error {
 		// This table ACCUMULATES, like threat_ingest_daily: every
 		// AddFeedDownloads adds its counts to the row, it never overwrites
 		// one, because each flush carries only what was counted since the
-		// previous one (see blocklist.Downloads). COUNT(DISTINCT system_id)
-		// per (day, feed) is the adoption number; system_id is the
-		// forwarded, already-authenticated Basic username. Pruned with
+		// previous one (see blocklist.Downloads). The distinct systems per
+		// (day, feed) that got the list or a 304 are the adoption number;
+		// system_id is the forwarded, already-authenticated Basic username. Pruned with
 		// threat_ingest_daily, on THREAT_INGEST_RETENTION.
 		`CREATE TABLE IF NOT EXISTS threat_feed_downloads_daily (
 			day TEXT,
@@ -473,7 +473,11 @@ func (s *Store) AddFeedDownloads(ctx context.Context, rows []FeedDownloadRow) er
 }
 
 // FeedDownloadDayRow is one (day, feed) total: how many distinct systems
-// polled the feed that day, and the summed counts across them.
+// received the feed that day -- the list or a not-modified answer -- and
+// the summed counts across every system that asked. Systems is the
+// adoption number, so a system whose every request was refused (a 503
+// before the first pass, say) or was a HEAD is not in it; Requests still
+// counts those requests.
 type FeedDownloadDayRow struct {
 	Day, Feed   string
 	Systems     int
@@ -494,7 +498,9 @@ type FeedDownloadDayRow struct {
 // render. WHERE day >= ? is a range on the primary key's leading column.
 func (s *Store) FeedDownloadStats(ctx context.Context, since int64, limit int) ([]FeedDownloadDayRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT day, feed, COUNT(DISTINCT system_id), SUM(requests), SUM(downloads), SUM(not_modified)
+		SELECT day, feed,
+		       COUNT(DISTINCT CASE WHEN downloads + not_modified > 0 THEN system_id END),
+		       SUM(requests), SUM(downloads), SUM(not_modified)
 		FROM threat_feed_downloads_daily
 		WHERE day >= ?
 		GROUP BY day, feed

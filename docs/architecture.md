@@ -762,8 +762,12 @@ persisted count: it counts, per UTC day, feed and `system_id`, every request
 never a `HEAD`) and the `304`s (`not_modified`); a `401` or `405` has no
 `system_id` and is not attributed. The consensus pass flushes it into
 `threat_feed_downloads_daily` with `ON CONFLICT … DO UPDATE` **adding** the
-counts, and `/stats` reads `COUNT(DISTINCT system_id)` per day and feed —
-the adoption number for each tier. That read is bounded to the 30 days the
+counts, and `/stats` reads, per day and feed, the distinct systems that
+received the feed — `COUNT(DISTINCT CASE WHEN downloads + not_modified > 0
+THEN system_id END)`, the adoption number for each tier. A system whose
+every request that day was a `503` (no snapshot yet, as right after a
+restart) or a `HEAD` asked but took nothing, so it is not counted; its
+requests still are, in the `requests` sum. That read is bounded to the 30 days the
 page shows (`WHERE day >= ?`, a range on the primary key), never the whole
 retained table: at fleet scale that is about half a million rows, `LIMIT`
 applies only after `GROUP BY` has folded all of them, and the store's one

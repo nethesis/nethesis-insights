@@ -124,3 +124,33 @@ func TestFeedDownloadStatsSkipsDaysBeforeSince(t *testing.T) {
 		t.Fatalf("got %+v,\nwant %+v", got, want)
 	}
 }
+
+// Machines is the adoption number: a system counts only on a day it got the
+// list or a not-modified answer. One that only ever got a 503 (threatd just
+// restarted, no pass yet) or only sent a HEAD did not take the feed, so it
+// is not a machine -- but its requests still count.
+func TestFeedDownloadStatsCountsOnlySystemsThatReceivedTheFeed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.AddFeedDownloads(ctx, []FeedDownloadRow{
+		{Day: "2026-11-09", Feed: "full", SystemID: "sys-ok", Requests: 2, Downloads: 1, NotModified: 1},
+		{Day: "2026-11-09", Feed: "full", SystemID: "sys-304", Requests: 1, NotModified: 1},
+		{Day: "2026-11-09", Feed: "full", SystemID: "sys-503", Requests: 4},
+		{Day: "2026-11-09", Feed: "basic", SystemID: "sys-503", Requests: 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FeedDownloadDayRow{
+		{Day: "2026-11-09", Feed: "basic", Systems: 0, Requests: 3},
+		{Day: "2026-11-09", Feed: "full", Systems: 2, Requests: 7, Downloads: 1, NotModified: 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v,\nwant %+v", got, want)
+	}
+}
