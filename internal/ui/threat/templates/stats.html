@@ -42,6 +42,34 @@ five minutes.{{end}}</small></p>
 </table>
 </figure>
 
+<h2>Feed downloads</h2>
+<p><small>How many machines fetched each feed per day (full: Threat Shield
+add-on, basic: every other subscriber), and how often they got the list or
+were told their copy was still current; today's numbers catch up every few
+minutes.</small></p>
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">Day (UTC)</th><th scope="col">Feed</th><th scope="col" class="num">Machines</th>
+<th scope="col" class="num">Downloads</th><th scope="col" class="num">Not modified</th><th scope="col" class="num">Requests</th></tr>
+</thead>
+<tbody>
+{{range .Downloads}}
+<tr>
+<td class="mono">{{.Day}}{{if eq .Day $.Today}} <small>(today, still in progress)</small>{{end}}</td>
+<td>{{.Feed}}</td>
+<td class="num">{{.Systems}}</td>
+<td class="num">{{.Downloads}}</td>
+<td class="num">{{.NotModified}}</td>
+<td class="num">{{.Requests}}</td>
+</tr>
+{{else}}
+<tr><td colspan="6">no feed downloads recorded yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+
 <h2>Ingest accounting</h2>
 <p><small>What each node contributed, and what was dropped before storage.
 Ingest is fail-open on content: a malformed decision is dropped and counted,

@@ -45,6 +45,10 @@ type Reader interface {
 	// -- so the caller caches it; see dailyStatsCache.
 	ThreatDailyStats(ctx context.Context) ([]threatstore.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]threatstore.ThreatIngestRow, error)
+	// FeedDownloadStats backs /stats' feed-download table: one row per day
+	// and feed, read from the small per-system daily table the consensus
+	// pass flushes into -- cheap enough not to need dailyStats' cache.
+	FeedDownloadStats(ctx context.Context, limit int) ([]threatstore.FeedDownloadDayRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]threatstore.AllowlistRow, error)
 
@@ -114,6 +118,8 @@ const (
 	threatEventsDefLim = 50
 	threatEventsMaxLim = 500
 	threatStatsLimit   = 200
+	// Thirty days of both feeds.
+	feedDownloadsLimit = 60
 	allowlistReqLimit  = 200
 	auditLimit         = 500
 )
@@ -473,6 +479,10 @@ type statsPageData struct {
 	chrome.PageData
 	Daily  []dayGroup
 	Ingest []threatstore.ThreatIngestRow
+	// Downloads is the feed-download table, newest day first; Today marks
+	// the UTC day still in progress.
+	Downloads []threatstore.FeedDownloadDayRow
+	Today     string
 	// ComputedAt is when dailyStats last actually scanned threat_events --
 	// not "now": the cache can be up to statsCacheTTL old. Zero (never
 	// computed) renders nothing, the same convention chrome.FmtTime uses.
@@ -544,10 +554,17 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "stats", err)
 		return
 	}
+	downloads, err := s.reader.FeedDownloadStats(r.Context(), feedDownloadsLimit)
+	if err != nil {
+		s.chrome.StoreError(w, "stats", err)
+		return
+	}
 	s.chrome.Render(w, "stats.html", statsPageData{
 		PageData:   s.chrome.PageData(r, "stats"),
 		Daily:      daily,
 		Ingest:     ingest,
+		Downloads:  downloads,
+		Today:      threatstore.DayString(s.now()),
 		ComputedAt: computedAt,
 	})
 }

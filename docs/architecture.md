@@ -711,7 +711,10 @@ load-bearing:
    day forever and every `GET /systems` aggregates the whole thing. The two
    retentions are independent on purpose: a system that has gone quiet
    should still show up on `/systems` for a while after its raw sightings
-   have already aged out of `threat_events`.
+   have already aged out of `threat_events`. The same step flushes the
+   in-memory feed-download counts (`blocklist.Downloads.Flush`, see "Feed
+   downloads" below) and then prunes `threat_feed_downloads_daily` on the
+   same retention: both are per-system daily accounting, read on `/stats`.
 9. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
@@ -740,11 +743,39 @@ load-bearing:
 
 An error in steps 1–6 or 10 aborts the pass and returns (if the full feed
 generated and the basic one did not, the basic feed keeps its previous
-snapshot, like any failed pass); all three prunes (7, 8, 9) are logged and
-skipped instead, because housekeeping must not stop the feed reflecting
+snapshot, like any failed pass); all three prunes (7, 8, 9) and the
+feed-download flush are logged and skipped instead, because housekeeping must not stop the feed reflecting
 promotions already made. A malformed allowlist row is the
 one housekeeping-shaped thing that *does* abort: skipping it would fail open
 and publish an address someone had explicitly excluded.
+
+### Feed downloads: counted in memory, flushed on the pass
+
+Both feed handlers report every answer through `Config.FeedServed`, which
+`threatd` wires to two counters. `threatd_feed_requests_total{feed,code}`
+is the live rate, with every `(feed, code)` the handler can answer
+(`api/threat.FeedCodes`) pre-created at 0. `blocklist.Downloads` is the
+persisted one: it counts, per UTC day, feed and `system_id`, every request
+(`requests`), the full-body answers (`downloads`: a `GET` answered `200`,
+never a `HEAD`) and the `304`s (`not_modified`); a `401` or `405` has no
+`system_id` and is not attributed. The consensus pass flushes it into
+`threat_feed_downloads_daily` with `ON CONFLICT … DO UPDATE` **adding** the
+counts, and `/stats` reads `COUNT(DISTINCT system_id)` per day and feed —
+the adoption number for each tier.
+
+Counting in memory rather than writing per request is the point: ~2700
+nodes polling every few minutes would put one write per poll on the single
+SQLite writer that ingest and the consensus pass already share, and a feed
+answer that waits on the database would undo `Snapshot`'s promise that
+serving never touches it. The price is that a crash loses at most one
+consensus interval of counts; `threatd` flushes once more on a graceful
+shutdown, after the HTTP servers and the consensus loop have stopped, so a
+restart loses nothing. A failed flush merges its batch back for the next
+pass instead of dropping it. The map is bounded at
+`blocklist.MaxDownloadKeys` keys between flushes — far above two feeds
+times the fleet — so nothing a client sends can grow it without limit;
+a request past the bound still counts on the Prometheus counter, and the
+flush logs how many were dropped from the daily table.
 
 ### Feed: `GET /v1/feed` (public path `/blocklist/v1/feed`)
 
@@ -1208,6 +1239,7 @@ without a goroutine to leak.
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
+| `threat_feed_downloads_daily` | Per day, feed (`full`, `basic`) and system: feed requests, full-body downloads and `304`s. **Accumulates** — each flush of `blocklist.Downloads` adds what was counted since the previous one. Pruned with `threat_ingest_daily` on `THREAT_INGEST_RETENTION`. |
 | `sizing_node_daily` | One node-day of measurements plus the derived `pressure`, its four axis penalties, `pressure_reasons` and `pressure_version`. Keyed `(system_id, node_id, day)` — a `system_id` is a *cluster*, so one report writes N rows. Every measurement column is nullable and `NULL` means **not measured**, never zero. |
 | `sizing_module_daily` | One module family per node-day: `instances`, plus a display-only `facts_ok` and `versions` JSON array. Nothing derived reads either. |
 | `sizing_module_metric` | The open workload map, **normalised to rows** so the cohort pass groups it in SQL. The pass reads a value only through `sizing.IsPlatform`, which decides whether a family is ignorable when testing "solo" (samba's answer turns on its share count). A JSON blob would force ~1.4M rows through the single-writer connection and a JSON parse each, hourly. |

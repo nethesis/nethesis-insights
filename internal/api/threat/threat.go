@@ -172,7 +172,7 @@ type threatIngestResponse struct {
 // reads it as a file, `cscli decisions import --format values` reads it as a
 // list.
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	s.serveFeed(w, r, s.snap)
+	s.serveFeed(w, r, blocklist.FeedFull, s.snap)
 }
 
 // handleBasicFeed serves the basic feed: the same list, publishing each new
@@ -181,18 +181,32 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 // differs is the Traefik route in front of it, which checks only the system
 // credential, never an entitlement.
 func (s *server) handleBasicFeed(w http.ResponseWriter, r *http.Request) {
-	s.serveFeed(w, r, s.basic)
+	s.serveFeed(w, r, blocklist.FeedBasic, s.basic)
 }
 
-func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, snap *blocklist.Snapshot) {
+// serveFeed answers one feed request and reports the answer to
+// Config.FeedServed.
+func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, feed string, snap *blocklist.Snapshot) {
+	req := FeedRequest{Feed: feed}
+	req.Code, req.SystemID = s.writeFeed(w, r, snap)
+	req.Body = req.Code == http.StatusOK && r.Method == http.MethodGet
+	if s.cfg.FeedServed != nil {
+		s.cfg.FeedServed(req)
+	}
+}
+
+// writeFeed writes the response and returns its status code and the
+// requesting system_id ("" when there is none).
+func (s *server) writeFeed(w http.ResponseWriter, r *http.Request, snap *blocklist.Snapshot) (int, string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+		return http.StatusMethodNotAllowed, ""
 	}
 
-	if _, err := httpx.SystemID(r, s.trusted); err != nil {
+	systemID, err := httpx.SystemID(r, s.trusted)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
+		return http.StatusUnauthorized, ""
 	}
 
 	var view blocklist.View
@@ -204,7 +218,7 @@ func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, snap *blockli
 		// threats" to every client that imports it, which silently disables
 		// protection -- so refuse instead.
 		reject(w, r, http.StatusServiceUnavailable, "blocklist not generated yet")
-		return
+		return http.StatusServiceUnavailable, systemID
 	}
 
 	etag := view.ETag
@@ -216,7 +230,7 @@ func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, snap *blockli
 	// polls.
 	if matchesETag(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
-		return
+		return http.StatusNotModified, systemID
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -227,9 +241,10 @@ func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, snap *blockli
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
-		return
+		return http.StatusOK, systemID
 	}
 	_, _ = w.Write(body)
+	return http.StatusOK, systemID
 }
 
 // sourceAddr extracts the reporter's real address as httpx.ClientIP resolved

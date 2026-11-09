@@ -124,6 +124,29 @@ type Config struct {
 	// reporter sends it again, and counting it twice would inflate the
 	// rate.
 	Events func(model.ThreatCounters)
+
+	// FeedServed, when set, is told about every answer either feed handler
+	// gives -- threatd wires it to threatd_feed_requests_total and to the
+	// in-memory daily download counts (blocklist.Downloads).
+	FeedServed func(FeedRequest)
+}
+
+// FeedCodes is every status code a feed handler answers with, for
+// pre-creating threatd_feed_requests_total's children at 0.
+var FeedCodes = []int{
+	http.StatusOK, http.StatusNotModified, http.StatusUnauthorized,
+	http.StatusMethodNotAllowed, http.StatusServiceUnavailable,
+}
+
+// FeedRequest is one answered feed request. Feed is blocklist.FeedFull or
+// blocklist.FeedBasic. SystemID is empty when the request carried none (the
+// 401 and the 405, which is checked first). Body is true only when the list
+// itself was sent: a GET answered 200, never a HEAD.
+type FeedRequest struct {
+	Feed     string
+	SystemID string
+	Code     int
+	Body     bool
 }
 
 func defaultNow() int64 { return time.Now().UnixMilli() }

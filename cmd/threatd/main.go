@@ -312,7 +312,13 @@ func main() {
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
 	basicSnapshot := blocklist.NewSnapshot()
-	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg)
+	// Feed polls are counted in memory per day, feed and system, and the
+	// consensus pass flushes them to threat_feed_downloads_daily: a write
+	// per poll would put the whole fleet's polling on the single writer.
+	downloads := blocklist.NewDownloads()
+	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg).WithDownloads(downloads)
+	feedNames := []string{blocklist.FeedFull, blocklist.FeedBasic}
+	feedMetrics := metrics.NewFeedRequests(reg, feedNames, threatapi.FeedCodes)
 
 	// The queue's handler is bound to the store here, before either the queue
 	// or the API server exists: the queue's handler must be fixed at
@@ -326,7 +332,7 @@ func main() {
 		metrics.StoreGauge{Name: "active_systems", Help: "Distinct systems with a threat event observed in the last 24 hours."},
 		metrics.StoreGauge{Name: "regular_systems", Help: "Distinct systems that reported on at least 2 of the last 7 UTC days, today included."},
 		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in each published blocklist feed: full (the entitled /v1/feed) and basic (/v1/basic-feed).",
-			Label: "feed", Values: []string{"full", "basic"}},
+			Label: "feed", Values: feedNames},
 	)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, basicSnapshot, trusted, threatapi.Config{
@@ -338,6 +344,10 @@ func main() {
 			for i, n := range c.ByResult() {
 				eventMetrics.Add(model.ThreatCounterResults[i], n)
 			}
+		},
+		FeedServed: func(fr threatapi.FeedRequest) {
+			feedMetrics.Inc(fr.Feed, fr.Code)
+			downloads.Record(time.Now().UnixMilli(), fr.Feed, fr.SystemID, fr.Code, fr.Body)
 		},
 	}, metrics.Handler(reg), httpMetrics)
 
@@ -447,6 +457,14 @@ func main() {
 	stopConsensus()
 	<-consensusDone
 	slog.Info("consensus loop stopped")
+
+	// Last, once no request and no pass can record or flush any more: the
+	// feed-download counts since the last pass would otherwise be lost.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFlush()
+	if _, err := downloads.Flush(flushCtx, s); err != nil {
+		slog.Error("final feed download flush failed", "error", err)
+	}
 }
 
 // threatd_regular_systems counts a system that reported on at least
@@ -485,8 +503,8 @@ func threatGauges(s activeSystemsReader, full, basic *blocklist.Snapshot, g *met
 		}
 		if f, b := full.View(), basic.View(); f.Ready && b.Ready {
 			reading["blocklist_entries"] = map[string]float64{
-				"full":  float64(f.Entries),
-				"basic": float64(b.Entries),
+				blocklist.FeedFull:  float64(f.Entries),
+				blocklist.FeedBasic: float64(b.Entries),
 			}
 		}
 		g.Set(reading)

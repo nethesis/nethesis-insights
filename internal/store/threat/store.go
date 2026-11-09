@@ -105,6 +105,23 @@ func (s *Store) Init(ctx context.Context) error {
 			truncated INTEGER,
 			PRIMARY KEY (day, system_id)
 		)`,
+		// Feed downloads per UTC day, feed ("full", "basic") and system.
+		// This table ACCUMULATES, like threat_ingest_daily: every
+		// AddFeedDownloads adds its counts to the row, it never overwrites
+		// one, because each flush carries only what was counted since the
+		// previous one (see blocklist.Downloads). COUNT(DISTINCT system_id)
+		// per (day, feed) is the adoption number; system_id is the
+		// forwarded, already-authenticated Basic username. Pruned with
+		// threat_ingest_daily, on THREAT_INGEST_RETENTION.
+		`CREATE TABLE IF NOT EXISTS threat_feed_downloads_daily (
+			day TEXT,
+			feed TEXT,
+			system_id TEXT,
+			requests INTEGER,
+			downloads INTEGER,
+			not_modified INTEGER,
+			PRIMARY KEY (day, feed, system_id)
+		)`,
 
 		// --- Allowlist management ---
 		//
@@ -408,6 +425,107 @@ func (s *Store) RecordIngestCounters(ctx context.Context, day, systemID string, 
 		return fmt.Errorf("store: record ingest counters: %w", err)
 	}
 	return nil
+}
+
+// FeedDownloadRow is one system's feed polls on one UTC day: every request
+// that reached the feed handler with a system_id, the full-body downloads
+// (200 on GET) and the not-modified answers (304) among them.
+type FeedDownloadRow struct {
+	Day, Feed, SystemID string
+	Requests            int64
+	Downloads           int64
+	NotModified         int64
+}
+
+// AddFeedDownloads adds a batch of counts to threat_feed_downloads_daily in
+// one transaction. It adds, never overwrites: a row already stored for the
+// same (day, feed, system_id) is incremented by the batch's counts.
+func (s *Store) AddFeedDownloads(ctx context.Context, rows []FeedDownloadRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: add feed downloads: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, r := range rows {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO threat_feed_downloads_daily (day, feed, system_id, requests, downloads, not_modified)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(day, feed, system_id) DO UPDATE SET
+				requests = threat_feed_downloads_daily.requests + excluded.requests,
+				downloads = threat_feed_downloads_daily.downloads + excluded.downloads,
+				not_modified = threat_feed_downloads_daily.not_modified + excluded.not_modified
+		`, r.Day, r.Feed, r.SystemID, r.Requests, r.Downloads, r.NotModified); err != nil {
+			return fmt.Errorf("store: add feed downloads: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit feed downloads: %w", err)
+	}
+	return nil
+}
+
+// FeedDownloadDayRow is one (day, feed) total: how many distinct systems
+// polled the feed that day, and the summed counts across them.
+type FeedDownloadDayRow struct {
+	Day, Feed   string
+	Systems     int
+	Requests    int64
+	Downloads   int64
+	NotModified int64
+}
+
+// FeedDownloadStats returns per-day, per-feed totals, newest day first and
+// "basic" before "full" within a day. limit counts (day, feed) rows;
+// limit <= 0 applies defaultListLimit.
+func (s *Store) FeedDownloadStats(ctx context.Context, limit int) ([]FeedDownloadDayRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT day, feed, COUNT(DISTINCT system_id), SUM(requests), SUM(downloads), SUM(not_modified)
+		FROM threat_feed_downloads_daily
+		GROUP BY day, feed
+		ORDER BY day DESC, feed
+		LIMIT ?
+	`, clampLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: feed download stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := []FeedDownloadDayRow{}
+	for rows.Next() {
+		var r FeedDownloadDayRow
+		if err := rows.Scan(&r.Day, &r.Feed, &r.Systems, &r.Requests, &r.Downloads, &r.NotModified); err != nil {
+			return nil, fmt.Errorf("store: scan feed download stats: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// PruneFeedDownloadsDaily drops feed-download rows for days older than
+// olderThan and returns how many went. The consensus pass calls it with
+// THREAT_INGEST_RETENTION, the same window as PruneThreatIngestDaily, and
+// compares the day key as a string for the same reason.
+func (s *Store) PruneFeedDownloadsDaily(ctx context.Context, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_feed_downloads_daily WHERE day < ?`, DayString(olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("store: prune feed downloads daily: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune feed downloads daily rows: %w", err)
+	}
+	return int(n), nil
 }
 
 // ConsensusCandidates returns every (attacker_ip, scenario, system_id) triple

@@ -647,6 +647,12 @@ func (f *failingReader) PruneThreatIngestDaily(context.Context, int64) (int, err
 	}
 	return 0, nil
 }
+func (f *failingReader) PruneFeedDownloadsDaily(context.Context, int64) (int, error) {
+	return 0, nil
+}
+func (f *failingReader) AddFeedDownloads(context.Context, []threatstore.FeedDownloadRow) error {
+	return nil
+}
 func (f *failingReader) PruneAllowlistRequests(context.Context, int64) (int, error) {
 	if f.failRequestPrune {
 		return 0, errBoom

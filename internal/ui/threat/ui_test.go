@@ -47,6 +47,7 @@ type fakeReader struct {
 	allowlist        []threatstore.AllowlistRow
 	allowlistRequest []threatstore.AllowlistRequestRow
 	audit            []threatstore.AllowlistAuditRow
+	downloads        []threatstore.FeedDownloadDayRow
 
 	err error // when set, every method returns this error instead
 
@@ -115,6 +116,10 @@ func (f *fakeReader) ThreatDailyStats(_ context.Context) ([]threatstore.ThreatDa
 
 func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]threatstore.ThreatIngestRow, error) {
 	return f.threatIngest, f.err
+}
+
+func (f *fakeReader) FeedDownloadStats(_ context.Context, _ int) ([]threatstore.FeedDownloadDayRow, error) {
+	return f.downloads, f.err
 }
 
 func (f *fakeReader) ListThreatSystems(_ context.Context) ([]threatstore.ThreatSystemRow, error) {
@@ -466,6 +471,35 @@ func TestBothFeedsAreShownOnBothPages(t *testing.T) {
 	}
 	if body := get(t, h, "/").Body.String(); !strings.Contains(body, "Not generated yet") || !strings.Contains(body, "4242") {
 		t.Fatalf("/ should show the full feed and a not-generated basic one:\n%s", body)
+	}
+}
+
+// /stats shows the feed-download table: one row per day and feed, with the
+// distinct machines (the adoption number) and today marked in progress.
+func TestStatsPageShowsFeedDownloads(t *testing.T) {
+	r := threatReader()
+	r.downloads = []threatstore.FeedDownloadDayRow{
+		{Day: "2026-08-28", Feed: "basic", Systems: 1234, Requests: 99001, Downloads: 4321, NotModified: 94680},
+		{Day: "2026-08-27", Feed: "full", Systems: 567, Requests: 88002, Downloads: 3210, NotModified: 84792},
+	}
+	body := get(t, newTestServerWithFeed(t, r, nil), "/stats").Body.String()
+	for _, want := range []string{
+		"Feed downloads",
+		"1234", "99001", "4321", "94680",
+		"567", "88002", "3210", "84792",
+		"2026-08-28 <small>(today, still in progress)</small>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/stats is missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "2026-08-27 <small>(today") {
+		t.Fatal("/stats marks a finished day as today")
+	}
+
+	empty := get(t, newTestServerWithFeed(t, threatReader(), nil), "/stats").Body.String()
+	if !strings.Contains(empty, "no feed downloads recorded yet") {
+		t.Fatal("/stats with no downloads should say so")
 	}
 }
 

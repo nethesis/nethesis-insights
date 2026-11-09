@@ -30,7 +30,9 @@ type Reader interface {
 	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
 	PruneThreatIngestDaily(ctx context.Context, olderThan int64) (int, error)
+	PruneFeedDownloadsDaily(ctx context.Context, olderThan int64) (int, error)
 	PruneAllowlistRequests(ctx context.Context, olderThan int64) (int, error)
+	DownloadWriter
 }
 
 // MinSystemsFloor is the fewest distinct systems threatd will start with as
@@ -86,16 +88,25 @@ func (c Config) rule() Rule {
 
 // Runner performs one consensus pass.
 type Runner struct {
-	store Reader
-	snap  *Snapshot
-	basic *Snapshot
-	cfg   Config
+	store     Reader
+	snap      *Snapshot
+	basic     *Snapshot
+	downloads *Downloads
+	cfg       Config
 }
 
 // New builds a Runner that regenerates snap on every pass and, when basic
 // is non-nil, the basic feed alongside it (see BasicCutoff).
 func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 	return &Runner{store: r, snap: snap, basic: basic, cfg: cfg}
+}
+
+// WithDownloads makes every pass flush d's feed-download counts to the
+// store, as housekeeping. It returns r for chaining; without it the pass
+// flushes nothing.
+func (r *Runner) WithDownloads(d *Downloads) *Runner {
+	r.downloads = d
+	return r
 }
 
 // BasicCutoff is the latest first_listed_at the basic feed publishes at
@@ -149,8 +160,9 @@ type candidate struct {
 // Order matters twice: the unlist must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it
 // leaves the table, and the snapshot is regenerated last so it reflects the
-// expiries and unlistings this pass performed. The three prunes have no such
-// constraint and sit together as housekeeping.
+// expiries and unlistings this pass performed. The prunes and the
+// feed-download flush have no such constraint and sit together as
+// housekeeping.
 func (r *Runner) Run(ctx context.Context, now int64) error {
 	rows, err := r.store.ConsensusCandidates(ctx, now-r.cfg.Window.Milliseconds())
 	if err != nil {
@@ -197,6 +209,21 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		slog.Error("blocklist: ingest-daily prune failed", "error", err)
 	} else if pruned > 0 {
 		slog.Debug("blocklist: pruned stale ingest-accounting rows", "rows", pruned)
+	}
+
+	// Same convention. Feed-download counts are flushed from memory, then
+	// pruned on the same retention as ingest accounting: both are per-system
+	// daily accounting, read on the same /stats page. A failed flush keeps
+	// its counts in memory for the next pass.
+	if dropped, err := r.downloads.Flush(ctx, r.store); err != nil {
+		slog.Error("blocklist: feed download flush failed", "error", err)
+	} else if dropped > 0 {
+		slog.Warn("blocklist: feed download counts dropped past MaxDownloadKeys", "requests", dropped)
+	}
+	if pruned, err := r.store.PruneFeedDownloadsDaily(ctx, now-r.cfg.IngestRetention.Milliseconds()); err != nil {
+		slog.Error("blocklist: feed-downloads prune failed", "error", err)
+	} else if pruned > 0 {
+		slog.Debug("blocklist: pruned stale feed-download rows", "rows", pruned)
 	}
 
 	// Same convention: logged and skipped, never fatal. A review queue that
