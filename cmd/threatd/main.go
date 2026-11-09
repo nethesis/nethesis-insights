@@ -180,8 +180,8 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	blocklistMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_MAX_ENTRIES", 50000)
 	add(err)
 	// The basic feed, served to every subscriber without an entitlement,
-	// publishes each new address a day after the full feed does: what the
-	// entitlement buys is the list as it stands now.
+	// publishes each new address two days after the full feed does: what
+	// the entitlement buys is the list as it stands now.
 	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 48*time.Hour)
 	add(err)
 	blocklistBasicMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_BASIC_MAX_ENTRIES", 15000)
@@ -312,9 +312,10 @@ func main() {
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
 	basicSnapshot := blocklist.NewSnapshot()
-	// Feed polls are counted in memory per day, feed and system, and the
-	// consensus pass flushes them to threat_feed_downloads_daily: a write
-	// per poll would put the whole fleet's polling on the single writer.
+	// Feed polls are counted in memory per day, feed, client and system,
+	// and the consensus pass flushes them to threat_feed_downloads_daily: a
+	// write per poll would put the whole fleet's polling on the single
+	// writer.
 	downloads := blocklist.NewDownloads()
 	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg).WithDownloads(downloads)
 	feedNames := []string{blocklist.FeedFull, blocklist.FeedBasic}

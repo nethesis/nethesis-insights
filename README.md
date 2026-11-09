@@ -128,6 +128,10 @@ After the next consensus pass (10s here), the address is on the feed:
 
     curl -u sys-a:x 127.0.0.1:9595/v1/feed
 
+`/v1/basic-feed` serves the same list to subscribers without the add-on,
+taking each new address on only `BLOCKLIST_BASIC_DELAY` (48h) later, so it
+stays empty in this test.
+
 ### The edge collector
 
 The client is the NS8 module

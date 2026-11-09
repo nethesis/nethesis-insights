@@ -98,12 +98,12 @@ edge (ns8-insights)      edge (ns8-crowdsec)         edge (ns8-core, leader)
 ┌──────────────────────────────────────────────────────────────────────┐
 │                               Traefik                                 │
 │  strips the pipeline prefix; forwardAuth → authd on every /v1/* route  │
-│  (entitlement variant on the two Threat Shield consumer routes);      │
+│  (entitlement variant on /v1/feed and /v1/allowlist-requests);        │
 │  BasicAuth (ADMIN_API_KEY as the htpasswd password) on every UI path  │
 └──────────┬────────────────────────┬───────────────────────┬──────────┘
            │ /v1/bundles            │ /v1/events            │ /v1/reports
            │ /v1/findings           │ /v1/feed              │
-           │                        │ /v1/basic-feed      │
+           │                        │ /v1/basic-feed        │
            │                        │ /v1/allowlist-requests│
            ▼                        ▼                       ▼
    ┌────────────────┐      ┌─────────────────┐      ┌─────────────────┐
@@ -773,8 +773,9 @@ counts, and `/stats` reads, per day and feed, the distinct systems that
 received the feed — `COUNT(DISTINCT CASE WHEN downloads + not_modified > 0
 THEN system_id END)`, the adoption number for each tier. A system whose
 every request that day was a `503` (no snapshot yet, as right after a
-restart) or a `HEAD` asked but took nothing, so it is not counted; its
-requests still are, in the `requests` sum. That read is bounded to the 30 days the
+restart) or a `HEAD` answered `200` asked but took nothing, so it is not
+counted; its requests still are, in the `requests` sum. A `304` counts
+whatever the method: it confirms the machine holds the current list. That read is bounded to the 30 days the
 page shows (`WHERE day >= ?`, a range on the primary key), never the whole
 retained table: at fleet scale that is about half a million rows, `LIMIT`
 applies only after `GROUP BY` has folded all of them, and the store's one
@@ -869,7 +870,7 @@ The same list for subscribers without the add-on, served by
 `blocklist.Snapshot` that `Runner.Run` fills on every pass. What the
 entitlement buys is the list **as it stands now**; this one publishes each
 new address only once it has been listed for `BLOCKLIST_BASIC_DELAY`
-(default `24h`).
+(default `48h`).
 
 ```
 BasicCutoff(now, delay) = now - delay                    (unix millis)
@@ -877,7 +878,8 @@ basic feed = { live row r : r.first_listed_at <= BasicCutoff(now) }
 ```
 
 The delay is measured from each address's own `first_listed_at`, so every
-new address reaches the basic feed exactly one delay after the full one, and
+new address reaches the basic feed one delay after the full one (on the
+first pass past it), and
 additions land spread across the day as they were promoted. An earlier
 version rounded `now` down to an epoch multiple of the interval instead: the
 real delay was then anywhere from minutes to a whole day, and every pending
@@ -2717,8 +2719,11 @@ loop goes last because none of them holds acknowledged work: a cancelled
 consensus or cohort pass simply leaves the previous snapshot in place, and a
 cancelled maintenance pass simply leaves whatever it has not pruned yet for
 the next run — in each case exactly its designed failure mode, not a special
-case for shutdown. `authd` has no pass loop and no queue, so its shutdown is
-just the HTTP server.
+case for shutdown. `threatd` adds one step after its consensus loop has
+stopped: a last `blocklist.Downloads.Flush`, so the feed-download counts
+recorded since the final pass reach the table (see "Feed downloads").
+`authd` has no pass loop and no queue, so its shutdown is just the HTTP
+server.
 
 ## Testing strategy
 

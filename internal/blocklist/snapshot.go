@@ -66,8 +66,10 @@ type Snapshot struct {
 func NewSnapshot() *Snapshot { return &Snapshot{} }
 
 // Generate renders rows into a new snapshot and swaps it in. Every row is
-// published: BLOCKLIST_MAX_ENTRIES is applied when the rows are chosen (see
-// Runner.Run), and capped records whether that choice left any out.
+// published: the feed's cap (BLOCKLIST_MAX_ENTRIES, or
+// BLOCKLIST_BASIC_MAX_ENTRIES for the basic feed) is applied when the rows
+// are chosen (see Runner.Run), and capped records whether that choice left
+// any out.
 func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, capped bool, now int64) error {
 	addrs := make([]netip.Addr, 0, len(rows))
 	for _, r := range rows {

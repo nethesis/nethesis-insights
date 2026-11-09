@@ -2162,7 +2162,7 @@
       "type": "timeseries",
       "id": 39,
       "title": "Blocklist size",
-      "description": "Addresses in each published feed: full is what nodes with the Threat Shield add-on download, basic what every other subscriber downloads (the same list, each new address a day late). Empty until the first consensus pass after a restart.",
+      "description": "Addresses in each published feed: full is what nodes with the Threat Shield add-on download, basic what every other subscriber downloads (the same list, each new address two days late by default). Empty until the first consensus pass after a restart.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

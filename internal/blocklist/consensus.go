@@ -153,8 +153,9 @@ type candidate struct {
 	lastSeen  int64
 }
 
-// Run executes promote -> expire -> unlist -> prune -> regenerate (the full
-// feed, then the basic one).
+// Run executes promote -> expire -> unlist -> housekeeping (the prunes and
+// the feed-download flush) -> regenerate (the full feed, then the basic
+// one, both from one ListBlocklist read).
 //
 // Order matters twice: the unlist must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it

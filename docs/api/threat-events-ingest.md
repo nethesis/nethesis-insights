@@ -339,7 +339,7 @@ The same feed for a subscriber without the Threat Shield entitlement: same
 format, same headers, same `ETag`/`304`/gzip behaviour, same `503` before the
 first pass and the same client rules. It differs in one way: **a newly listed
 address is added only once it has been listed for two days**
-(`BLOCKLIST_BASIC_DELAY`, `48h`). The delay is measured from each address's
+(`BLOCKLIST_BASIC_DELAY`, `48h` by default). The delay is measured from each address's
 own listing, so an address appears on the first five-minute pass two days
 after it appeared on `feed`, and additions arrive spread through the day, not
 all at once. Since a listing expires a day after its last report, an address

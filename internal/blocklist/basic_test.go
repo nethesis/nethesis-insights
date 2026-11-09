@@ -182,7 +182,7 @@ func TestBasicFeedCarriesAddressesTheFleetKeepsReporting(t *testing.T) {
 
 // Only additions are delayed. An address that expires or is allowlisted
 // leaves both feeds on the same pass: the free tier must not keep blocking
-// it for another day.
+// it for the whole delay.
 func TestBasicFeedRemovalsReachBothFeedsOnTheSamePass(t *testing.T) {
 	cases := []struct {
 		name    string

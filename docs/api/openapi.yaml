@@ -27,7 +27,8 @@ info:
       separately authorised: every subscriber posts events, only a node
       carrying the Threat Shield entitlement may fetch the feed or ask for
       an allowlist entry. Every subscriber may fetch the basic feed: the
-      same list, publishing each new address two days later. The same routes
+      same list, publishing each new address two days later by default
+      (`BLOCKLIST_BASIC_DELAY`). The same routes
       are served twice, once per
       client and entitlement: NethSecurity firewalls call `/blocklist/v1/`
       (`ng-blacklist`), NS8 CrowdSec nodes call `/blocklist/crowdsec/v1/`
@@ -166,7 +167,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.
@@ -261,7 +262,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "405":
           description: Method other than `GET`.
           content:
@@ -373,7 +374,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.
@@ -466,7 +467,7 @@ paths:
               description: Content hash of the feed, e.g. `"sha256-9f2b..."`. Stable across regenerations that produce the same list.
               schema: { type: string }
             Cache-Control:
-              description: "`max-age=900` (matches the default regeneration cadence)."
+              description: "`max-age=900`. The feed itself is regenerated every `BLOCKLIST_CONSENSUS_INTERVAL` (default 5 minutes), so poll with `If-None-Match`."
               schema: { type: string }
             Vary:
               description: "`Accept-Encoding` -- the gzip and plain bodies are cached separately."
@@ -493,12 +494,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             Valid subscription credential, but this system does not carry
             the Threat Shield entitlement. Not retryable, and distinct from
-            `401`: the credential is fine, the entitlement is missing.
+            `401`: the credential is fine, the entitlement is missing. A
+            node without it fetches `basic-feed` instead, which never
+            answers `403`.
           content:
             text/plain:
               schema: { type: string }
@@ -546,8 +549,9 @@ paths:
         addresses already old enough to publish and keeping the most
         recently seen of them.
 
-        The header's rule line ends in `/ new entries after 48h0m0s`, and
-        the two feeds never share an `ETag`.
+        The header's rule line ends in `/ new entries after 48h0m0s` (the
+        configured delay; 48h is the default), and the two feeds never
+        share an `ETag`.
       security:
         - basicAuth: []
       parameters:
@@ -568,7 +572,7 @@ paths:
               schema: { type: string }
               example: |
                 # nethesis threat shield v1
-                # generated: 2026-08-28T10:05:00Z  entries: 1620  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries every 24h0m0s
+                # generated: 2026-08-28T10:05:00Z  entries: 1620  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries after 48h0m0s
                 198.51.100.44
                 203.0.113.12
         "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
@@ -657,7 +661,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             Valid subscription credential, but this system does not carry
@@ -941,7 +945,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.

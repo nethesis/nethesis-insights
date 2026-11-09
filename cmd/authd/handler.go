@@ -47,10 +47,10 @@ var serviceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
 // GET /auth/service/{service} is the same check plus a named entitlement:
 // the proxy points a route's forwardAuth at it when a subscription alone is
 // not enough to use that route. Threat Shield is the first user -- every
-// subscriber reports events through /auth, but only a node carrying its
-// client's entitlement (ng-blacklist for NethSecurity,
-// crowdsec-advanced-threat-shield for NS8 CrowdSec) may fetch the feed or ask
-// for an allowlist entry.
+// subscriber reports events and fetches the basic feed through /auth, but
+// only a node carrying its client's add-on entitlement (ng-blacklist for
+// NethSecurity, crowdsec-advanced-threat-shield for NS8 CrowdSec) may fetch
+// the full feed or ask for an allowlist entry.
 // Both routes share one cache and one upstream; only the URL and the cache
 // key differ (auth.ForwardAuth.Validate).
 //

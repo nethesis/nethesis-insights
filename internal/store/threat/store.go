@@ -499,8 +499,8 @@ func (s *Store) AddFeedDownloads(ctx context.Context, rows []FeedDownloadRow) er
 // received the feed that day -- the list or a not-modified answer -- and
 // the summed counts across every system that asked. Systems is the
 // adoption number, so a system whose every request was refused (a 503
-// before the first pass, say) or was a HEAD is not in it; Requests still
-// counts those requests. A system that called through two clients the
+// before the first pass, say) or was a HEAD answered 200 is not in it;
+// Requests still counts those requests. A 304 counts whatever the method. A system that called through two clients the
 // same day is still one system.
 type FeedDownloadDayRow struct {
 	Day, Feed   string
