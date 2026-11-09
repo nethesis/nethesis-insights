@@ -19,13 +19,17 @@ info:
       problem is never re-raised.
     - **Threat Shield** (`threatd`, prefix `/blocklist`:
       `/blocklist/v1/events`, `/blocklist/v1/feed`,
-      `/blocklist/v1/allowlist-requests`): a separate pipeline with no LLM
+      `/blocklist/v1/basic-feed`, `/blocklist/v1/allowlist-requests`): a
+      separate pipeline with no LLM
       and no fingerprint. Edges report CrowdSec ban decisions; the server
       publishes a fleet-consensus blocklist once an address is independently
       reported by enough distinct systems. Reporting and consuming are
       separately authorised: every subscriber posts events, only a node
       carrying the Threat Shield entitlement may fetch the feed or ask for
-      an allowlist entry. The same three routes are served twice, once per
+      an allowlist entry. Every subscriber may fetch the basic feed: the
+      same list, publishing each new address two days later by default
+      (`BLOCKLIST_BASIC_DELAY`). The same routes
+      are served twice, once per
       client and entitlement: NethSecurity firewalls call `/blocklist/v1/`
       (`ng-blacklist`), NS8 CrowdSec nodes call `/blocklist/crowdsec/v1/`
       (`crowdsec-advanced-threat-shield`). Both reach the same handlers and
@@ -163,7 +167,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.
@@ -258,7 +262,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "405":
           description: Method other than `GET`.
           content:
@@ -370,7 +374,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.
@@ -404,8 +408,9 @@ paths:
       summary: Fetch the fleet-consensus blocklist feed
       description: |
         Plain text, one public attacker address per line, with two comment
-        lines of header. Every subscriber fetches the same global list --
-        there is no per-tier feed and no per-system filtering. `HEAD` is
+        lines of header. Every entitled node fetches the same global list --
+        there is no per-system filtering. Subscribers without the
+        entitlement fetch `/blocklist/v1/basic-feed` instead. `HEAD` is
         also accepted and returns the same headers with no body.
 
         Promotion rule: an address is published once `BLOCKLIST_MIN_SYSTEMS`
@@ -462,7 +467,7 @@ paths:
               description: Content hash of the feed, e.g. `"sha256-9f2b..."`. Stable across regenerations that produce the same list.
               schema: { type: string }
             Cache-Control:
-              description: "`max-age=900` (matches the default regeneration cadence)."
+              description: "`max-age=900`. The feed itself is regenerated every `BLOCKLIST_CONSENSUS_INTERVAL` (default 5 minutes), so poll with `If-None-Match`."
               schema: { type: string }
             Vary:
               description: "`Accept-Encoding` -- the gzip and plain bodies are cached separately."
@@ -489,12 +494,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             Valid subscription credential, but this system does not carry
             the Threat Shield entitlement. Not retryable, and distinct from
-            `401`: the credential is fine, the entitlement is missing.
+            `401`: the credential is fine, the entitlement is missing. A
+            node without it fetches `basic-feed` instead, which never
+            answers `403`.
           content:
             text/plain:
               schema: { type: string }
@@ -516,6 +523,62 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               example: { error: "blocklist not generated yet" }
+
+  /blocklist/v1/basic-feed:
+    get:
+      operationId: getBlocklistBasic
+      tags: [threat-shield]
+      summary: Fetch the basic blocklist feed (no entitlement needed)
+      description: |
+        The feed for subscribers without the Threat Shield entitlement. Same
+        format, caching, `ETag` and never-serve-blank rules as
+        `GET /blocklist/v1/feed`; it needs only the subscription credential
+        every node already uses to post events.
+
+        **Only additions are delayed.** An address is served here once it
+        has been listed for `BLOCKLIST_BASIC_DELAY` (default 48h), measured
+        from its own first listing: each new address reaches this feed on
+        the first consensus pass that long after it reaches
+        `/blocklist/v1/feed`, so additions arrive through the day rather
+        than all at one time.
+        Removals are not delayed: an address
+        that expires or is allowlisted leaves both feeds on the same
+        consensus pass. The feed is still regenerated on every pass, so
+        poll it like the full feed; most polls answer `304`. It is capped
+        at `BLOCKLIST_BASIC_MAX_ENTRIES` (default 15000), applied to the
+        addresses already old enough to publish and keeping the most
+        recently seen of them.
+
+        The header's rule line ends in `/ new entries after 48h0m0s` (the
+        configured delay; 48h is the default), and the two feeds never
+        share an `ETag`.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/0"
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/1"
+      responses:
+        "200":
+          description: The current basic feed.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+            Vary:
+              schema: { type: string }
+          content:
+            text/plain:
+              schema: { type: string }
+              example: |
+                # nethesis threat shield v1
+                # generated: 2026-08-28T10:05:00Z  entries: 1620  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries after 48h0m0s
+                198.51.100.44
+                203.0.113.12
+        "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
 
   /blocklist/v1/allowlist-requests:
     post:
@@ -556,9 +619,11 @@ paths:
         interpreted.
 
         **Requires the Threat Shield entitlement**, like the feed and unlike
-        `/blocklist/v1/events`: only a node consuming the feed can be harmed
-        by a false positive in it, so asking for an exemption presupposes
-        the same entitlement. See the `entitledBasicAuth` scheme.
+        `/blocklist/v1/events` and `/blocklist/v1/basic-feed`: asking for an
+        exemption is part of what the entitlement buys. A node on the basic
+        feed blocks the same false positives, only later, and has no route
+        to ask: its operator asks out of band, through support, or buys the
+        entitlement. See the `entitledBasicAuth` scheme.
       security:
         - entitledBasicAuth: []
       requestBody:
@@ -596,7 +661,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             Valid subscription credential, but this system does not carry
@@ -680,6 +745,27 @@ paths:
         "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
         "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
         "403": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/403" }
+        "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
+        "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
+
+  /blocklist/crowdsec/v1/basic-feed:
+    get:
+      operationId: getBlocklistBasicCrowdsec
+      tags: [threat-shield]
+      summary: Fetch the basic blocklist feed (NS8 CrowdSec path)
+      description: |
+        The same basic feed as `GET /blocklist/v1/basic-feed`, byte for
+        byte, under the NS8 CrowdSec base URL. Needs only the subscription
+        credential, no entitlement.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/0"
+        - $ref: "#/paths/~1blocklist~1v1~1feed/get/parameters/1"
+      responses:
+        "200": { $ref: "#/paths/~1blocklist~1v1~1basic-feed/get/responses/200" }
+        "304": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/304" }
+        "401": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/401" }
         "405": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/405" }
         "503": { $ref: "#/paths/~1blocklist~1v1~1feed/get/responses/503" }
 
@@ -859,7 +945,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "invalid credentials" }
+              example: { error: "unauthorized" }
         "403":
           description: >-
             `system_id` in the body does not match the authenticated system.

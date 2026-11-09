@@ -105,6 +105,34 @@ func (s *Store) Init(ctx context.Context) error {
 			truncated INTEGER,
 			PRIMARY KEY (day, system_id)
 		)`,
+		// Feed downloads per UTC day, feed ("full", "basic"), client
+		// ("nethsecurity", "crowdsec", "direct": which public base URL was
+		// called, see blocklist.ClientForPrefix) and system. The counters
+		// ACCUMULATE, like threat_ingest_daily: every AddFeedDownloads adds
+		// its counts to the row, it never overwrites one, because each flush
+		// carries only what was counted since the previous one (see
+		// blocklist.Downloads). last_ip and last_seen_at are the latest
+		// request's and are kept by last_seen_at, never by arrival order.
+		// last_seen_at always falls inside the row's day -- the recorder
+		// derives the day from the same instant -- which is what lets
+		// FeedDownloadMachines read a machine's latest address off its
+		// latest day's row. The distinct systems per (day, feed) that got
+		// the list or a 304 are the adoption number; system_id is the
+		// forwarded, already-authenticated Basic username, and last_ip is a
+		// customer's public address. Pruned with threat_ingest_daily, on
+		// THREAT_INGEST_RETENTION.
+		`CREATE TABLE IF NOT EXISTS threat_feed_downloads_daily (
+			day TEXT,
+			feed TEXT,
+			client TEXT,
+			system_id TEXT,
+			requests INTEGER,
+			downloads INTEGER,
+			not_modified INTEGER,
+			last_ip TEXT,
+			last_seen_at INTEGER,
+			PRIMARY KEY (day, feed, client, system_id)
+		)`,
 
 		// --- Allowlist management ---
 		//
@@ -410,6 +438,134 @@ func (s *Store) RecordIngestCounters(ctx context.Context, day, systemID string, 
 	return nil
 }
 
+// FeedDownloadRow is one system's feed polls on one UTC day through one
+// client: every request that reached the feed handler with a system_id,
+// the full-body downloads (200 on GET) and the not-modified answers (304)
+// among them, and the address and time (unix millis) of the latest one.
+type FeedDownloadRow struct {
+	Day, Feed, Client, SystemID string
+	Requests                    int64
+	Downloads                   int64
+	NotModified                 int64
+	LastIP                      string
+	LastSeenAt                  int64
+}
+
+// AddFeedDownloads adds a batch of counts to threat_feed_downloads_daily in
+// one transaction. It adds, never overwrites: a row already stored for the
+// same (day, feed, client, system_id) is incremented by the batch's
+// counts, and takes the batch's last_ip only when the batch's last_seen_at
+// is not older than the stored one.
+func (s *Store) AddFeedDownloads(ctx context.Context, rows []FeedDownloadRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: add feed downloads: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, r := range rows {
+		// last_ip is assigned before last_seen_at and compares against the
+		// stored value: every right-hand side in DO UPDATE SET reads the row
+		// as it was before the update, whatever the assignment order.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO threat_feed_downloads_daily
+				(day, feed, client, system_id, requests, downloads, not_modified, last_ip, last_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(day, feed, client, system_id) DO UPDATE SET
+				requests = threat_feed_downloads_daily.requests + excluded.requests,
+				downloads = threat_feed_downloads_daily.downloads + excluded.downloads,
+				not_modified = threat_feed_downloads_daily.not_modified + excluded.not_modified,
+				last_ip = CASE WHEN excluded.last_seen_at >= threat_feed_downloads_daily.last_seen_at
+				               THEN excluded.last_ip ELSE threat_feed_downloads_daily.last_ip END,
+				last_seen_at = MAX(threat_feed_downloads_daily.last_seen_at, excluded.last_seen_at)
+		`, r.Day, r.Feed, r.Client, r.SystemID, r.Requests, r.Downloads, r.NotModified, r.LastIP, r.LastSeenAt); err != nil {
+			return fmt.Errorf("store: add feed downloads: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit feed downloads: %w", err)
+	}
+	return nil
+}
+
+// FeedDownloadDayRow is one (day, feed) total: how many distinct systems
+// received the feed that day -- the list or a not-modified answer -- and
+// the summed counts across every system that asked. Systems is the
+// adoption number, so a system whose every request was refused (a 503
+// before the first pass, say) or was a HEAD answered 200 is not in it;
+// Requests still counts those requests. A 304 counts whatever the method. A system that called through two clients the
+// same day is still one system.
+type FeedDownloadDayRow struct {
+	Day, Feed   string
+	Systems     int
+	Requests    int64
+	Downloads   int64
+	NotModified int64
+}
+
+// FeedDownloadStats returns per-day, per-feed totals for the UTC days from
+// since's day onward, newest day first and "basic" before "full" within a
+// day. limit counts (day, feed) rows; limit <= 0 applies defaultListLimit.
+//
+// The day bound is what keeps this cheap, not the limit: the table holds
+// THREAT_INGEST_RETENTION days of one row per feed and polling system
+// (about half a million at fleet scale), LIMIT applies only after
+// GROUP BY has folded all of them, and the store has one connection, so an
+// unbounded scan stalls ingest and the consensus pass for every /stats
+// render. WHERE day >= ? is a range on the primary key's leading column.
+func (s *Store) FeedDownloadStats(ctx context.Context, since int64, limit int) ([]FeedDownloadDayRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT day, feed,
+		       COUNT(DISTINCT CASE WHEN downloads + not_modified > 0 THEN system_id END),
+		       SUM(requests), SUM(downloads), SUM(not_modified)
+		FROM threat_feed_downloads_daily
+		WHERE day >= ?
+		GROUP BY day, feed
+		ORDER BY day DESC, feed
+		LIMIT ?
+	`, DayString(since), clampLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: feed download stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := []FeedDownloadDayRow{}
+	for rows.Next() {
+		var r FeedDownloadDayRow
+		if err := rows.Scan(&r.Day, &r.Feed, &r.Systems, &r.Requests, &r.Downloads, &r.NotModified); err != nil {
+			return nil, fmt.Errorf("store: scan feed download stats: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// PruneFeedDownloadsDaily drops feed-download rows for days older than
+// olderThan and returns how many went. The consensus pass calls it with
+// THREAT_INGEST_RETENTION, the same window as PruneThreatIngestDaily, and
+// compares the day key as a string for the same reason.
+func (s *Store) PruneFeedDownloadsDaily(ctx context.Context, olderThan int64) (int, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `DELETE FROM threat_feed_downloads_daily WHERE day < ?`, DayString(olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("store: prune feed downloads daily: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune feed downloads daily rows: %w", err)
+	}
+	return int(n), nil
+}
+
 // ConsensusCandidates returns every (attacker_ip, scenario, system_id) triple
 // observed since the given instant. See ThreatCandidateRow for why the
 // grouping goes down to system_id.
@@ -616,9 +772,10 @@ func (s *Store) DeleteBlocklistEntries(ctx context.Context, ips []string) (int, 
 	return deleted, nil
 }
 
-// ListBlocklist returns the live entries that make up the feed, most
+// ListBlocklist returns the live entries that make up the feeds, most
 // recently seen first, so a cap keeps the attackers the fleet is still
-// seeing. limit <= 0 means every live entry: this is the feed, and the UI
+// seeing. limit <= 0 means every live entry: the consensus pass reads them
+// all once and cuts both feeds' caps from that one read, and the UI
 // listings' default page size must never become a silent cap on it. The
 // served order is the snapshot's own (by address), not this one.
 func (s *Store) ListBlocklist(ctx context.Context, now int64, limit int) ([]BlocklistRow, error) {

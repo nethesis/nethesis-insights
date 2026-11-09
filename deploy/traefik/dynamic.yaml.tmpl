@@ -91,6 +91,13 @@ http:
     strip-logs:
       stripPrefix:
         prefixes: ["/logs"]
+    # stripPrefix also adds X-Forwarded-Prefix with what it removed, and
+    # threatd labels feed-download statistics with it ("/blocklist" is
+    # NethSecurity, "/blocklist/crowdsec" NS8 CrowdSec; see
+    # blocklist.ClientForPrefix). Statistics only, never an access
+    # decision -- but changing either prefix, or replacing stripPrefix with
+    # a middleware that sets no such header, turns /blocklist/downloads'
+    # client column into "direct".
     strip-blocklist:
       stripPrefix:
         prefixes: ["/blocklist"]
@@ -183,9 +190,13 @@ http:
     # would still be invisible until a customer hit it.
     #
     # The feed is the download this split exists for. allowlist-requests
-    # rides with it because only a node consuming the feed can be harmed by
-    # a false positive in it, so asking for an exemption presupposes the
-    # same entitlement.
+    # rides with it because asking for an exemption is part of what the
+    # entitlement buys -- not because only an entitled node can be harmed:
+    # a node on basic-feed blocks the same false positives, two days later.
+    # A basic-feed subscriber with a wrongly listed address has to ask out
+    # of band, through support, or buy the entitlement. Moving
+    # allowlist-requests onto blocklist-api would be a product decision,
+    # not a routing fix.
     #
     # It points at the blocklist-api service: same threatd, same handlers --
     # threatd still reads system_id off the forwarded Basic username and
@@ -200,6 +211,11 @@ http:
     # every subscriber reports, and narrowing the reporting pool to entitled
     # nodes would shrink the evidence base that promotion's three-distinct-
     # systems rule is measured against.
+    #
+    # GET /blocklist/v1/basic-feed is here too, deliberately: it is the
+    # list every subscriber may download without the entitlement, taking on
+    # each new address BLOCKLIST_BASIC_DELAY late. It must never be
+    # added to blocklist-entitled's Path list.
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"
       entryPoints: [websecure]
@@ -210,7 +226,10 @@ http:
     # so the node can use one base URL (/blocklist/crowdsec/v1/) for all of
     # them. Same threatd, same handlers, same blocklist-api service; only
     # the entitlement on the feed and allowlist-requests differs
-    # (crowdsec-advanced-threat-shield instead of ng-blacklist). The
+    # (crowdsec-advanced-threat-shield instead of ng-blacklist).
+    # allowlist-requests is entitled here for the same reason as above:
+    # asking for an exemption is part of the add-on, so a node polling
+    # basic-feed has to ask out of band. The
     # NethSecurity routes above are left exactly as they were: its client
     # keeps calling /blocklist/v1/ and is not changed by this.
     #
@@ -222,7 +241,9 @@ http:
       middlewares: [rate-limit, crowdsec-threat-shield-auth, strip-blocklist-crowdsec]
       service: blocklist-api
     # POST /blocklist/crowdsec/v1/events, on the plain subscription check for
-    # the same reason as blocklist-api: every subscriber reports. A prefix
+    # the same reason as blocklist-api: every subscriber reports. GET
+    # /blocklist/crowdsec/v1/basic-feed rides here for the same reason it
+    # rides blocklist-api: it needs no entitlement. A prefix
     # over /v1/ like blocklist-api's, and never over the whole
     # /blocklist/crowdsec/ namespace: strip-blocklist-crowdsec would turn
     # /blocklist/crowdsec/metrics into threatd's /metrics, which must answer

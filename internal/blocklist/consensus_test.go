@@ -34,6 +34,8 @@ func testConfig() Config {
 		Retention:                 168 * time.Hour,
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
+		BasicDelay:                24 * time.Hour,
+		BasicMaxEntries:           15000,
 	}
 }
 
@@ -77,7 +79,7 @@ func runPass(t *testing.T, s *threatstore.Store, cfg Config) (*Runner, *Snapshot
 func runPassAt(t *testing.T, s *threatstore.Store, cfg Config, at int64) (*Runner, *Snapshot) {
 	t.Helper()
 	snap := NewSnapshot()
-	r := New(s, snap, cfg)
+	r := New(s, snap, nil, cfg)
 	if err := r.Run(context.Background(), at); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -239,7 +241,7 @@ func TestRefreshExtendsTTLButKeepsFirstListedAt(t *testing.T) {
 	report(t, s, "sys-c", "203.0.113.7", "ssh_bruteforce", 30*minute)
 
 	snap := NewSnapshot()
-	r := New(s, snap, testConfig())
+	r := New(s, snap, nil, testConfig())
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
@@ -272,6 +274,51 @@ func TestRefreshExtendsTTLButKeepsFirstListedAt(t *testing.T) {
 	}
 }
 
+// An address that expired and is promoted again before a pass has deleted
+// its row is a new listing, not a refresh: it must get a new
+// first_listed_at, or it would skip the basic feed's delay on the strength of
+// a listing that had already ended. Expiry therefore runs before promotion.
+func TestRepromotionAfterExpiryRestartsFirstListedAt(t *testing.T) {
+	s := newTestStore(t)
+	report(t, s, "sys-a", "203.0.113.7", "ssh_bruteforce", 30*minute)
+	report(t, s, "sys-b", "203.0.113.7", "ssh_bruteforce", 30*minute)
+	report(t, s, "sys-c", "203.0.113.7", "ssh_bruteforce", 30*minute)
+
+	snap := NewSnapshot()
+	r := New(s, snap, nil, testConfig())
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	first, _ := s.ListBlocklist(context.Background(), now, 0)
+	if len(first) != 1 {
+		t.Fatalf("first pass rows: got %d, want 1", len(first))
+	}
+
+	// The listing expires with no pass in between, then all three report
+	// again just before the next pass runs.
+	later := first[0].ExpiresAt + 2*minute
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		_, _, err := s.InsertThreatEvents(context.Background(), sys, []model.ThreatEvent{{
+			AttackerIP: "203.0.113.7", Scenario: "ssh_bruteforce", ObservedAt: later - minute, HitCount: 1,
+		}})
+		if err != nil {
+			t.Fatalf("second round insert: %v", err)
+		}
+	}
+	if err := r.Run(context.Background(), later); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+
+	second, _ := s.ListBlocklist(context.Background(), later, 0)
+	if len(second) != 1 {
+		t.Fatalf("second pass rows: got %d, want 1", len(second))
+	}
+	if second[0].FirstListedAt != later {
+		t.Fatalf("first_listed_at: got %d, want %d (a new listing); the expired row was refreshed instead",
+			second[0].FirstListedAt, later)
+	}
+}
+
 func TestExpiryRemovesTheEntry(t *testing.T) {
 	s := newTestStore(t)
 	report(t, s, "sys-a", "203.0.113.7", "ssh_bruteforce", 30*minute)
@@ -280,7 +327,7 @@ func TestExpiryRemovesTheEntry(t *testing.T) {
 
 	cfg := testConfig()
 	snap := NewSnapshot()
-	r := New(s, snap, cfg)
+	r := New(s, snap, nil, cfg)
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
@@ -431,7 +478,7 @@ func TestAMalformedAllowlistRowAbortsThePass(t *testing.T) {
 	}
 
 	snap := NewSnapshot()
-	r := New(s, snap, testConfig())
+	r := New(s, snap, nil, testConfig())
 	if err := r.Run(ctx, now); err == nil {
 		t.Fatal("Run: got nil error, want the pass to abort on an unparseable allowlist entry")
 	}
@@ -552,7 +599,7 @@ func TestIngestDailyPruneFailureDoesNotAbortThePass(t *testing.T) {
 	snap := NewSnapshot()
 	cfg := testConfig()
 	cfg.IngestRetention = 168 * time.Hour
-	r := New(fake, snap, cfg)
+	r := New(fake, snap, nil, cfg)
 
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("Run: got %v, want the pass to survive a failed ingest-daily prune", err)
@@ -569,7 +616,7 @@ func TestAFailedPassKeepsThePreviousSnapshot(t *testing.T) {
 		rows: []threatstore.BlocklistRow{{AttackerIP: "203.0.113.7", ExpiresAt: now + hour}},
 	}
 	snap := NewSnapshot()
-	r := New(fake, snap, testConfig())
+	r := New(fake, snap, nil, testConfig())
 
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("first pass: %v", err)
@@ -636,6 +683,12 @@ func (f *failingReader) PruneThreatIngestDaily(context.Context, int64) (int, err
 	}
 	return 0, nil
 }
+func (f *failingReader) PruneFeedDownloadsDaily(context.Context, int64) (int, error) {
+	return 0, nil
+}
+func (f *failingReader) AddFeedDownloads(context.Context, []threatstore.FeedDownloadRow) error {
+	return nil
+}
 func (f *failingReader) PruneAllowlistRequests(context.Context, int64) (int, error) {
 	if f.failRequestPrune {
 		return 0, errBoom
@@ -683,7 +736,7 @@ func TestAllowlistRequestPruneFailureDoesNotAbortThePass(t *testing.T) {
 	snap := NewSnapshot()
 	cfg := testConfig()
 	cfg.AllowlistRequestRetention = 168 * time.Hour
-	r := New(fake, snap, cfg)
+	r := New(fake, snap, nil, cfg)
 
 	if err := r.Run(context.Background(), now); err != nil {
 		t.Fatalf("Run: got %v, want the pass to survive a failed request prune", err)

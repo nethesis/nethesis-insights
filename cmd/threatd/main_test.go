@@ -19,7 +19,7 @@ import (
 // rather than trusting that threatd's copy of newUIServer kept the same
 // early return.
 func TestNewUIServerIsNilWhenTheAddressIsEmpty(t *testing.T) {
-	if got := newUIServer("", "", nil, nil, nil, nil, "", chrome.Info{}, time.Hour); got != nil {
+	if got := newUIServer("", "", nil, nil, nil, nil, nil, "", chrome.Info{}, time.Hour); got != nil {
 		t.Fatalf("newUIServer(\"\") returned %v, want nil -- the UI must be off by default", got)
 	}
 }
@@ -33,6 +33,8 @@ func validConsensus() blocklist.Config {
 		Retention:                 168 * time.Hour,
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
+		BasicDelay:                24 * time.Hour,
+		BasicMaxEntries:           15000,
 	}
 }
 
@@ -89,6 +91,16 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		// same pass's ExpireBlocklist would delete it.
 		{name: "ttl below window", mutateCfg: func(c *blocklist.Config) { c.TTL = 30 * time.Minute }, interval: time.Minute, wantVar: "BLOCKLIST_TTL"},
 		{name: "zero max entries", mutateCfg: func(c *blocklist.Config) { c.MaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_MAX_ENTRIES"},
+		// A zero delay publishes every entry the moment it is listed: the
+		// full feed, handed out without the entitlement.
+		{name: "zero basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
+		// The basic cap must bind, and never let the basic feed outgrow
+		// the full one's.
+		{name: "zero basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "negative basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = -1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "basic max entries above max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = c.MaxEntries + 1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "sub-millisecond basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = 500 * time.Microsecond }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
+		{name: "negative basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = -time.Hour }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
 		// Events pruned before the window closes are never counted.
 		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},
 		{name: "zero request retention", mutateCfg: func(c *blocklist.Config) { c.AllowlistRequestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_ALLOWLIST_REQUEST_RETENTION"},
@@ -141,6 +153,8 @@ func setValidThreatdEnv(t *testing.T) {
 		"BLOCKLIST_MIN_SYSTEMS":                    "3",
 		"BLOCKLIST_TTL":                            "24h",
 		"BLOCKLIST_MAX_ENTRIES":                    "50000",
+		"BLOCKLIST_BASIC_DELAY":                    "24h",
+		"BLOCKLIST_BASIC_MAX_ENTRIES":              "15000",
 		"THREAT_EVENT_RETENTION":                   "168h",
 		"THREAT_INGEST_RETENTION":                  "2160h",
 		"THREAT_MAX_DECISIONS_PER_REQUEST":         "500",

@@ -12,7 +12,9 @@ package threat
 import (
 	"context"
 	"embed"
+	"html/template"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -45,6 +47,18 @@ type Reader interface {
 	// -- so the caller caches it; see dailyStatsCache.
 	ThreatDailyStats(ctx context.Context) ([]threatstore.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]threatstore.ThreatIngestRow, error)
+	// FeedDownloadStats backs /stats' feed-download table: one row per day
+	// and feed from since's UTC day on, folded from the per-system daily
+	// table the consensus pass flushes into. That table holds one row per
+	// feed and polling system for every retained day, so the caller bounds
+	// it to the days the page shows (feedDownloadsDays); the bound is what
+	// keeps it cheap enough not to need dailyStats' cache.
+	FeedDownloadStats(ctx context.Context, since int64, limit int) ([]threatstore.FeedDownloadDayRow, error)
+	// FeedDownloadMachines backs /downloads: one row per machine, feed and
+	// client from since's UTC day on, latest request first, optionally only
+	// the system_ids starting with prefix. Bounded by day for the same
+	// reason as FeedDownloadStats, and by limit on top.
+	FeedDownloadMachines(ctx context.Context, since int64, prefix string, limit int) ([]threatstore.FeedMachineRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]threatstore.AllowlistRow, error)
 
@@ -86,11 +100,11 @@ type Writer interface {
 // separate locks used to back this interface, and a Generate landing between
 // two of those calls could pair one generation's ETag with another's entry
 // count or capped flag -- the same torn read the feed handler itself was
-// once fixed for. *blocklist.Snapshot satisfies it. It may be nil -- tests,
-// and a misconfigured deployment -- in which case the pages render "n/a"
-// rather than panicking. feedState is built from one View call; the two
-// pages that show the feed never read View.Body or View.Gzip, only the
-// status fields.
+// once fixed for. *blocklist.Snapshot satisfies it. threatd wires two, the
+// full feed and the basic one; either may be nil -- tests, and a
+// misconfigured deployment -- in which case its row renders "n/a" rather
+// than panicking. feedState is built from one View call; the two pages that
+// show the feeds never read View.Body or View.Gzip, only the status fields.
 type Feed interface {
 	View() blocklist.View
 }
@@ -114,18 +128,26 @@ const (
 	threatEventsDefLim = 50
 	threatEventsMaxLim = 500
 	threatStatsLimit   = 200
-	allowlistReqLimit  = 200
-	auditLimit         = 500
+	// feedDownloadsDays is how many UTC days /stats' feed-download table
+	// shows, today included; feedDownloadsLimit is those days for both feeds.
+	feedDownloadsDays  = 30
+	feedDownloadsLimit = 2 * feedDownloadsDays
+	// downloadMachinesLimit bounds /downloads, which covers the same
+	// feedDownloadsDays.
+	downloadMachinesLimit = 500
+	allowlistReqLimit     = 200
+	auditLimit            = 500
 )
 
 // nav is this dashboard's nav bar structure. A single group with no label
-// renders as a flat row, which is right for seven pages.
+// renders as a flat row, which is right for eight pages.
 var nav = []chrome.NavGroup{
 	{Pages: []chrome.NavPage{
 		{Key: "index", Path: "/", Label: "Blocklist"},
 		{Key: "systems", Path: "/systems", Label: "Systems"},
 		{Key: "events", Path: "/events", Label: "Events"},
 		{Key: "stats", Path: "/stats", Label: "Stats"},
+		{Key: "downloads", Path: "/downloads", Label: "Downloads"},
 		{Key: "allowlist-requests", Path: "/allowlist-requests", Label: "Allowlist requests"},
 		{Key: "audit", Path: "/audit", Label: "Audit"},
 		{Key: "status", Path: "/status", Label: "Status"},
@@ -135,7 +157,7 @@ var nav = []chrome.NavGroup{
 // pages lists the content templates, each combined with chrome's layout into
 // its own *template.Template -- see chrome.ParseTemplates.
 var pages = []string{
-	"index.html", "systems.html", "events.html", "stats.html",
+	"index.html", "systems.html", "events.html", "stats.html", "downloads.html",
 	"allowlist-requests.html", "audit.html", "status.html",
 }
 
@@ -173,6 +195,7 @@ type server struct {
 	chrome     *chrome.Base
 	reader     Reader
 	feed       Feed
+	basic      Feed
 	writer     Writer
 	rt         Runtime
 	config     []chrome.ConfigItem
@@ -181,8 +204,10 @@ type server struct {
 	dailyStats *dailyStatsCache
 }
 
-// NewServer builds threatd's operator UI handler. feed, w and rt may all be
-// nil: a nil feed renders "n/a" on the status and blocklist pages, a nil
+// NewServer builds threatd's operator UI handler. feed is the full blocklist
+// snapshot (GET /v1/feed) and basic the basic one (GET /v1/basic-feed).
+// feed, basic, w and rt may all be nil: a nil feed renders its row "n/a" on
+// the status and blocklist pages, a nil
 // writer (equivalently, cfg.AdminKey == "") leaves every write route
 // unreachable -- an operator who has not set ADMIN_API_KEY gets the plain
 // read-only dashboard, with no write form reachable at all -- and a nil rt
@@ -193,7 +218,7 @@ type server struct {
 // one, cut mid-day by the rolling prune rather than complete. now is the
 // injected clock both /stats' cache and its day labels read -- one clock, so
 // a test can pin "today" and the cache's notion of elapsed time together.
-func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, retention time.Duration, now func() int64) (http.Handler, error) {
+func NewServer(r Reader, feed, basic Feed, w Writer, rt Runtime, cfg chrome.Config, retention time.Duration, now func() int64) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -206,6 +231,7 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, ret
 	cfg.Nav = nav
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
+	cfg.Funcs = template.FuncMap{"clientLabel": clientLabel}
 
 	base, err := chrome.New(cfg)
 	if err != nil {
@@ -216,6 +242,7 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, ret
 		chrome:     base,
 		reader:     r,
 		feed:       feed,
+		basic:      basic,
 		writer:     w,
 		rt:         rt,
 		config:     cfg.Info.Config,
@@ -291,6 +318,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleEvents(w, r)
 	case "/stats":
 		s.handleStats(w, r)
+	case "/downloads":
+		s.handleDownloads(w, r)
 	case "/allowlist-requests":
 		s.handleAllowlistRequests(w, r)
 	case "/audit":
@@ -308,6 +337,11 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 // value rather than the Feed itself so a nil feed renders as "off" instead
 // of panicking in the template.
 type feedState struct {
+	// Name, Route and CapVar say which feed this is: its label, the route
+	// threatd serves it on, and the variable whose cap its Capped flag
+	// refers to.
+	Name, Route, CapVar string
+
 	Present     bool
 	Ready       bool
 	Entries     int
@@ -316,12 +350,23 @@ type feedState struct {
 	Capped      bool
 }
 
-func (s *server) feedState() feedState {
-	if s.feed == nil {
-		return feedState{}
+// feeds lists both served feeds, full first, each read with one View call.
+func (s *server) feeds() []feedState {
+	return []feedState{
+		readFeed(s.feed, feedState{Name: "Full", Route: "/v1/feed", CapVar: "BLOCKLIST_MAX_ENTRIES"}),
+		readFeed(s.basic, feedState{Name: "Basic", Route: "/v1/basic-feed", CapVar: "BLOCKLIST_BASIC_MAX_ENTRIES"}),
 	}
-	v := s.feed.View()
+}
+
+func readFeed(f Feed, id feedState) feedState {
+	if f == nil {
+		return id
+	}
+	v := f.View()
 	return feedState{
+		Name:        id.Name,
+		Route:       id.Route,
+		CapVar:      id.CapVar,
 		Present:     true,
 		Ready:       v.Ready,
 		Entries:     v.Entries,
@@ -337,7 +382,7 @@ func (s *server) feedState() feedState {
 type statusPageData struct {
 	chrome.PageData
 	Counts     threatstore.Counts
-	Feed       feedState
+	Feeds      []feedState
 	HasQueue   bool
 	QueueDepth int
 	QueueCap   int
@@ -354,7 +399,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	data := statusPageData{
 		PageData: s.chrome.PageData(r, "status"),
 		Counts:   counts,
-		Feed:     s.feedState(),
+		Feeds:    s.feeds(),
 		HasQueue: s.rt != nil,
 		Config:   s.config,
 	}
@@ -368,7 +413,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 type indexPageData struct {
 	chrome.PageData
-	Feed      feedState
+	Feeds     []feedState
 	Entries   []threatstore.BlocklistRow
 	Allowlist []threatstore.AllowlistRow
 	Now       int64
@@ -391,7 +436,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	s.chrome.Render(w, "index.html", indexPageData{
 		PageData:  s.chrome.PageData(r, "index"),
-		Feed:      s.feedState(),
+		Feeds:     s.feeds(),
 		Entries:   entries,
 		Allowlist: allowlist,
 		Now:       time.Now().UnixMilli(),
@@ -453,6 +498,12 @@ type statsPageData struct {
 	chrome.PageData
 	Daily  []dayGroup
 	Ingest []threatstore.ThreatIngestRow
+	// Downloads is the feed-download table, newest day first; Today marks
+	// the UTC day still in progress. DownloadsFailed replaces the table
+	// with a short note when it could not be read.
+	Downloads       []threatstore.FeedDownloadDayRow
+	DownloadsFailed bool
+	Today           string
 	// ComputedAt is when dailyStats last actually scanned threat_events --
 	// not "now": the cache can be up to statsCacheTTL old. Zero (never
 	// computed) renders nothing, the same convention chrome.FmtTime uses.
@@ -524,12 +575,77 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "stats", err)
 		return
 	}
+	since := s.now() - int64(feedDownloadsDays-1)*24*time.Hour.Milliseconds()
+	// The feed-download table degrades on its own: it is a side table, and
+	// failing the page for it would hide the threat totals and the ingest
+	// accounting that were read fine.
+	downloads, err := s.reader.FeedDownloadStats(r.Context(), since, feedDownloadsLimit)
+	downloadsFailed := err != nil
+	if downloadsFailed {
+		slog.Error("ui: feed download stats failed", "page", "stats", "error", err)
+		downloads = nil
+	}
 	s.chrome.Render(w, "stats.html", statsPageData{
-		PageData:   s.chrome.PageData(r, "stats"),
-		Daily:      daily,
-		Ingest:     ingest,
-		ComputedAt: computedAt,
+		PageData:        s.chrome.PageData(r, "stats"),
+		Daily:           daily,
+		Ingest:          ingest,
+		Downloads:       downloads,
+		DownloadsFailed: downloadsFailed,
+		Today:           threatstore.DayString(s.now()),
+		ComputedAt:      computedAt,
 	})
+}
+
+type downloadsPageData struct {
+	chrome.PageData
+	Machines []threatstore.FeedMachineRow
+	Query    string
+	Days     int
+	// Truncated says more rows matched than the page shows; Failed
+	// replaces the table with a short note when the read failed.
+	Truncated bool
+	Failed    bool
+	Limit     int
+}
+
+// handleDownloads lists who fetched the feeds over the last
+// feedDownloadsDays: one row per machine, feed and client, latest request
+// first. ?q= keeps the machine IDs starting with it. A failed read renders
+// the page with a note rather than a 503, the same way /stats degrades its
+// download table.
+func (s *server) handleDownloads(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	since := s.now() - int64(feedDownloadsDays-1)*24*time.Hour.Milliseconds()
+	// One row past the limit, to tell "exactly the limit" from "more".
+	machines, err := s.reader.FeedDownloadMachines(r.Context(), since, q, downloadMachinesLimit+1)
+	data := downloadsPageData{
+		PageData: s.chrome.PageData(r, "downloads"),
+		Query:    q,
+		Days:     feedDownloadsDays,
+		Limit:    downloadMachinesLimit,
+	}
+	if err != nil {
+		slog.Error("ui: feed download machines failed", "page", "downloads", "error", err)
+		data.Failed = true
+	} else {
+		if len(machines) > downloadMachinesLimit {
+			machines, data.Truncated = machines[:downloadMachinesLimit], true
+		}
+		data.Machines = machines
+	}
+	s.chrome.Render(w, "downloads.html", data)
+}
+
+// clientLabel is how /downloads names a stored client.
+func clientLabel(client string) string {
+	switch client {
+	case blocklist.ClientNethSecurity:
+		return "NethSecurity"
+	case blocklist.ClientCrowdSec:
+		return "NS8 CrowdSec"
+	default:
+		return client
+	}
 }
 
 // --- Allowlist requests: the review queue, and its write half ---

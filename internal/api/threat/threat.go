@@ -172,26 +172,77 @@ type threatIngestResponse struct {
 // reads it as a file, `cscli decisions import --format values` reads it as a
 // list.
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
+	s.serveFeed(w, r, blocklist.FeedFull, s.snap)
+}
+
+// handleBasicFeed serves the basic feed: the same list, publishing each new
+// address only BLOCKLIST_BASIC_DELAY after its listing (see
+// blocklist.BasicCutoff). The handler is identical to handleFeed's; what
+// differs is the Traefik route in front of it, which checks only the system
+// credential, never an entitlement.
+func (s *server) handleBasicFeed(w http.ResponseWriter, r *http.Request) {
+	s.serveFeed(w, r, blocklist.FeedBasic, s.basic)
+}
+
+// serveFeed answers one feed request and reports the answer to
+// Config.FeedServed.
+func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, feed string, snap *blocklist.Snapshot) {
+	req := FeedRequest{Feed: feed, Client: feedClient(r, s.trusted), IP: httpx.ClientIP(r, s.trusted)}
+	req.Code, req.SystemID = s.writeFeed(w, r, snap)
+	req.Body = req.Code == http.StatusOK && r.Method == http.MethodGet
+	if s.cfg.FeedServed != nil {
+		s.cfg.FeedServed(req)
+	}
+}
+
+// feedClient names the public base URL a feed request came in on, from the
+// X-Forwarded-Prefix header Traefik's stripPrefix middleware adds -- see
+// blocklist.ClientForPrefix for the mapping.
+//
+// The header is believed only from a trusted proxy, like X-Forwarded-For,
+// and only its last value: stripPrefix appends (Header.Add) rather than
+// overwrites, so a value a client sent itself would come first. Traefik's
+// entrypoint already deletes every X-Forwarded-* header, this one included,
+// from a client outside its forwardedHeaders.trustedIPs (empty in
+// deploy/traefik), so in the deployed shape there is exactly one value and
+// it is Traefik's own. It only labels download statistics: the route's
+// forwardAuth already decided whether the request may have the feed, and
+// threatd still never learns which entitlement that check was.
+func feedClient(r *http.Request, trusted httpx.TrustedProxies) string {
+	if !trusted.Contains(r.RemoteAddr) {
+		return blocklist.ClientDirect
+	}
+	vals := r.Header.Values("X-Forwarded-Prefix")
+	if len(vals) == 0 {
+		return blocklist.ClientDirect
+	}
+	return blocklist.ClientForPrefix(strings.TrimSpace(vals[len(vals)-1]))
+}
+
+// writeFeed writes the response and returns its status code and the
+// requesting system_id ("" when there is none).
+func (s *server) writeFeed(w http.ResponseWriter, r *http.Request, snap *blocklist.Snapshot) (int, string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+		return http.StatusMethodNotAllowed, ""
 	}
 
-	if _, err := httpx.SystemID(r, s.trusted); err != nil {
+	systemID, err := httpx.SystemID(r, s.trusted)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
+		return http.StatusUnauthorized, ""
 	}
 
 	var view blocklist.View
-	if s.snap != nil {
-		view = s.snap.View()
+	if snap != nil {
+		view = snap.View()
 	}
 	if !view.Ready {
 		// No successful consensus pass yet. An empty body would mean "no
 		// threats" to every client that imports it, which silently disables
 		// protection -- so refuse instead.
 		reject(w, r, http.StatusServiceUnavailable, "blocklist not generated yet")
-		return
+		return http.StatusServiceUnavailable, systemID
 	}
 
 	etag := view.ETag
@@ -203,7 +254,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	// polls.
 	if matchesETag(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
-		return
+		return http.StatusNotModified, systemID
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -214,9 +265,10 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
-		return
+		return http.StatusOK, systemID
 	}
 	_, _ = w.Write(body)
+	return http.StatusOK, systemID
 }
 
 // sourceAddr extracts the reporter's real address as httpx.ClientIP resolved

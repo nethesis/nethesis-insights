@@ -1,0 +1,49 @@
+<!--
+Copyright (C) 2026 Nethesis S.r.l.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+{{define "content"}}
+<h1>Feed downloads by machine</h1>
+<p><small>Which machines fetched a feed in the last {{.Days}} days, through
+which client, and from which public address they last called. One row per
+machine, feed and client, most recently seen first; the latest requests
+show up within a few minutes.</small></p>
+
+<form method="get">
+<fieldset role="group">
+<input type="text" name="q" value="{{.Query}}" placeholder="machine ID or its first characters, any if blank">
+<button type="submit">Filter</button>
+</fieldset>
+</form>
+
+{{if .Failed}}
+<p>Feed downloads unavailable right now.</p>
+{{else}}
+{{if .Truncated}}<p><small>Showing the {{.Limit}} most recently seen rows only; filter by machine ID to see the rest.</small></p>{{end}}
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr><th scope="col">Machine</th><th scope="col">Feed</th><th scope="col">Client</th><th scope="col">Last address</th>
+<th scope="col">First day (UTC)</th><th scope="col">Last seen</th>
+<th scope="col" class="num">Downloads</th><th scope="col" class="num">Not modified</th></tr>
+</thead>
+<tbody>
+{{range .Machines}}
+<tr>
+<td class="mono">{{.SystemID}}</td>
+<td>{{.Feed}}</td>
+<td>{{clientLabel .Client}}</td>
+<td class="mono">{{.LastIP}}</td>
+<td class="mono">{{.FirstDay}}</td>
+<td class="mono" title="{{fmtTime .LastSeenAt}}">{{fmtAgo .LastSeenAt}}</td>
+<td class="num">{{.Downloads}}</td>
+<td class="num">{{.NotModified}}</td>
+</tr>
+{{else}}
+<tr><td colspan="8">{{if .Query}}no machine ID starts with that{{else}}no feed downloads recorded yet{{end}}</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
+{{end}}
+{{end}}

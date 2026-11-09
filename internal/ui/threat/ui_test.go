@@ -6,6 +6,7 @@ package threat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,12 @@ type fakeReader struct {
 	allowlist        []threatstore.AllowlistRow
 	allowlistRequest []threatstore.AllowlistRequestRow
 	audit            []threatstore.AllowlistAuditRow
+	downloads        []threatstore.FeedDownloadDayRow
+	downloadsSince   atomic.Int64 // the since FeedDownloadStats was last called with
+	downloadsErr     error        // when set, FeedDownloadStats alone returns it
+	machines         []threatstore.FeedMachineRow
+	machinesSince    atomic.Int64 // the since FeedDownloadMachines was last called with
+	machinesErr      error        // when set, FeedDownloadMachines alone returns it
 
 	err error // when set, every method returns this error instead
 
@@ -115,6 +122,35 @@ func (f *fakeReader) ThreatDailyStats(_ context.Context) ([]threatstore.ThreatDa
 
 func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]threatstore.ThreatIngestRow, error) {
 	return f.threatIngest, f.err
+}
+
+func (f *fakeReader) FeedDownloadStats(_ context.Context, since int64, _ int) ([]threatstore.FeedDownloadDayRow, error) {
+	f.downloadsSince.Store(since)
+	if f.downloadsErr != nil {
+		return nil, f.downloadsErr
+	}
+	return f.downloads, f.err
+}
+
+func (f *fakeReader) FeedDownloadMachines(_ context.Context, since int64, prefix string, limit int) ([]threatstore.FeedMachineRow, error) {
+	f.machinesSince.Store(since)
+	if f.machinesErr != nil {
+		return nil, f.machinesErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []threatstore.FeedMachineRow
+	for _, m := range f.machines {
+		if !strings.HasPrefix(m.SystemID, prefix) {
+			continue
+		}
+		out = append(out, m)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeReader) ListThreatSystems(_ context.Context) ([]threatstore.ThreatSystemRow, error) {
@@ -244,7 +280,7 @@ func testInfo() chrome.Info {
 // meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, feed, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -255,7 +291,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 // live state on the status page.
 func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, nil, nil, nil, rt, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -266,7 +302,7 @@ func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 // w, authenticated with adminKey.
 func newWriteTestServer(t *testing.T, r Reader, feed Feed, w Writer, adminKey string) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, feed, nil, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -428,6 +464,100 @@ func TestACappedFeedIsFlaggedOnBothPages(t *testing.T) {
 			if got := strings.Contains(body, warning); got != capped {
 				t.Fatalf("%s with capped=%v: warning shown=%v", path, capped, got)
 			}
+		}
+	}
+}
+
+// Both feeds are shown, each from its own snapshot, on both pages: the
+// basic feed's size, cap and freshness must be as visible as the full
+// feed's, and each capped flag must name its own variable.
+func TestBothFeedsAreShownOnBothPages(t *testing.T) {
+	full := fakeFeed{ready: true, entries: 4242, generatedAt: 1700000100000, etag: `"sha256-full"`}
+	basic := fakeFeed{ready: true, entries: 1717, generatedAt: 1700000100000, etag: `"sha256-basic"`, capped: true}
+	h, err := NewServer(threatReader(), full, basic, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/status"} {
+		body := get(t, h, path).Body.String()
+		for _, want := range []string{
+			"/v1/feed", "/v1/basic-feed",
+			"4242", "1717",
+			"sha256-full", "sha256-basic",
+			"Basic feed capped at <code>BLOCKLIST_BASIC_MAX_ENTRIES</code>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s is missing %q:\n%s", path, want, body)
+			}
+		}
+		if strings.Contains(body, "Full feed capped") {
+			t.Fatalf("%s flags the uncapped full feed as capped", path)
+		}
+	}
+
+	// A basic feed that has not generated yet says so on its own row.
+	h, err = NewServer(threatReader(), full, fakeFeed{}, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := get(t, h, "/").Body.String(); !strings.Contains(body, "Not generated yet") || !strings.Contains(body, "4242") {
+		t.Fatalf("/ should show the full feed and a not-generated basic one:\n%s", body)
+	}
+}
+
+// /stats shows the feed-download table: one row per day and feed, with the
+// distinct machines (the adoption number) and today marked in progress.
+func TestStatsPageShowsFeedDownloads(t *testing.T) {
+	r := threatReader()
+	r.downloads = []threatstore.FeedDownloadDayRow{
+		{Day: "2026-08-28", Feed: "basic", Systems: 1234, Requests: 99001, Downloads: 4321, NotModified: 94680},
+		{Day: "2026-08-27", Feed: "full", Systems: 567, Requests: 88002, Downloads: 3210, NotModified: 84792},
+	}
+	body := get(t, newTestServerWithFeed(t, r, nil), "/stats").Body.String()
+	for _, want := range []string{
+		"Feed downloads",
+		"1234", "99001", "4321", "94680",
+		"567", "88002", "3210", "84792",
+		"2026-08-28 <small>(today, still in progress)</small>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/stats is missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "2026-08-27 <small>(today") {
+		t.Fatal("/stats marks a finished day as today")
+	}
+	// Thirty days, today included: the read starts 29 days before testNow.
+	if got := threatstore.DayString(r.downloadsSince.Load()); got != "2026-07-30" {
+		t.Fatalf("/stats read feed downloads from %s, want 2026-07-30", got)
+	}
+
+	empty := get(t, newTestServerWithFeed(t, threatReader(), nil), "/stats").Body.String()
+	if !strings.Contains(empty, "no feed downloads recorded yet") {
+		t.Fatal("/stats with no downloads should say so")
+	}
+}
+
+// The feed-download table is a side table: when it cannot be read, /stats
+// still renders the daily totals and the ingest accounting, and says the
+// download numbers are unavailable instead of failing the whole page.
+func TestStatsPageDegradesWhenFeedDownloadsFail(t *testing.T) {
+	r := threatReader()
+	r.downloadsErr = errStore
+	rec := get(t, newTestServerWithFeed(t, r, nil), "/stats")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/stats status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Feed download stats unavailable") {
+		t.Fatalf("/stats should say feed downloads are unavailable:\n%s", body)
+	}
+	if strings.Contains(body, "no feed downloads recorded yet") {
+		t.Fatal("/stats should not claim no downloads were recorded when the read failed")
+	}
+	for _, want := range []string{"crowdsecurity/ssh-bf", "Ingest accounting", "sys-1"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/stats is missing %q after a feed-download failure:\n%s", want, body)
 		}
 	}
 }
@@ -594,5 +724,80 @@ func TestPOSTMethodNotAllowed(t *testing.T) {
 				t.Fatalf("POST %s: status = %d, want 405", rt.path, rec.Code)
 			}
 		})
+	}
+}
+
+// /downloads lists one row per machine, feed and client with the client
+// spelled for an operator, reads exactly the thirty days /stats does, and
+// filters on a machine-ID prefix.
+func TestDownloadsPageListsMachines(t *testing.T) {
+	r := threatReader()
+	r.machines = []threatstore.FeedMachineRow{
+		{SystemID: "sys-alpha", Feed: "full", Client: "nethsecurity", FirstDay: "2026-08-01", LastSeenAt: testNow - 60_000, LastIP: "198.51.100.21", Downloads: 7, NotModified: 90},
+		{SystemID: "sys-beta", Feed: "basic", Client: "crowdsec", FirstDay: "2026-08-20", LastSeenAt: testNow - 120_000, LastIP: "2001:db8::5", Downloads: 3, NotModified: 11},
+		{SystemID: "other-1", Feed: "basic", Client: "direct", FirstDay: "2026-08-25", LastSeenAt: testNow - 180_000, LastIP: "127.0.0.1", Downloads: 1},
+	}
+	h := newTestServerWithFeed(t, r, nil)
+
+	rec := get(t, h, "/downloads")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/downloads status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"sys-alpha", "198.51.100.21", "2026-08-01", "NethSecurity",
+		"sys-beta", "2001:db8::5", "NS8 CrowdSec",
+		"other-1", ">direct<",
+		`href="/downloads"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/downloads is missing %q", want)
+		}
+	}
+	if strings.Contains(body, "Showing the") {
+		t.Error("/downloads says it is truncated when it is not")
+	}
+	if got := threatstore.DayString(r.machinesSince.Load()); got != "2026-07-30" {
+		t.Fatalf("/downloads read from %s, want 2026-07-30", got)
+	}
+
+	filtered := get(t, h, "/downloads?q=sys-").Body.String()
+	if !strings.Contains(filtered, "sys-alpha") || !strings.Contains(filtered, "sys-beta") || strings.Contains(filtered, "other-1") {
+		t.Fatalf("?q=sys- did not filter to the sys- machines:\n%s", filtered)
+	}
+	if !strings.Contains(get(t, h, "/downloads?q=nobody").Body.String(), "no machine ID starts with that") {
+		t.Fatal("/downloads with an unmatched filter should say so")
+	}
+}
+
+// More matching rows than the page shows: the page shows the limit and
+// says it was cut.
+func TestDownloadsPageSaysWhenTruncated(t *testing.T) {
+	r := threatReader()
+	for i := range downloadMachinesLimit + 5 {
+		r.machines = append(r.machines, threatstore.FeedMachineRow{
+			SystemID: fmt.Sprintf("sys-%04d", i), Feed: "full", Client: "nethsecurity", LastSeenAt: testNow,
+		})
+	}
+	body := get(t, newTestServerWithFeed(t, r, nil), "/downloads").Body.String()
+	if !strings.Contains(body, "Showing the 500 most recently seen rows only") {
+		t.Fatal("/downloads should say it is truncated")
+	}
+	if !strings.Contains(body, "sys-0499") || strings.Contains(body, "sys-0500") {
+		t.Fatal("/downloads should show exactly the first 500 rows")
+	}
+}
+
+// A failed read degrades the page instead of failing it.
+func TestDownloadsPageDegradesWhenTheReadFails(t *testing.T) {
+	r := threatReader()
+	r.machinesErr = errStore
+	rec := get(t, newTestServerWithFeed(t, r, nil), "/downloads")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/downloads status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Feed downloads unavailable right now") || strings.Contains(body, "no feed downloads recorded yet") {
+		t.Fatalf("/downloads should say the downloads are unavailable:\n%s", body)
 	}
 }

@@ -23,7 +23,7 @@ func TestStatsPageLabelsTheOldestDayAsPartial(t *testing.T) {
 	r.threatDaily = []threatstore.ThreatDailyRow{
 		{Day: "2026-08-21", Scenario: "crowdsecurity/ssh-bf", DistinctIPs: 1, TotalHits: 1},
 	}
-	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, nil, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestStatsPageLabelsTodayAsInProgress(t *testing.T) {
 		// 2026-08-28 is "today" under testClock.
 		{Day: "2026-08-28", Scenario: "crowdsecurity/ssh-bf", DistinctIPs: 1, TotalHits: 1},
 	}
-	h, err := NewServer(r, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, nil, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

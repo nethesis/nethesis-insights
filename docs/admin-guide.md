@@ -378,6 +378,7 @@ depth. It never logs a credential: the model API key appears only as
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | how long a positive/negative validator outcome is cached (default `5m`/`30s`) |
 | `AUTH_CACHE_MAX_ENTRIES`, `AUTH_NEG_CACHE_MAX_ENTRIES` | cache size caps, counted separately so a flood of wrong credentials cannot evict the fleet's valid entries (default `8192`/`4096`, about 3 MB together) |
 | `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
+| `TRUSTED_PROXY_CIDRS` | CIDRs, comma-separated, whose forwarded headers (`X-Forwarded-For`, `-Method`, `-Uri`) `authd` repeats in its denial log line (default `127.0.0.0/8`, where Traefik calls it from). Unlike in the pipelines it decides nothing: it only keeps a forged header out of the log — see "Who was refused" |
 
 ### `insightsd`
 
@@ -427,8 +428,10 @@ in `systemctl status threatd`.
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
+| `BLOCKLIST_BASIC_MAX_ENTRIES` | hard cap on the basic feed (default `15000`). Must be positive and at most `BLOCKLIST_MAX_ENTRIES`. Applied only to addresses already old enough for the basic feed; when more are, the ones seen least recently are left out |
+| `BLOCKLIST_BASIC_DELAY` | how long a newly listed address waits before the basic feed — the one for subscribers without the Threat Shield add-on — publishes it (default `48h`). Each address waits from its own listing time, so new addresses reach the basic feed one by one through the day, this long after the full feed (at the next consensus pass). Removals are never delayed. Must be at least `1ms`: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
-| `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
+| `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows, and the daily feed-download rows behind `/stats` and `/downloads` — which include each machine's last public IP address — are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
 | `THREAT_MAX_ALLOWLIST_REQUESTS_PER_SYSTEM` | distinct pending CIDRs one system may hold in the allowlist review queue (default `25`). Over-cap asks are **refused** with `429`, not truncated — a request is a permanent row only a human decision deletes. Re-asking about a CIDR the system already raised is always accepted, since it adds no row. Must be positive, or the cap is silently off |
 | `THREAT_ALLOWLIST_REQUEST_RETENTION` | how long an unreviewed client allowlist request is kept (default `2160h`, 90 days). Pruned as a step in the consensus pass; a dropped ask can simply be made again, which also re-ranks it as current evidence. The audit trail is never pruned. Must be positive |
@@ -480,7 +483,9 @@ a redirect where it pointed.
 
 **Two Threat Shield routes need more than a subscription.** Every machine with
 a subscription sends data to the server; only a machine with the Threat Shield
-entitlement can download the list. The feed and the allowlist request are
+entitlement can download the list as it stands right now. Every other
+subscriber can download the *basic* feed instead, which needs only the
+subscription (see "Threat Shield" below). The feed and the allowlist request are
 validated against `AUTH_VALIDATE_URL/service/<entitlement>` rather than
 `AUTH_VALIDATE_URL`, while sending events and every log and sizing route use
 the plain check. The node sends exactly the same credential either way — there
@@ -492,13 +497,17 @@ each has its own address:
 
 | Client | Calls | Entitlement checked for the feed and allowlist requests |
 |---|---|---|
-| NethSecurity firewall | `/blocklist/v1/events`, `/blocklist/v1/feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` |
-| NS8 node running CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/events`, `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` |
+| NethSecurity firewall | `/blocklist/v1/events`, `/blocklist/v1/feed`, `/blocklist/v1/basic-feed`, `/blocklist/v1/allowlist-requests` | `ng-blacklist` |
+| NS8 node running CrowdSec (`ns8-crowdsec`) | `/blocklist/crowdsec/v1/events`, `/blocklist/crowdsec/v1/feed`, `/blocklist/crowdsec/v1/basic-feed`, `/blocklist/crowdsec/v1/allowlist-requests` | `crowdsec-advanced-threat-shield` |
 
 Both addresses reach the same server and return the same list. Only the
 entitlement differs, and each one is checked on its own: a firewall with
 `ng-blacklist` gets `403` on the NS8 address, and the other way round. Sending
-events needs only a subscription on either address.
+events and downloading `basic-feed` need only a subscription on either
+address. Asking for an address to be left alone (`allowlist-requests`) is part
+of the add-on: a node on the basic feed blocks the same wrongly listed
+addresses, only two days later, but cannot ask from the node — its customer has to
+contact support, or buy the add-on.
 
 `ns8-crowdsec` has to use `/blocklist/crowdsec/v1/` as its base address. An NS8
 node still calling `/blocklist/v1/` keeps reporting its bans, but gets `403` on
@@ -508,9 +517,52 @@ A subscriber without the entitlement gets **`403`, not `401`**. The difference
 is the whole point: `401` means the credential is wrong and somebody should go
 looking at the node's configuration, `403` means the credential is fine and the
 customer needs the entitlement. Neither is retryable, but they end in different
-places. If a customer reports that the blocklist stopped updating, check for
-`403` first — the node will still be reporting its own bans successfully, which
+places. A node without the entitlement should be configured to use
+`basic-feed` instead, which never answers `403`. If a customer reports that
+the blocklist stopped updating, check for `403` first — the node will still be reporting its own bans successfully, which
 makes the credential look healthy from every other angle.
+
+**Who was refused.** A refused request never reaches a pipeline — the proxy
+answers it with `authd`'s verdict — so the only record of it is one line in
+`authd`'s log per `401` or `403`:
+
+```
+time=2026-11-09T08:31:02.100Z level=INFO msg="authd: denied" outcome=not_entitled system_id=NETH-1234 service=ng-blacklist method=GET path=/blocklist/v1/feed client_addr=203.0.113.9 err="not entitled: ..."
+```
+
+`outcome` is `invalid_credentials` for a `401` and `not_entitled` for a
+`403`; `path` is the address the machine called (without its query string)
+and `client_addr` the public address it called from. The log never contains
+the password. `scripts/feed-denials.sh` turns these lines into a table for
+the four feed addresses — how many times each machine was refused, from
+where, and when last — over the last day, or `--since 7d`; give it the
+server's name to read the log over `ssh`, or `--input FILE` to read a saved
+copy of the log instead:
+
+```bash
+scripts/feed-denials.sh --since 7d root@insights.example.com
+```
+
+```
+COUNT  OUTCOME              SYSTEM_ID  CLIENT_ADDR   PATH                               LAST
+3      not_entitled         NETH-1234  203.0.113.9   /blocklist/v1/feed                 2026-11-09T08:31:02.100Z
+2      invalid_credentials  typo id    2001:db8::7   /blocklist/crowdsec/v1/basic-feed  2026-11-09T09:15:00.000Z
+```
+
+Two things to keep in mind reading it:
+
+- A **`403` on `/blocklist/v1/feed` or `/blocklist/crowdsec/v1/feed`** is a
+  genuine subscriber asking for the full feed without the add-on. Its
+  `system_id` is real. These are the machines that want Threat Shield — or
+  that should be switched to `basic-feed`.
+- A **`401`** says the credential was wrong, so its `system_id` is only
+  whatever the caller typed (the log calls it `claimed_system_id` for that
+  reason, and it is empty when the header could not be read at all). The
+  client address is the better clue to who it really is.
+
+The same lines cover every other route `authd` guards; the script only
+filters on the feeds. The log keeps them as long as the journal does (see
+"Bound the journal").
 
 Adding a future entitlement is a Traefik change, not a release: `authd` builds
 the upstream URL from the service name in its own path
@@ -574,9 +626,11 @@ prefix on the one served hostname:
 | `GET /logs/v1/findings` | a node reads its own findings, never anyone else's |
 | `POST /blocklist/crowdsec/v1/events` | `ns8-crowdsec` reports ban decisions |
 | `GET /blocklist/crowdsec/v1/feed` | `ns8-crowdsec` fetches the consensus blocklist — **needs the `crowdsec-advanced-threat-shield` entitlement** |
+| `GET /blocklist/crowdsec/v1/basic-feed` | `ns8-crowdsec` without the entitlement fetches the basic blocklist — subscription only |
 | `POST /blocklist/crowdsec/v1/allowlist-requests` | `ns8-crowdsec` asks for an address to be left alone — **needs the `crowdsec-advanced-threat-shield` entitlement** |
 | `POST /blocklist/v1/events` | a NethSecurity firewall reports its own blocks |
 | `GET /blocklist/v1/feed` | a NethSecurity firewall fetches the consensus blocklist — **needs the `ng-blacklist` entitlement** |
+| `GET /blocklist/v1/basic-feed` | a NethSecurity firewall without the entitlement fetches the basic blocklist — subscription only |
 | `POST /blocklist/v1/allowlist-requests` | a NethSecurity firewall asks for an address to be left alone — **needs the `ng-blacklist` entitlement** |
 | `POST /sizing/v1/reports` | a cluster leader posts a complete UTC day |
 
@@ -773,7 +827,8 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `threatd_regular_systems` | `threatd` | machines that reported on at least 2 of the last 7 days (UTC, today included). A machine sends only when it has a ban to report, so a quiet machine is invisible until something touches it. When one scanner sweeps the internet it wakes hundreds of quiet machines at once, and `threatd_active_systems` jumps for a day. This count needs a second day of reports, so a one-off wake-up does not move it. Machines that have never blocked anything are counted by neither |
 | `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
-| `threatd_blocklist_entries` | `threatd` | addresses in the published feed — what nodes download, after the allowlist and `BLOCKLIST_MAX_ENTRIES` |
+| `threatd_blocklist_entries{feed}` | `threatd` | addresses in each published feed — what nodes download, after the allowlist and each feed's cap: `feed="full"` (the add-on's `/v1/feed`, capped by `BLOCKLIST_MAX_ENTRIES`) and `feed="basic"` (`/v1/basic-feed`, capped by `BLOCKLIST_BASIC_MAX_ENTRIES`) |
+| `threatd_http_requests_total{route,status}` for the two feed routes | `threatd` | per-feed request counts come from the generic request counter, by route: `/v1/feed` is the full feed, `/v1/basic-feed` the basic one. `200` sent the list, `304` told the machine its copy is current, `503` means no feed generated yet, `401`/`405` a bad request. A credential the proxy refused never reaches `threatd`, so it is not counted here — see "Who was refused". There is no separate feed counter; daily downloads and machines per feed are on `/blocklist/stats` |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -813,7 +868,7 @@ and reading it on every scrape would compete with the pipeline's own writes.
 each maintenance pass (every `MAINT_INTERVAL`, default 10 minutes), so a
 graph of them moves in steps of that size. Right after a restart they are
 missing until the first pass finishes, and `threatd_blocklist_entries` stays
-missing until a consensus pass has succeeded: "not counted yet" is not the
+missing until a consensus pass has generated both feeds: "not counted yet" is not the
 same as zero. If a refresh fails, the previous values stay up and the pass
 is counted as failed in `<svc>_pass_runs_total`.
 
@@ -997,13 +1052,14 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/blocklist/` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist, i.e. the reason an address might *never* appear here despite the fleet reporting it. |
+| `/blocklist/` | What the fleet currently agrees is malicious. At the top, both feeds nodes download — the full one (Threat Shield add-on) and the basic one (every other subscriber) — each with how many addresses it serves, whether its cap cut it short, and when it was last generated. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist, i.e. the reason an address might *never* appear here despite the fleet reporting it. |
 | `/blocklist/systems` | One row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
 | `/blocklist/events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
-| `/blocklist/stats` | Two things: the day-by-day threat totals broken down by CrowdSec scenario, with a per-day total, over the days still kept (`THREAT_EVENT_RETENTION`, a week by default); and what each machine contributed — including how much of what it sent was discarded, and for which reason. The daily totals are recomputed at most every five minutes, whatever the page traffic, and the page says when they were last computed. The oldest day and today are marked as partial/in-progress, since neither one is a complete day's total. |
-| `/blocklist/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here — the buttons on this page and the allowlist itself are the only things on any of the three dashboards that make a change. |
+| `/blocklist/stats` | Three things: the day-by-day threat totals broken down by CrowdSec scenario, with a per-day total, over the days still kept (`THREAT_EVENT_RETENTION`, a week by default); the feed downloads, per day and feed — how many different machines fetched the full and the basic feed (the adoption number — a machine counts only on a day it got the list or a "your copy is current" answer, so one that only met a "not ready yet" error after a restart does not), how many times they got the list, how many times they were told their copy was current, and the total requests — over the last 30 days; and what each machine contributed — including how much of what it sent was discarded, and for which reason. The daily totals are recomputed at most every five minutes, whatever the page traffic, and the page says when they were last computed. The oldest day and today are marked as partial/in-progress, since neither one is a complete day's total. Feed downloads are counted in memory and saved on every consensus pass and on a clean shutdown, so a crash loses at most the last few minutes of them. If the download numbers cannot be read, the page says so in place of that table and still shows the rest. |
+| `/blocklist/downloads` | Who fetched the feeds over the last 30 days: one row per machine, feed and client, most recently seen first — the machine ID, which feed, which client, the public address it last called from, the first day it asked for a feed in that window, when it was last seen, and how many times it got the list or was told its copy was current. The client is the address the machine called: **NethSecurity** for `/blocklist/v1/`, **NS8 CrowdSec** for `/blocklist/crowdsec/v1/`, and **direct** for a request that reached `threatd` without going through either (a local test, say). The client is only a label for this page — it never decides whether a machine gets a feed. Type a machine ID, or its first characters, in the filter box to narrow the list (it is case-sensitive). At most 500 rows are shown, and the page says when there are more. Like `/stats`, the newest requests show up after the next consensus pass, a few minutes. Note that this page stores **customers' public IP addresses**: each machine's last address is kept per day for `THREAT_INGEST_RETENTION` (90 days by default) and then deleted with the rest of the day's row. |
+| `/blocklist/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here — the buttons on this page and the allowlist itself are the only things on the blocklist dashboard that make a change. |
 | `/blocklist/audit` | The append-only trail of every allowlist change: who added, removed, approved or rejected what, and when. This exists because deleting an allowlist entry destroys the row that would otherwise say who removed the exemption that let something through. |
-| `/blocklist/status` | Is the server healthy? Uptime, build version, and the full effective configuration it's running with. |
+| `/blocklist/status` | Is the server healthy? Uptime, build version, the state of both feeds, and the full effective configuration it's running with. |
 
 **The sizing dashboard**, at `/sizing`:
 
@@ -1013,10 +1069,11 @@ the effective configuration, lives alongside it.
 | `/sizing/cohorts` | The published baselines: what the fleet's own hardware says a given deployment needs, in absolute bytes and cores, with the capped share alongside. On a small fleet this page correctly says "not enough data yet" — publishing a percentile computed from three nodes would be worse than publishing nothing. |
 | `/sizing/status` | Is the server healthy? Uptime, build version, and the full effective configuration it's running with. |
 
-Only the blocklist dashboard has buttons that change anything — add or remove
-an allowlist entry, approve or reject a request. The logs and sizing
-dashboards are read-only end to end; there is nothing on either for an
-operator to approve or reject.
+Two dashboards have buttons that change anything: the blocklist dashboard
+(add or remove an allowlist entry, approve or reject a request) and the logs
+dashboard's review pages (decide who sees a finding class). The sizing
+dashboard is read-only end to end; there is nothing on it for an operator to
+approve or reject.
 
 Nothing on any of these dashboards ever shows a raw, unmasked log line — the
 server never stores those in the first place, so there's nothing to show. And
@@ -1484,13 +1541,31 @@ collected, counted and handed back.
    24 hours after the last sighting, so an address that has been reassigned to
    somebody innocent does not stay blocked forever.
 
-4. **Nodes fetch the result.** Entitled nodes, that is: this is the one step
-   that needs the Threat Shield entitlement and not merely a subscription (see
-   "Authentication" for which entitlement each kind of machine needs).
+4. **Nodes fetch the result.** A node with the Threat Shield entitlement (see
+   "Authentication" for which entitlement each kind of machine needs) calls
    `GET /blocklist/crowdsec/v1/feed` (or `GET /blocklist/v1/feed` for a
-   NethSecurity firewall) returns a plain list of addresses, which the node
-   imports into CrowdSec. Every entitled node gets
-   the same list — there is no per-customer or per-tier filtering of it.
+   NethSecurity firewall) and gets a plain list of addresses, which it
+   imports into CrowdSec. The list is refreshed every few minutes. Every
+   entitled node gets the same list — there is no per-customer filtering of
+   it.
+
+   A node **without** the entitlement calls `basic-feed` in place of `feed`
+   (`GET /blocklist/crowdsec/v1/basic-feed`, or
+   `GET /blocklist/v1/basic-feed` for a firewall) and needs only its
+   subscription. It gets the same list with one difference: a newly published
+   address is added to it only once it has been on the full feed for
+   `BLOCKLIST_BASIC_DELAY` (two days, by default). That freshness is what the
+   add-on buys. Removals are **not** delayed: an address that expires, or that
+   an operator puts on the allowlist, leaves both lists within minutes, so a
+   customer without the add-on is never left blocking an address that has
+   already been cleared. Restarting the server does not change what the
+   basic feed contains. In practice the basic feed carries the attackers the
+   fleet keeps seeing: a listing expires 24 hours after its last report, so
+   with the defaults an address reaches the basic feed only if the fleet is
+   still reporting it at least a day after it was first listed. One reported
+   for a few minutes, or for less than a day, expires before it is due and
+   never appears; one the fleet keeps reporting appears two days after it was
+   listed and stays as long as the reports continue. That is intended.
 
 ### The safety net
 
@@ -1524,8 +1599,8 @@ and it is a human decision rather than an automatic one.
 ### One thing the server refuses to do
 
 If the server has not yet successfully computed a list — it has just started,
-or the database is unhappy — the feed answers "unavailable" rather than
-returning an empty list. This is deliberate: to a node importing the file, an
+or the database is unhappy — the feed (and the basic feed) answers
+"unavailable" rather than returning an empty list. This is deliberate: to a node importing the file, an
 empty list does not read as "I don't know," it reads as "there are no threats,"
 which would quietly switch the protection off. For the same reason, if a
 computation fails the server keeps serving the *previous* list, timestamped so
@@ -1550,7 +1625,11 @@ A node can **ask**: `POST /blocklist/crowdsec/v1/allowlist-requests` (or
 `POST /blocklist/v1/allowlist-requests` from a firewall) puts the address in
 a review queue, ranked by how many different machines asked for it. Forty
 customers all hitting the same shared resolver floats it to the top; a single
-opportunistic request sinks.
+opportunistic request sinks. Only a node with the Threat Shield entitlement
+can ask: requesting an exemption is part of what the add-on buys. A customer
+using the basic feed who is blocking an address they need has to ask out of
+band — through support, which can add the allowlist entry directly — or buy
+the add-on.
 
 A human then **decides**. Nothing is ever exempted automatically, and this is
 deliberate rather than an unfinished feature. The blocklist and the allowlist

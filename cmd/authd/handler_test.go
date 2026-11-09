@@ -6,17 +6,46 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 )
+
+// loopback is the deployed TRUSTED_PROXY_CIDRS default: Traefik reaches
+// authd over the pod's loopback.
+var loopback = httpx.TrustedProxies{netip.MustParsePrefix("127.0.0.0/8")}
+
+// captureLog points slog at a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// forwardAuthRequest is a request as Traefik's forwardAuth sends it: from
+// loopback, the original method and URI in X-Forwarded-*, and the client's
+// address in X-Forwarded-For.
+func forwardAuthRequest(path string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = "127.0.0.1:41000"
+	r.Header.Set("X-Forwarded-Method", "GET")
+	r.Header.Set("X-Forwarded-Uri", "/blocklist/v1/feed?probe=1")
+	r.Header.Set("X-Forwarded-For", "198.51.100.1, 203.0.113.9")
+	return r
+}
 
 type fakeValidator struct {
 	systemID string
@@ -36,7 +65,7 @@ func (f *fakeValidator) Validate(ctx context.Context, authHeader, service string
 func TestMetricsEndpointExposesRequestCounters(t *testing.T) {
 	reg := metrics.NewRegistry("authd")
 	rec := metrics.NewHTTP(reg)
-	h := newHandler(&fakeValidator{systemID: "sys-1"}, metrics.Handler(reg), rec)
+	h := newHandler(&fakeValidator{systemID: "sys-1"}, loopback, metrics.Handler(reg), rec)
 
 	hr := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	hw := httptest.NewRecorder()
@@ -76,7 +105,7 @@ func TestAuthEndpointStatuses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHandler(tc.v, nil, nil)
+			h := newHandler(tc.v, loopback, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 			r.SetBasicAuth("sys-1", "secret")
 			w := httptest.NewRecorder()
@@ -116,7 +145,7 @@ func TestValidatorUnavailableLogsTheUpstreamStatus(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	defer slog.SetDefault(prev)
 
-	h := newHandler(a, nil, nil)
+	h := newHandler(a, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "secret")
 	w := httptest.NewRecorder()
@@ -152,7 +181,7 @@ func TestValidatorUnavailableLogsNoResponseOnATransportError(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	defer slog.SetDefault(prev)
 
-	h := newHandler(a, nil, nil)
+	h := newHandler(a, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "secret")
 	w := httptest.NewRecorder()
@@ -171,7 +200,7 @@ func TestValidatorUnavailableLogsNoResponseOnATransportError(t *testing.T) {
 // header upstream would spend a request to learn that.
 func TestAuthEndpointRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.T) {
 	v := &fakeValidator{systemID: "sys-1"}
-	h := newHandler(v, nil, nil)
+	h := newHandler(v, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	w := httptest.NewRecorder()
 
@@ -188,7 +217,7 @@ func TestAuthEndpointRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.
 // The response body must never echo the credential, and the header must
 // never be reflected back into a response Traefik will log.
 func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
-	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, nil, nil)
+	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "hunter2")
 	w := httptest.NewRecorder()
@@ -215,7 +244,7 @@ func TestAuthEndpointNeverEchoesTheCredential(t *testing.T) {
 // being treated as success or leaking an internal error to the caller.
 func TestAuthEndpointFailsClosedOnAnUnrecognizedValidatorError(t *testing.T) {
 	v := &fakeValidator{err: errors.New("boom: this is not one of the sentinel errors")}
-	h := newHandler(v, nil, nil)
+	h := newHandler(v, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 	r.SetBasicAuth("sys-1", "secret")
 	w := httptest.NewRecorder()
@@ -246,7 +275,7 @@ func TestAuthEndpoint401OmitsWWWAuthenticate(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHandler(tc.v, nil, nil)
+			h := newHandler(tc.v, loopback, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, "/auth", nil)
 			if tc.setAuth {
 				r.SetBasicAuth("sys-1", "secret")
@@ -272,7 +301,7 @@ func TestAuthEndpoint401OmitsWWWAuthenticate(t *testing.T) {
 // no release of this binary.
 func TestServiceRoutePassesTheServiceNameToTheValidator(t *testing.T) {
 	v := &fakeValidator{systemID: "sys-1"}
-	h := newHandler(v, nil, nil)
+	h := newHandler(v, loopback, nil, nil)
 
 	for _, path := range []string{"/auth", "/auth/service/ng-blacklist"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
@@ -314,7 +343,7 @@ func TestServiceRouteRejectsAMalformedServiceName(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := &fakeValidator{systemID: "sys-1"}
-			h := newHandler(v, nil, nil)
+			h := newHandler(v, loopback, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			r.SetBasicAuth("sys-1", "secret")
 			w := httptest.NewRecorder()
@@ -338,7 +367,7 @@ func TestServiceRouteRejectsAMalformedServiceName(t *testing.T) {
 func TestForbiddenAnswers403(t *testing.T) {
 	for _, path := range []string{"/auth", "/auth/service/ng-blacklist"} {
 		t.Run(path, func(t *testing.T) {
-			h := newHandler(&fakeValidator{err: auth.ErrForbidden}, nil, nil)
+			h := newHandler(&fakeValidator{err: auth.ErrForbidden}, loopback, nil, nil)
 			r := httptest.NewRequest(http.MethodGet, path, nil)
 			r.SetBasicAuth("sys-1", "secret")
 			w := httptest.NewRecorder()
@@ -356,7 +385,7 @@ func TestForbiddenAnswers403(t *testing.T) {
 // too, for the same reason it is on /auth: there is nothing to validate.
 func TestServiceRouteRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.T) {
 	v := &fakeValidator{systemID: "sys-1"}
-	h := newHandler(v, nil, nil)
+	h := newHandler(v, loopback, nil, nil)
 	r := httptest.NewRequest(http.MethodGet, "/auth/service/ng-blacklist", nil)
 	w := httptest.NewRecorder()
 
@@ -379,7 +408,7 @@ func TestServiceRouteRejectsAMissingHeaderWithoutCallingTheValidator(t *testing.
 func TestServiceRouteMetricsLabelIsThePatternNotThePath(t *testing.T) {
 	reg := metrics.NewRegistry("authd")
 	rec := metrics.NewHTTP(reg)
-	h := newHandler(&fakeValidator{systemID: "sys-1"}, metrics.Handler(reg), rec)
+	h := newHandler(&fakeValidator{systemID: "sys-1"}, loopback, metrics.Handler(reg), rec)
 
 	r := httptest.NewRequest(http.MethodGet, "/auth/service/ng-blacklist", nil)
 	r.SetBasicAuth("sys-1", "secret")
@@ -391,5 +420,162 @@ func TestServiceRouteMetricsLabelIsThePatternNotThePath(t *testing.T) {
 	const want = `authd_http_requests_total{method="GET",route="/auth/service/{service}",status="200"} 1`
 	if !strings.Contains(w.Body.String(), want) {
 		t.Errorf("scrape body missing %q\nbody:\n%s", want, w.Body.String())
+	}
+}
+
+// A 401 is logged once, with the identity the caller claimed in its own
+// field labelled as claimed, the route's service, the original method and
+// path (no query string), and the real client address -- and never the
+// secret, plain or encoded.
+func TestDenialLogFor401(t *testing.T) {
+	buf := captureLog(t)
+	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, loopback, nil, nil)
+	r := forwardAuthRequest("/auth/service/ng-blacklist")
+	r.SetBasicAuth("sys-1", "hunter2")
+	encoded := strings.TrimPrefix(r.Header.Get("Authorization"), "Basic ")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		`msg="authd: denied"`, "outcome=invalid_credentials", "claimed_system_id=sys-1",
+		"service=ng-blacklist", "method=GET", "path=/blocklist/v1/feed ", "client_addr=203.0.113.9",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q is missing %q", out, want)
+		}
+	}
+	if n := strings.Count(out, "authd: denied"); n != 1 {
+		t.Errorf("logged %d denial lines, want 1: %q", n, out)
+	}
+	if strings.Contains(out, " system_id=") {
+		t.Errorf("a 401 logged an unqualified system_id: %q", out)
+	}
+	for _, leak := range []string{"hunter2", encoded, "probe=1"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log %q leaked %q", out, leak)
+		}
+	}
+}
+
+// A 403 comes from a genuine credential, so its username is logged as
+// system_id, with the service it lacks.
+func TestDenialLogFor403(t *testing.T) {
+	buf := captureLog(t)
+	h := newHandler(&fakeValidator{err: auth.ErrForbidden}, loopback, nil, nil)
+	r := forwardAuthRequest("/auth/service/crowdsec-advanced-threat-shield")
+	r.Header.Set("X-Forwarded-Uri", "/blocklist/crowdsec/v1/feed")
+	r.SetBasicAuth("sys-2", "hunter2")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		`msg="authd: denied"`, "outcome=not_entitled", " system_id=sys-2",
+		"service=crowdsec-advanced-threat-shield", "path=/blocklist/crowdsec/v1/feed ",
+		"client_addr=203.0.113.9",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q is missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "claimed_system_id") || strings.Contains(out, "hunter2") {
+		t.Errorf("log %q: want a verified system_id and no secret", out)
+	}
+}
+
+// The forwarded headers are client-controlled unless they came through the
+// proxy: from an untrusted address, X-Forwarded-For is ignored for
+// RemoteAddr and the claimed method and path are not repeated.
+func TestDenialLogIgnoresForwardedHeadersFromAnUntrustedAddress(t *testing.T) {
+	buf := captureLog(t)
+	h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, loopback, nil, nil)
+	r := forwardAuthRequest("/auth")
+	r.RemoteAddr = "192.0.2.50:5555"
+	r.SetBasicAuth("sys-1", "hunter2")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	out := buf.String()
+	if !strings.Contains(out, "client_addr=192.0.2.50") {
+		t.Errorf("log %q: want client_addr from RemoteAddr", out)
+	}
+	for _, forged := range []string{"203.0.113.9", "198.51.100.1", "/blocklist/v1/feed"} {
+		if strings.Contains(out, forged) {
+			t.Errorf("log %q repeated the untrusted %q", out, forged)
+		}
+	}
+}
+
+// What the claimed system_id is when there is none to read: no header at
+// all, or a header that is not system_id:secret -- the shape a credential
+// sent without its system_id takes, so the whole decoded value is the
+// secret and none of it may be logged. A username trying to forge a field
+// or a line stays inside its own quoted field.
+func TestDenialLogClaimedSystemIDEdgeCases(t *testing.T) {
+	cases := []struct {
+		name, header, want, mustNot string
+	}{
+		{"no header", "", `claimed_system_id=""`, ""},
+		{"no colon", "Basic " + base64.StdEncoding.EncodeToString([]byte("only-the-secret")), `claimed_system_id=""`, "only-the-secret"},
+		{"not basic", "Bearer only-the-secret", `claimed_system_id=""`, "only-the-secret"},
+		{"forged field", "Basic " + base64.StdEncoding.EncodeToString([]byte("x outcome=ok\nmsg=y:s3cret")), `claimed_system_id="x outcome=ok\nmsg=y"`, "s3cret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLog(t)
+			h := newHandler(&fakeValidator{err: auth.ErrInvalidCredentials}, loopback, nil, nil)
+			r := forwardAuthRequest("/auth")
+			if tc.header != "" {
+				r.Header.Set("Authorization", tc.header)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), r)
+
+			out := buf.String()
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("log %q is missing %q", out, tc.want)
+			}
+			if tc.mustNot != "" && strings.Contains(out, tc.mustNot) {
+				t.Errorf("log %q leaked %q", out, tc.mustNot)
+			}
+			// One record per line, each a whole record: a username's newline
+			// must not have started a line of its own.
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if !strings.HasPrefix(line, "time=") {
+					t.Errorf("log has a line that is not a record: %q", line)
+				}
+			}
+			if n := strings.Count(out, "authd: denied"); n != 1 {
+				t.Errorf("logged %d denial lines, want 1: %q", n, out)
+			}
+		})
+	}
+}
+
+// End to end through the real auth.ForwardAuth and an upstream that says
+// 401: the denial line still never carries the secret.
+func TestDenialLogThroughTheRealValidatorNeverCarriesTheSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	buf := captureLog(t)
+	h := newHandler(auth.New(srv.URL, "test-pepper", time.Second, time.Now), loopback, nil, nil)
+	r := forwardAuthRequest("/auth/service/ng-blacklist")
+	r.SetBasicAuth("sys-9", "correct-horse-battery")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	out := buf.String()
+	if !strings.Contains(out, "claimed_system_id=sys-9") {
+		t.Errorf("log %q is missing the claimed system_id", out)
+	}
+	if strings.Contains(out, "correct-horse-battery") || strings.Contains(out, strings.TrimPrefix(r.Header.Get("Authorization"), "Basic ")) {
+		t.Errorf("log %q leaked the credential", out)
 	}
 }

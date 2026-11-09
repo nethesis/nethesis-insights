@@ -106,7 +106,8 @@ feed)
 allowlist-request)
     # allowlist-request <cidr> [reason]   — ask for an address to be exempted.
     # This only queues a request: nothing is ever allowlisted automatically.
-    # Entitlement-gated like `feed`, and for the feed's reason.
+    # Entitlement-gated like `feed`: asking for an exemption is part of
+    # what the add-on buys.
     need_cred
     cidr=${1:?usage: allowlist-request <cidr> [reason]}
     reason=${2:-}

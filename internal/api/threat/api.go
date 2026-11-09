@@ -94,6 +94,7 @@ type server struct {
 	store   Store
 	queue   Publisher
 	snap    *blocklist.Snapshot
+	basic   *blocklist.Snapshot
 	trusted httpx.TrustedProxies
 	cfg     Config
 }
@@ -123,6 +124,29 @@ type Config struct {
 	// reporter sends it again, and counting it twice would inflate the
 	// rate.
 	Events func(model.ThreatCounters)
+
+	// FeedServed, when set, is told about every answer either feed handler
+	// gives -- threatd wires it to the in-memory daily download counts
+	// (blocklist.Downloads). The live per-feed request rate needs no hook:
+	// threatd_http_requests_total already counts /v1/feed and
+	// /v1/basic-feed by route and status.
+	FeedServed func(FeedRequest)
+}
+
+// FeedRequest is one answered feed request. Feed is blocklist.FeedFull or
+// blocklist.FeedBasic. SystemID is empty when the request carried none (the
+// 401 and the 405, which is checked first). Client is the public base URL
+// the request came in on (see feedClient) and IP the requester's address as
+// httpx.ClientIP resolved it; both are statistics, never consulted to
+// answer the request. Body is true only when the list itself was sent: a
+// GET answered 200, never a HEAD.
+type FeedRequest struct {
+	Feed     string
+	SystemID string
+	Client   string
+	IP       string
+	Code     int
+	Body     bool
 }
 
 func defaultNow() int64 { return time.Now().UnixMilli() }
@@ -133,12 +157,14 @@ func defaultNow() int64 { return time.Now().UnixMilli() }
 // metricsHandler is mounted at /metrics next to /healthz -- nil skips it,
 // which only tests exercise. rec is fed every completed request's
 // method/route/status/duration; nil is valid and simply skips metrics --
-// see httpx.MetricsRecorder.
-func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
+// see httpx.MetricsRecorder. snap backs /v1/feed and basic backs
+// /v1/basic-feed; either may be nil, and its route then answers 503 like
+// a feed that has never been generated.
+func NewServer(st Store, q Publisher, snap, basic *blocklist.Snapshot, trusted httpx.TrustedProxies, cfg Config, metricsHandler http.Handler, rec httpx.MetricsRecorder) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = defaultNow
 	}
-	srv := &server{store: st, queue: q, snap: snap, trusted: trusted, cfg: cfg}
+	srv := &server{store: st, queue: q, snap: snap, basic: basic, trusted: trusted, cfg: cfg}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", httpx.Healthz)
@@ -147,6 +173,7 @@ func NewServer(st Store, q Publisher, snap *blocklist.Snapshot, trusted httpx.Tr
 	}
 	mux.HandleFunc("/v1/events", srv.handleEvents)
 	mux.HandleFunc("/v1/feed", srv.handleFeed)
+	mux.HandleFunc("/v1/basic-feed", srv.handleBasicFeed)
 	mux.HandleFunc("/v1/allowlist-requests", srv.handleAllowlistRequest)
 	return httpx.Logging(mux, rec)
 }

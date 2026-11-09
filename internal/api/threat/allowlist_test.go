@@ -36,7 +36,7 @@ func newAllowlistTestStore(t *testing.T) *threatstore.Store {
 func allowlistServer(st Store) http.Handler {
 	// No queue and no blocklist snapshot: these tests exercise only
 	// /v1/allowlist-requests, which touches neither.
-	return NewServer(st, nil, nil, trustedProxy, Config{
+	return NewServer(st, nil, nil, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		Now:          func() int64 { return threatNow },
 	}, nil, nil)
@@ -188,7 +188,7 @@ func TestAllowlistRequestsNeverAutoPromote(t *testing.T) {
 // existing rows are untouched.
 func TestAllowlistRequestRefusesASystemPastItsCap(t *testing.T) {
 	st := newAllowlistTestStore(t)
-	h := NewServer(st, nil, nil, trustedProxy, Config{
+	h := NewServer(st, nil, nil, nil, trustedProxy, Config{
 		MaxDecisions:               500,
 		MaxAllowlistRequestsPerSys: 2,
 		Now:                        func() int64 { return threatNow },

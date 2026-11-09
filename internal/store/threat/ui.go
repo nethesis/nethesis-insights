@@ -218,3 +218,65 @@ func (s *Store) ListThreatAllowlist(ctx context.Context) ([]AllowlistRow, error)
 		ORDER BY cidr
 	`)
 }
+
+// FeedMachineRow is one machine's use of one feed through one client over
+// a range of days: the first day it asked, its latest request's time and
+// address, and its summed counts.
+type FeedMachineRow struct {
+	SystemID, Feed, Client string
+	FirstDay               string
+	LastSeenAt             int64
+	LastIP                 string
+	Requests               int64
+	Downloads              int64
+	NotModified            int64
+}
+
+// FeedDownloadMachines returns one row per (system_id, feed, client) with a
+// download row from since's UTC day onward, latest request first. prefix,
+// when not empty, keeps only system_ids starting with it -- an exact id is
+// its own prefix. limit <= 0 applies defaultListLimit.
+//
+// The day bound is what keeps this cheap, as in FeedDownloadStats: a range
+// on the primary key's leading column. A machine's latest address is read
+// off the row of its latest day, joined on the full primary key: the
+// recorder stamps last_seen_at inside the row's day, so the latest day's
+// row holds the group's latest last_seen_at, and the join is one key lookup
+// per group instead of a per-row subquery over the whole range. instr()
+// rather than LIKE because LIKE ignores ASCII case and would need its own
+// escaping; instr is an exact, case-sensitive substring test.
+func (s *Store) FeedDownloadMachines(ctx context.Context, since int64, prefix string, limit int) ([]FeedMachineRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT g.system_id, g.feed, g.client, g.first_day,
+		       d.last_seen_at, d.last_ip, g.requests, g.downloads, g.not_modified
+		FROM (
+			SELECT system_id, feed, client,
+			       MIN(day) AS first_day, MAX(day) AS last_day,
+			       SUM(requests) AS requests, SUM(downloads) AS downloads,
+			       SUM(not_modified) AS not_modified
+			FROM threat_feed_downloads_daily
+			WHERE day >= ? AND (? = '' OR instr(system_id, ?) = 1)
+			GROUP BY system_id, feed, client
+		) g
+		JOIN threat_feed_downloads_daily d
+		  ON d.day = g.last_day AND d.feed = g.feed
+		 AND d.client = g.client AND d.system_id = g.system_id
+		ORDER BY d.last_seen_at DESC, g.system_id, g.feed, g.client
+		LIMIT ?
+	`, DayString(since), prefix, prefix, clampLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: feed download machines: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := []FeedMachineRow{}
+	for rows.Next() {
+		var r FeedMachineRow
+		if err := rows.Scan(&r.SystemID, &r.Feed, &r.Client, &r.FirstDay,
+			&r.LastSeenAt, &r.LastIP, &r.Requests, &r.Downloads, &r.NotModified); err != nil {
+			return nil, fmt.Errorf("store: scan feed download machines: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}

@@ -41,11 +41,11 @@ import (
 // turns it on. retention is THREAT_EVENT_RETENTION: /stats needs it to know
 // which of the days it shows is the oldest one, cut mid-day by the rolling
 // prune rather than complete.
-func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info, retention time.Duration) *http.Server {
+func newUIServer(addr, basePath string, r threatui.Reader, feed, basic threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info, retention time.Duration) *http.Server {
 	if addr == "" {
 		return nil
 	}
-	handler, err := threatui.NewServer(r, feed, w, rt, chrome.Config{
+	handler, err := threatui.NewServer(r, feed, basic, w, rt, chrome.Config{
 		BasePath: basePath,
 		AdminKey: adminKey,
 		Info:     info,
@@ -118,6 +118,20 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 		// accounting; a shorter retention would undercount it silently.
 		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be at least %s, got %s", regularWindow, cfg.IngestRetention))
 	}
+	if cfg.BasicMaxEntries <= 0 {
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_MAX_ENTRIES must be positive, got %d", cfg.BasicMaxEntries))
+	} else if cfg.BasicMaxEntries > cfg.MaxEntries {
+		// The basic feed is the free tier: it must never carry more
+		// addresses than the one the entitlement buys.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_MAX_ENTRIES (%d) must not exceed BLOCKLIST_MAX_ENTRIES (%d)", cfg.BasicMaxEntries, cfg.MaxEntries))
+	}
+	if cfg.BasicDelay < time.Millisecond {
+		// A zero delay would publish every entry the moment it is listed,
+		// handing the full feed out without the entitlement. Sub-millisecond
+		// counts as zero: first_listed_at is in milliseconds, and the
+		// blocklist package truncates the delay to match.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_DELAY must be at least 1ms, got %s", cfg.BasicDelay))
+	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
 	}
@@ -165,6 +179,13 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	add(err)
 	blocklistMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_MAX_ENTRIES", 50000)
 	add(err)
+	// The basic feed, served to every subscriber without an entitlement,
+	// publishes each new address two days after the full feed does: what
+	// the entitlement buys is the list as it stands now.
+	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 48*time.Hour)
+	add(err)
+	blocklistBasicMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_BASIC_MAX_ENTRIES", 15000)
+	add(err)
 	threatRetention, err := svc.GetenvDurationStrict("THREAT_EVENT_RETENTION", 168*time.Hour)
 	add(err)
 	threatMaxDecisions, err := svc.GetenvIntStrict("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
@@ -204,6 +225,9 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 		TTL:        blocklistTTL,
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
+
+		BasicDelay:      blocklistBasicDelay,
+		BasicMaxEntries: blocklistBasicMaxEntries,
 
 		IngestRetention:           threatIngestRetention,
 		AllowlistRequestRetention: allowlistRequestRetention,
@@ -287,7 +311,14 @@ func main() {
 
 	// Threat Shield's consensus pass: no LLM, no gate, no fingerprint.
 	snapshot := blocklist.NewSnapshot()
-	consensus := blocklist.New(s, snapshot, consensusCfg)
+	basicSnapshot := blocklist.NewSnapshot()
+	// Feed polls are counted in memory per day, feed, client and system,
+	// and the consensus pass flushes them to threat_feed_downloads_daily: a
+	// write per poll would put the whole fleet's polling on the single
+	// writer.
+	downloads := blocklist.NewDownloads()
+	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg).WithDownloads(downloads)
+	feedNames := []string{blocklist.FeedFull, blocklist.FeedBasic}
 
 	// The queue's handler is bound to the store here, before either the queue
 	// or the API server exists: the queue's handler must be fixed at
@@ -300,10 +331,11 @@ func main() {
 	storeGauges := metrics.NewStoreGauges(reg,
 		metrics.StoreGauge{Name: "active_systems", Help: "Distinct systems with a threat event observed in the last 24 hours."},
 		metrics.StoreGauge{Name: "regular_systems", Help: "Distinct systems that reported on at least 2 of the last 7 UTC days, today included."},
-		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in the published blocklist feed."},
+		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in each published blocklist feed: full (the entitled /v1/feed) and basic (/v1/basic-feed).",
+			Label: "feed", Values: feedNames},
 	)
 
-	handler := threatapi.NewServer(s, ingestQueue, snapshot, trusted, threatapi.Config{
+	handler := threatapi.NewServer(s, ingestQueue, snapshot, basicSnapshot, trusted, threatapi.Config{
 		MaxDecisions:               limits.MaxDecisions,
 		MaxAllowlistRequestsPerSys: limits.MaxAllowlistPerSystem,
 		MaxEventAge:                consensusCfg.Retention,
@@ -312,6 +344,12 @@ func main() {
 			for i, n := range c.ByResult() {
 				eventMetrics.Add(model.ThreatCounterResults[i], n)
 			}
+		},
+		FeedServed: func(fr threatapi.FeedRequest) {
+			downloads.Record(time.Now().UnixMilli(), blocklist.Poll{
+				Feed: fr.Feed, Client: fr.Client, SystemID: fr.SystemID, IP: fr.IP,
+				Code: fr.Code, Body: fr.Body,
+			})
 		},
 	}, metrics.Handler(reg), httpMetrics)
 
@@ -338,6 +376,8 @@ func main() {
 		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(consensusCfg.MinSystems)},
 		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
+		{Name: "BLOCKLIST_BASIC_DELAY", Value: consensusCfg.BasicDelay.String()},
+		{Name: "BLOCKLIST_BASIC_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.BasicMaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
 		{Name: "THREAT_INGEST_RETENTION", Value: consensusCfg.IngestRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},
@@ -354,7 +394,7 @@ func main() {
 	// set ADMIN_API_KEY still gets the plain read-only dashboard. ingestQueue
 	// satisfies threatui.Runtime (Depth/Cap/Workers), the same shape
 	// insightsd's queue already reports through logsui.Runtime.
-	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, s, ingestQueue, adminAPIKey, chrome.Info{
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, basicSnapshot, s, ingestQueue, adminAPIKey, chrome.Info{
 		StartedAt: startedAt,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
@@ -390,7 +430,7 @@ func main() {
 	// five minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
 	consensusDone := svc.RunPassLoop(consensusCtx, consensusName,
-		svc.Then(consensus, threatGauges(s, snapshot, storeGauges)), consensusInterval, passMetrics)
+		svc.Then(consensus, threatGauges(s, snapshot, basicSnapshot, storeGauges)), consensusInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -419,6 +459,14 @@ func main() {
 	stopConsensus()
 	<-consensusDone
 	slog.Info("consensus loop stopped")
+
+	// Last, once no request and no pass can record or flush any more: the
+	// feed-download counts since the last pass would otherwise be lost.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFlush()
+	if _, err := downloads.Flush(flushCtx, s); err != nil {
+		slog.Error("final feed download flush failed", "error", err)
+	}
 }
 
 // threatd_regular_systems counts a system that reported on at least
@@ -434,12 +482,14 @@ const (
 )
 
 // threatGauges refreshes threatd's database-derived gauges after each
-// consensus pass: the systems reporting now, from the store, and the
-// published feed's size, from the snapshot the pass just generated -- the
-// number the fleet actually downloads, after the allowlist and
-// BLOCKLIST_MAX_ENTRIES. While no pass has ever succeeded there is no feed,
-// so that family is left out rather than reported as an empty blocklist.
-func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.StoreGauges) func(context.Context, int64) error {
+// consensus pass: the systems reporting now, from the store, and each
+// published feed's size, from the snapshots the pass just generated -- the
+// numbers the fleet actually downloads, after the allowlist and each feed's
+// cap. The family is exported only once both feeds are ready: its label set
+// is closed, so a feed missing from the reading would be exported as 0, and
+// "no feed yet" must not read as an empty blocklist. Both are generated on
+// the same pass, so in practice they become ready together.
+func threatGauges(s activeSystemsReader, full, basic *blocklist.Snapshot, g *metrics.StoreGauges) func(context.Context, int64) error {
 	return func(ctx context.Context, now int64) error {
 		active, err := s.ActiveSystems(ctx, now-metrics.ActiveWindow.Milliseconds())
 		if err != nil {
@@ -453,10 +503,20 @@ func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.Sto
 			"active_systems":  {"": float64(active)},
 			"regular_systems": {"": float64(regular)},
 		}
-		if v := snap.View(); v.Ready {
-			reading["blocklist_entries"] = map[string]float64{"": float64(v.Entries)}
+		if f, b := full.View(), basic.View(); f.Ready && b.Ready {
+			reading["blocklist_entries"] = map[string]float64{
+				blocklist.FeedFull:  float64(f.Entries),
+				blocklist.FeedBasic: float64(b.Entries),
+			}
 		}
 		g.Set(reading)
 		return nil
 	}
+}
+
+// activeSystemsReader is the store methods threatGauges reads.
+// *threatstore.Store satisfies it.
+type activeSystemsReader interface {
+	ActiveSystems(ctx context.Context, since int64) (int, error)
+	RegularSystems(ctx context.Context, sinceDay string, minDays int) (int, error)
 }

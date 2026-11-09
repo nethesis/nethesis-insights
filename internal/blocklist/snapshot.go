@@ -25,14 +25,25 @@ import (
 
 // Rule is the promotion rule in force, rendered into the feed header so a
 // consumer can see what the list means without reading our documentation.
+//
+// Delay is set only on the basic feed (see Runner and BasicCutoff): it
+// is how long an entry waits after its listing before that feed publishes
+// it. Being part of the rule, it
+// is also part of the ETag, so the two feeds never share a tag even when
+// their entries happen to agree.
 type Rule struct {
 	MinSystems int
 	Window     time.Duration
 	TTL        time.Duration
+	Delay      time.Duration
 }
 
 func (r Rule) String() string {
-	return fmt.Sprintf("%d systems / %s window / %s ttl", r.MinSystems, r.Window, r.TTL)
+	s := fmt.Sprintf("%d systems / %s window / %s ttl", r.MinSystems, r.Window, r.TTL)
+	if r.Delay > 0 {
+		s += fmt.Sprintf(" / new entries after %s", r.Delay)
+	}
+	return s
 }
 
 // Snapshot holds the rendered feed. Every field is replaced together, under
@@ -55,8 +66,10 @@ type Snapshot struct {
 func NewSnapshot() *Snapshot { return &Snapshot{} }
 
 // Generate renders rows into a new snapshot and swaps it in. Every row is
-// published: BLOCKLIST_MAX_ENTRIES is applied when the rows are chosen (see
-// Runner.Run), and capped records whether that choice left any out.
+// published: the feed's cap (BLOCKLIST_MAX_ENTRIES, or
+// BLOCKLIST_BASIC_MAX_ENTRIES for the basic feed) is applied when the rows
+// are chosen (see Runner.Run), and capped records whether that choice left
+// any out.
 func (s *Snapshot) Generate(rows []threatstore.BlocklistRow, rule Rule, capped bool, now int64) error {
 	addrs := make([]netip.Addr, 0, len(rows))
 	for _, r := range rows {
