@@ -185,7 +185,7 @@ Threat Shield rules that are as load-bearing as the gate's:
   `/blocklist/crowdsec/v1/basic-feed`) is the same list for subscribers
   without the add-on; the entitlement buys the list as it stands now. It
   publishes a live entry only once it has been listed for
-  `BLOCKLIST_BASIC_DELAY` (default `24h`): `first_listed_at <=
+  `BLOCKLIST_BASIC_DELAY` (default `48h`): `first_listed_at <=
   blocklist.BasicCutoff(now, delay)`, which is `now - delay`. The delay is
   per address, never an epoch-aligned boundary — that made the real delay
   anywhere from minutes to a day and landed every addition on the whole

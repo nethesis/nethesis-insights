@@ -182,7 +182,7 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	// The basic feed, served to every subscriber without an entitlement,
 	// publishes each new address a day after the full feed does: what the
 	// entitlement buys is the list as it stands now.
-	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 24*time.Hour)
+	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 48*time.Hour)
 	add(err)
 	blocklistBasicMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_BASIC_MAX_ENTRIES", 15000)
 	add(err)

@@ -429,7 +429,7 @@ in `systemctl status threatd`.
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
 | `BLOCKLIST_BASIC_MAX_ENTRIES` | hard cap on the basic feed (default `15000`). Must be positive and at most `BLOCKLIST_MAX_ENTRIES`. Applied only to addresses already old enough for the basic feed; when more are, the ones seen least recently are left out |
-| `BLOCKLIST_BASIC_DELAY` | how long a newly listed address waits before the basic feed — the one for subscribers without the Threat Shield add-on — publishes it (default `24h`). Each address waits from its own listing time, so new addresses reach the basic feed one by one through the day, exactly this long after the full feed. Removals are never delayed. Must be at least `1ms`: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
+| `BLOCKLIST_BASIC_DELAY` | how long a newly listed address waits before the basic feed — the one for subscribers without the Threat Shield add-on — publishes it (default `48h`). Each address waits from its own listing time, so new addresses reach the basic feed one by one through the day, exactly this long after the full feed. Removals are never delayed. Must be at least `1ms`: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
 | `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows, and the daily feed-download rows behind `/stats` and `/downloads` — which include each machine's last public IP address — are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
@@ -506,7 +506,7 @@ entitlement differs, and each one is checked on its own: a firewall with
 events and downloading `basic-feed` need only a subscription on either
 address. Asking for an address to be left alone (`allowlist-requests`) is part
 of the add-on: a node on the basic feed blocks the same wrongly listed
-addresses, only a day later, but cannot ask from the node — its customer has to
+addresses, only two days later, but cannot ask from the node — its customer has to
 contact support, or buy the add-on.
 
 `ns8-crowdsec` has to use `/blocklist/crowdsec/v1/` as its base address. An NS8
@@ -1552,17 +1552,18 @@ collected, counted and handed back.
    `GET /blocklist/v1/basic-feed` for a firewall) and needs only its
    subscription. It gets the same list with one difference: a newly published
    address is added to it only once it has been on the full feed for
-   `BLOCKLIST_BASIC_DELAY` (a day, by default). That freshness is what the
+   `BLOCKLIST_BASIC_DELAY` (two days, by default). That freshness is what the
    add-on buys. Removals are **not** delayed: an address that expires, or that
    an operator puts on the allowlist, leaves both lists within minutes, so a
    customer without the add-on is never left blocking an address that has
    already been cleared. Restarting the server does not change what the
    basic feed contains. In practice the basic feed carries the attackers the
-   fleet keeps seeing: with the defaults, an address reported for a few
-   minutes and then never again expires (24 hours after its last report) just
-   before it would reach the basic feed, so it never does, while one the fleet
-   keeps reporting reaches it a day after it was listed and stays as long as
-   the reports continue. That is intended.
+   fleet keeps seeing: a listing expires 24 hours after its last report, so
+   with the defaults an address reaches the basic feed only if the fleet is
+   still reporting it at least a day after it was first listed. One reported
+   for a few minutes, or for less than a day, expires before it is due and
+   never appears; one the fleet keeps reporting appears two days after it was
+   listed and stays as long as the reports continue. That is intended.
 
 ### The safety net
 

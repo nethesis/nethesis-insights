@@ -852,7 +852,7 @@ empty body means "no threats" and silently disables protection.
 `POST /v1/allowlist-requests`; `POST /v1/events` requires only a subscription.
 The request route is entitled because asking for an exemption is part of what
 the add-on buys, not because only a feed consumer can be harmed — a node on
-the basic feed blocks the same false positives a day later, and its operator
+the basic feed blocks the same false positives two days later, and its operator
 has to ask out of band (support adds the entry by hand) or buy the add-on.
 Nothing in this handler implements that — it is a second `forwardAuth`
 middleware in front of it, pointing at `authd`'s `/auth/service/ng-blacklist`
@@ -888,9 +888,9 @@ properties are load-bearing:
   the same table state the full feed was just rendered from — after this
   pass's expiry (step 5) and unlisting (step 6, `Runner.unlist`) — so an
   address that expires or is newly allowlisted leaves both feeds on the same
-  pass. Delaying removals too — a copy of the full feed frozen a day ago —
+  pass. Delaying removals too — a copy of the full feed frozen two days ago —
   would make the free tier the one that keeps blocking a legitimate address
-  for up to a day after an operator exempted it, and a wrong entry is
+  for up to two days after an operator exempted it, and a wrong entry is
   exactly what removal exists to correct.
 - **It is derived from `first_listed_at`, not from state kept in memory.**
   `first_listed_at` is stored and survives a restart, so the basic feed
@@ -900,7 +900,7 @@ properties are load-bearing:
   expires and is later promoted again gets a new `first_listed_at` and
   waits out the whole delay again — correct, since it was off the list.
 - **The delay is part of the rule.** `Rule.Delay` is set only on the basic
-  snapshot and renders into the header as `… / new entries after 24h0m0s`;
+  snapshot and renders into the header as `… / new entries after 48h0m0s`;
   since the `ETag` hashes the rule, the two feeds never share a tag even when
   their entry sets agree, so a cache keyed on it cannot answer one feed's
   poll with the other's body.
@@ -931,10 +931,14 @@ is an address the fleet agreed on, not one anybody removed.
 **The basic feed carries persistent attackers, by construction.** An entry
 expires `BLOCKLIST_TTL` after its last report, and it reaches the basic feed
 only `BLOCKLIST_BASIC_DELAY` after it was first listed. With the defaults
-(both 24h) an address reported for a few minutes and then never again
-expires just before it would have reached the basic feed, so it never does;
-one the fleet re-reports after its promotion reaches it a day after listing
-and stays as long as the fleet keeps reporting it. That is intended, and
+(TTL 24h, delay 48h) an address reaches the basic feed only if the fleet
+still reports it at least 24h after listing it; one reported for less than
+that expires before it is due and never appears, and one the fleet keeps
+reporting appears two days after listing and stays as long as the reports
+continue. The default is two days rather than one so the add-on keeps a
+clear lead: published blocklist studies find roughly 40% of attacking
+addresses gone within two days, so the basic feed is left with the
+persistent half. That is intended, and
 there is deliberately no startup rule tying the delay to the TTL:
 lengthening the basic feed's TTL would publish addresses the full feed has
 already dropped, and short-lived attacks are exactly what the live feed is
@@ -2518,7 +2522,7 @@ entitled nodes would shrink the evidence base that promotion's
 three-distinct-systems rule is measured against, while leaving the live feed
 open would give away the thing being sold. What is sold is freshness, not
 access: `GET /blocklist/v1/basic-feed` stays on the subscription check and
-serves the same list with each new address a day late (see "Basic feed"
+serves the same list with each new address two days late (see "Basic feed"
 under Request flow). The right to ask for an exemption is sold too:
 `allowlist-requests` stays entitled, so a basic-feed node with a false
 positive asks out of band.

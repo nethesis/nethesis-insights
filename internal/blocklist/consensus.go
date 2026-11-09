@@ -119,7 +119,7 @@ func (r *Runner) WithDownloads(d *Downloads) *Runner {
 // Only additions are delayed. The basic feed is read on every pass from the
 // same table state the full feed is rendered from, so an address
 // that expires or is newly allowlisted leaves both feeds on the same pass:
-// holding a wrong entry back for a day would make the free tier the one
+// holding a wrong entry back for the whole delay would make the free tier the one
 // that keeps blocking a legitimate address after an operator exempted it.
 //
 // It is computed from first_listed_at rather than from a copy kept in
