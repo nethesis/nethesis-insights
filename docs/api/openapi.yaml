@@ -615,9 +615,11 @@ paths:
         interpreted.
 
         **Requires the Threat Shield entitlement**, like the feed and unlike
-        `/blocklist/v1/events`: only a node consuming the feed can be harmed
-        by a false positive in it, so asking for an exemption presupposes
-        the same entitlement. See the `entitledBasicAuth` scheme.
+        `/blocklist/v1/events` and `/blocklist/v1/basic-feed`: asking for an
+        exemption is part of what the entitlement buys. A node on the basic
+        feed blocks the same false positives, only later, and has no route
+        to ask: its operator asks out of band, through support, or buys the
+        entitlement. See the `entitledBasicAuth` scheme.
       security:
         - entitledBasicAuth: []
       requestBody:

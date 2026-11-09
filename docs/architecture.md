@@ -769,6 +769,10 @@ empty body means "no threats" and silently disables protection.
 
 **This route requires the Threat Shield entitlement**, and so does
 `POST /v1/allowlist-requests`; `POST /v1/events` requires only a subscription.
+The request route is entitled because asking for an exemption is part of what
+the add-on buys, not because only a feed consumer can be harmed — a node on
+the basic feed blocks the same false positives a day later, and its operator
+has to ask out of band (support adds the entry by hand) or buy the add-on.
 Nothing in this handler implements that — it is a second `forwardAuth`
 middleware in front of it, pointing at `authd`'s `/auth/service/ng-blacklist`
 on `/blocklist/v1/feed` (NethSecurity) and at
@@ -2431,7 +2435,9 @@ three-distinct-systems rule is measured against, while leaving the live feed
 open would give away the thing being sold. What is sold is freshness, not
 access: `GET /blocklist/v1/basic-feed` stays on the subscription check and
 serves the same list with each new address a day late (see "Basic feed"
-under Request flow).
+under Request flow). The right to ask for an exemption is sold too:
+`allowlist-requests` stays entitled, so a basic-feed node with a false
+positive asks out of band.
 
 **Two clients, two entitlements, two base URLs.** NethSecurity firewalls carry
 `ng-blacklist` and call `/blocklist/v1/`; NS8 CrowdSec nodes carry

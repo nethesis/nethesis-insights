@@ -82,8 +82,11 @@ open the other base URL's feed.
 (`https://my.nethesis.it/auth` is the default; the deployment sets it with
 `AUTH_VALIDATE_URL`. `allowlist-requests` is documented in full
 in `docs/api/openapi.yaml`; it is listed here only for the entitlement rule,
-which is the feed's — only a node consuming the feed can be harmed by a false
-positive in it.)
+which is the feed's. Asking for an exemption is part of what the entitlement
+buys, not a consequence of who can be harmed: a node on `basic-feed` blocks
+the same false positives, only later. A subscriber without the entitlement
+whose `basic-feed` lists an address it needs reached has to ask out of band —
+through Nethesis support — or buy the entitlement.)
 
 There are exactly two tiers, and both see the same global list: an entitled
 node fetches `feed`, every other subscriber fetches `basic-feed`, which

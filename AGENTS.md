@@ -139,7 +139,10 @@ Threat Shield rules that are as load-bearing as the gate's:
   validated against `AUTH_VALIDATE_URL/service/ng-blacklist` — a second Traefik
   `forwardAuth` middleware pointing at `authd`'s `/auth/service/{service}`
   route. `GET /blocklist/v1/basic-feed` needs only the subscription (see
-  "The basic feed" below). Three parts of this are load-bearing and none is
+  "The basic feed" below); `allowlist-requests` stays entitled because asking
+  for an exemption is part of what the add-on buys — never because only a
+  feed consumer can be harmed, which the basic feed made false. A basic-feed
+  node with a false positive asks out of band. Three parts of this are load-bearing and none is
   visible from the handlers, which are identical whichever check ran. **The service is part of
   `ForwardAuth`'s cache key**: a node posts events minutes before it polls the
   feed, so keyed on the credential alone the subscription positive would answer

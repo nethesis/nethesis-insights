@@ -503,7 +503,10 @@ Both addresses reach the same server and return the same list. Only the
 entitlement differs, and each one is checked on its own: a firewall with
 `ng-blacklist` gets `403` on the NS8 address, and the other way round. Sending
 events and downloading `basic-feed` need only a subscription on either
-address.
+address. Asking for an address to be left alone (`allowlist-requests`) is part
+of the add-on: a node on the basic feed blocks the same wrongly listed
+addresses, only a day later, but cannot ask from the node — its customer has to
+contact support, or buy the add-on.
 
 `ns8-crowdsec` has to use `/blocklist/crowdsec/v1/` as its base address. An NS8
 node still calling `/blocklist/v1/` keeps reporting its bans, but gets `403` on
@@ -1575,7 +1578,11 @@ A node can **ask**: `POST /blocklist/crowdsec/v1/allowlist-requests` (or
 `POST /blocklist/v1/allowlist-requests` from a firewall) puts the address in
 a review queue, ranked by how many different machines asked for it. Forty
 customers all hitting the same shared resolver floats it to the top; a single
-opportunistic request sinks.
+opportunistic request sinks. Only a node with the Threat Shield entitlement
+can ask: requesting an exemption is part of what the add-on buys. A customer
+using the basic feed who is blocking an address they need has to ask out of
+band — through support, which can add the allowlist entry directly — or buy
+the add-on.
 
 A human then **decides**. Nothing is ever exempted automatically, and this is
 deliberate rather than an unfinished feature. The blocklist and the allowlist
