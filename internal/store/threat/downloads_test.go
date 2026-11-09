@@ -26,7 +26,7 @@ func TestAddFeedDownloadsAddsAcrossFlushes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.FeedDownloadStats(ctx, 0)
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestFeedDownloadStatsCountsEachSystemOncePerDayAndFeed(t *testing.T) {
 		}
 	}
 
-	got, err := s.FeedDownloadStats(ctx, 0)
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,11 +87,40 @@ func TestPruneFeedDownloadsDailyDropsOnlyStaleDays(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("pruned rows: got %d, want 2", n)
 	}
-	got, err := s.FeedDownloadStats(ctx, 0)
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].Day != "2026-08-28" {
 		t.Fatalf("after prune: got %+v, want only 2026-08-28", got)
+	}
+}
+
+// /stats shows only its last few days, so FeedDownloadStats must not fold
+// the rest of the retained table: a day before since's is not returned,
+// since's own day is.
+func TestFeedDownloadStatsSkipsDaysBeforeSince(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.AddFeedDownloads(ctx, []FeedDownloadRow{
+		{Day: "2026-10-10", Feed: "full", SystemID: "sys-a", Requests: 1, Downloads: 1},
+		{Day: "2026-10-11", Feed: "full", SystemID: "sys-a", Requests: 2, Downloads: 2},
+		{Day: "2026-11-09", Feed: "basic", SystemID: "sys-b", Requests: 3, NotModified: 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	since := time.Date(2026, 10, 11, 15, 0, 0, 0, time.UTC).UnixMilli()
+	got, err := s.FeedDownloadStats(ctx, since, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FeedDownloadDayRow{
+		{Day: "2026-11-09", Feed: "basic", Systems: 1, Requests: 3, NotModified: 3},
+		{Day: "2026-10-11", Feed: "full", Systems: 1, Requests: 2, Downloads: 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v,\nwant %+v", got, want)
 	}
 }

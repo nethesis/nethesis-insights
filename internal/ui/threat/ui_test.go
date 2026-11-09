@@ -48,6 +48,7 @@ type fakeReader struct {
 	allowlistRequest []threatstore.AllowlistRequestRow
 	audit            []threatstore.AllowlistAuditRow
 	downloads        []threatstore.FeedDownloadDayRow
+	downloadsSince   atomic.Int64 // the since FeedDownloadStats was last called with
 
 	err error // when set, every method returns this error instead
 
@@ -118,7 +119,8 @@ func (f *fakeReader) ThreatIngestStats(_ context.Context, _ int) ([]threatstore.
 	return f.threatIngest, f.err
 }
 
-func (f *fakeReader) FeedDownloadStats(_ context.Context, _ int) ([]threatstore.FeedDownloadDayRow, error) {
+func (f *fakeReader) FeedDownloadStats(_ context.Context, since int64, _ int) ([]threatstore.FeedDownloadDayRow, error) {
+	f.downloadsSince.Store(since)
 	return f.downloads, f.err
 }
 
@@ -495,6 +497,10 @@ func TestStatsPageShowsFeedDownloads(t *testing.T) {
 	}
 	if strings.Contains(body, "2026-08-27 <small>(today") {
 		t.Fatal("/stats marks a finished day as today")
+	}
+	// Thirty days, today included: the read starts 29 days before testNow.
+	if got := threatstore.DayString(r.downloadsSince.Load()); got != "2026-07-30" {
+		t.Fatalf("/stats read feed downloads from %s, want 2026-07-30", got)
 	}
 
 	empty := get(t, newTestServerWithFeed(t, threatReader(), nil), "/stats").Body.String()

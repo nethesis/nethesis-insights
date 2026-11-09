@@ -482,17 +482,25 @@ type FeedDownloadDayRow struct {
 	NotModified int64
 }
 
-// FeedDownloadStats returns per-day, per-feed totals, newest day first and
-// "basic" before "full" within a day. limit counts (day, feed) rows;
-// limit <= 0 applies defaultListLimit.
-func (s *Store) FeedDownloadStats(ctx context.Context, limit int) ([]FeedDownloadDayRow, error) {
+// FeedDownloadStats returns per-day, per-feed totals for the UTC days from
+// since's day onward, newest day first and "basic" before "full" within a
+// day. limit counts (day, feed) rows; limit <= 0 applies defaultListLimit.
+//
+// The day bound is what keeps this cheap, not the limit: the table holds
+// THREAT_INGEST_RETENTION days of one row per feed and polling system
+// (about half a million at fleet scale), LIMIT applies only after
+// GROUP BY has folded all of them, and the store has one connection, so an
+// unbounded scan stalls ingest and the consensus pass for every /stats
+// render. WHERE day >= ? is a range on the primary key's leading column.
+func (s *Store) FeedDownloadStats(ctx context.Context, since int64, limit int) ([]FeedDownloadDayRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT day, feed, COUNT(DISTINCT system_id), SUM(requests), SUM(downloads), SUM(not_modified)
 		FROM threat_feed_downloads_daily
+		WHERE day >= ?
 		GROUP BY day, feed
 		ORDER BY day DESC, feed
 		LIMIT ?
-	`, clampLimit(limit))
+	`, DayString(since), clampLimit(limit))
 	if err != nil {
 		return nil, fmt.Errorf("store: feed download stats: %w", err)
 	}

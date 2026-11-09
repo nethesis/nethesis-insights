@@ -761,7 +761,11 @@ never a `HEAD`) and the `304`s (`not_modified`); a `401` or `405` has no
 `system_id` and is not attributed. The consensus pass flushes it into
 `threat_feed_downloads_daily` with `ON CONFLICT … DO UPDATE` **adding** the
 counts, and `/stats` reads `COUNT(DISTINCT system_id)` per day and feed —
-the adoption number for each tier.
+the adoption number for each tier. That read is bounded to the 30 days the
+page shows (`WHERE day >= ?`, a range on the primary key), never the whole
+retained table: at fleet scale that is about half a million rows, `LIMIT`
+applies only after `GROUP BY` has folded all of them, and the store's one
+connection would stall ingest and the pass for every page render.
 
 Counting in memory rather than writing per request is the point: ~2700
 nodes polling every few minutes would put one write per poll on the single

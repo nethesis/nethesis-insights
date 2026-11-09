@@ -46,9 +46,12 @@ type Reader interface {
 	ThreatDailyStats(ctx context.Context) ([]threatstore.ThreatDailyRow, error)
 	ThreatIngestStats(ctx context.Context, limit int) ([]threatstore.ThreatIngestRow, error)
 	// FeedDownloadStats backs /stats' feed-download table: one row per day
-	// and feed, read from the small per-system daily table the consensus
-	// pass flushes into -- cheap enough not to need dailyStats' cache.
-	FeedDownloadStats(ctx context.Context, limit int) ([]threatstore.FeedDownloadDayRow, error)
+	// and feed from since's UTC day on, folded from the per-system daily
+	// table the consensus pass flushes into. That table holds one row per
+	// feed and polling system for every retained day, so the caller bounds
+	// it to the days the page shows (feedDownloadsDays); the bound is what
+	// keeps it cheap enough not to need dailyStats' cache.
+	FeedDownloadStats(ctx context.Context, since int64, limit int) ([]threatstore.FeedDownloadDayRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]threatstore.AllowlistRow, error)
 
@@ -118,8 +121,10 @@ const (
 	threatEventsDefLim = 50
 	threatEventsMaxLim = 500
 	threatStatsLimit   = 200
-	// Thirty days of both feeds.
-	feedDownloadsLimit = 60
+	// feedDownloadsDays is how many UTC days /stats' feed-download table
+	// shows, today included; feedDownloadsLimit is those days for both feeds.
+	feedDownloadsDays  = 30
+	feedDownloadsLimit = 2 * feedDownloadsDays
 	allowlistReqLimit  = 200
 	auditLimit         = 500
 )
@@ -554,7 +559,8 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "stats", err)
 		return
 	}
-	downloads, err := s.reader.FeedDownloadStats(r.Context(), feedDownloadsLimit)
+	since := s.now() - int64(feedDownloadsDays-1)*24*time.Hour.Milliseconds()
+	downloads, err := s.reader.FeedDownloadStats(r.Context(), since, feedDownloadsLimit)
 	if err != nil {
 		s.chrome.StoreError(w, "stats", err)
 		return

@@ -123,7 +123,7 @@ func TestRunFlushesAndPrunesFeedDownloads(t *testing.T) {
 		}
 	}
 
-	got, err := s.FeedDownloadStats(ctx, 0)
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
