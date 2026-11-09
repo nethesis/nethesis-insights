@@ -600,3 +600,30 @@ func TestActiveSystemsCountsDistinctRecentReporters(t *testing.T) {
 		t.Fatalf("ActiveSystems = %d, want 2", n)
 	}
 }
+
+// A system a single mass scan woke up reports on one day only, and must not
+// count; one that reports on two days inside the window must.
+func TestRegularSystemsNeedsSeveralDaysInTheWindow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, r := range []struct{ day, sys string }{
+		{"2026-11-03", "regular"}, {"2026-11-05", "regular"},
+		// Several batches on one day are still one day.
+		{"2026-11-03", "one-shot"}, {"2026-11-03", "one-shot"},
+		// The second day is before the cutoff, so only one counts.
+		{"2026-11-02", "lapsed"}, {"2026-11-04", "lapsed"},
+		// The cutoff day itself is inside the window.
+		{"2026-11-03", "edge"}, {"2026-11-09", "edge"},
+	} {
+		if err := s.RecordIngestCounters(ctx, r.day, r.sys, model.ThreatCounters{}, 0); err != nil {
+			t.Fatalf("record %s/%s: %v", r.day, r.sys, err)
+		}
+	}
+	n, err := s.RegularSystems(ctx, "2026-11-03", 2)
+	if err != nil {
+		t.Fatalf("RegularSystems: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("RegularSystems = %d, want 2 (regular, edge)", n)
+	}
+}

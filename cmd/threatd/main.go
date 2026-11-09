@@ -113,8 +113,10 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 	if cfg.AllowlistRequestRetention <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_ALLOWLIST_REQUEST_RETENTION must be positive, got %s", cfg.AllowlistRequestRetention))
 	}
-	if cfg.IngestRetention <= 0 {
-		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be positive, got %s", cfg.IngestRetention))
+	if cfg.IngestRetention < regularWindow {
+		// threatd_regular_systems reads regularWindowDays of ingest
+		// accounting; a shorter retention would undercount it silently.
+		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be at least %s, got %s", regularWindow, cfg.IngestRetention))
 	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
@@ -297,6 +299,7 @@ func main() {
 	metrics.RegisterQueueGauges(reg, "threat_events", ingestQueue.Depth, ingestQueue.Cap, ingestQueue.Workers)
 	storeGauges := metrics.NewStoreGauges(reg,
 		metrics.StoreGauge{Name: "active_systems", Help: "Distinct systems with a threat event observed in the last 24 hours."},
+		metrics.StoreGauge{Name: "regular_systems", Help: "Distinct systems that reported on at least 2 of the last 7 UTC days, today included."},
 		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in the published blocklist feed."},
 	)
 
@@ -418,6 +421,18 @@ func main() {
 	slog.Info("consensus loop stopped")
 }
 
+// threatd_regular_systems counts a system that reported on at least
+// regularMinDays of the last regularWindowDays UTC days, today included. A
+// reporter sends only when it has a ban, so threatd_active_systems jumps
+// whenever one mass scan touches hundreds of otherwise quiet systems at once;
+// requiring a second day keeps those one-off wake-ups out of this count. See
+// Store.RegularSystems.
+const (
+	regularWindowDays = 7
+	regularMinDays    = 2
+	regularWindow     = regularWindowDays * 24 * time.Hour
+)
+
 // threatGauges refreshes threatd's database-derived gauges after each
 // consensus pass: the systems reporting now, from the store, and the
 // published feed's size, from the snapshot the pass just generated -- the
@@ -430,7 +445,14 @@ func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.Sto
 		if err != nil {
 			return err
 		}
-		reading := metrics.StoreReading{"active_systems": {"": float64(active)}}
+		regular, err := s.RegularSystems(ctx, threatstore.DayString(now-(regularWindow-24*time.Hour).Milliseconds()), regularMinDays)
+		if err != nil {
+			return err
+		}
+		reading := metrics.StoreReading{
+			"active_systems":  {"": float64(active)},
+			"regular_systems": {"": float64(regular)},
+		}
 		if v := snap.View(); v.Ready {
 			reading["blocklist_entries"] = map[string]float64{"": float64(v.Entries)}
 		}
