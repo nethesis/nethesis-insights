@@ -34,6 +34,7 @@ func validConsensus() blocklist.Config {
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
 		BasicDelay:                24 * time.Hour,
+		BasicMaxEntries:           15000,
 	}
 }
 
@@ -93,6 +94,11 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		// A zero delay publishes every entry the moment it is listed: the
 		// full feed, handed out without the entitlement.
 		{name: "zero basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
+		// The basic cap must bind, and never let the basic feed outgrow
+		// the full one's.
+		{name: "zero basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "negative basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = -1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "basic max entries above max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = c.MaxEntries + 1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
 		{name: "negative basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = -time.Hour }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
 		// Events pruned before the window closes are never counted.
 		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},
@@ -147,6 +153,7 @@ func setValidThreatdEnv(t *testing.T) {
 		"BLOCKLIST_TTL":                            "24h",
 		"BLOCKLIST_MAX_ENTRIES":                    "50000",
 		"BLOCKLIST_BASIC_DELAY":                    "24h",
+		"BLOCKLIST_BASIC_MAX_ENTRIES":              "15000",
 		"THREAT_EVENT_RETENTION":                   "168h",
 		"THREAT_INGEST_RETENTION":                  "2160h",
 		"THREAT_MAX_DECISIONS_PER_REQUEST":         "500",

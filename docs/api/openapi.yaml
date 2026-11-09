@@ -541,7 +541,10 @@ paths:
         Removals are not delayed: an address
         that expires or is allowlisted leaves both feeds on the same
         consensus pass. The feed is still regenerated on every pass, so
-        poll it like the full feed; most polls answer `304`.
+        poll it like the full feed; most polls answer `304`. It is capped
+        at `BLOCKLIST_BASIC_MAX_ENTRIES` (default 15000), applied to the
+        addresses already old enough to publish and keeping the most
+        recently seen of them.
 
         The header's rule line ends in `/ new entries after 24h0m0s`, and
         the two feeds never share an `ETag`.

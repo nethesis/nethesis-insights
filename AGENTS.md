@@ -185,8 +185,8 @@ Threat Shield rules that are as load-bearing as the gate's:
   per address, never an epoch-aligned boundary — that made the real delay
   anywhere from minutes to a day and landed every addition on the whole
   fleet at 00:00 UTC. Three parts are load-bearing.
-  **Only additions are delayed**: it is filtered on every pass from the same
-  capped live rows `Generate` renders the full feed from, so expiry and a newly
+  **Only additions are delayed**: it is read on every pass, after the same
+  expiry and unlisting the full feed is rendered after, so expiry and a newly
   added allowlist entry (`Runner.unlist`) remove an address from both feeds on
   the same pass — holding a wrong entry back would make the free tier keep
   blocking a legitimate address after an operator exempted it. **It is derived
@@ -199,7 +199,14 @@ Threat Shield rules that are as load-bearing as the gate's:
   `/allowlist-requests`). `BLOCKLIST_BASIC_DELAY` must be positive —
   threatd refuses to start otherwise, since zero would hand out the full feed
   without the entitlement. The delay is part of `Rule`, hence of the header and
-  the `ETag`, so the two feeds never share a tag.
+  the `ETag`, so the two feeds never share a tag. **It has its own cap,
+  applied after the delay**: `BLOCKLIST_BASIC_MAX_ENTRIES` (at most
+  `BLOCKLIST_MAX_ENTRIES`) and its own capped flag, with the delay bound in
+  SQL (`ListBlocklistListedBy`). Filtering the full feed's already-capped rows
+  starved it — the full cap keeps the most recently seen rows, mostly ones
+  too new to publish — so the basic feed is a subset of the full one only
+  while the full feed is uncapped; never restore that order to win the
+  subset back.
 - **Never serve blank.** Either feed answers 503 before the first successful
   pass, and a failed pass keeps serving the previous snapshot with its original
   `generated_at`. An empty body means "no threats" to every client that imports it.

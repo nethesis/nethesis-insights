@@ -25,6 +25,7 @@ type Reader interface {
 	UpsertBlocklistEntries(ctx context.Context, rows []threatstore.BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
+	ListBlocklistListedBy(ctx context.Context, now, listedBy int64, limit int) ([]threatstore.BlocklistRow, error)
 	ListBlocklistIPs(ctx context.Context, now int64) ([]string, error)
 	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
@@ -43,7 +44,7 @@ const MinSystemsFloor = 3
 // Runner trusts a validated Config: threatd's startup validation
 // (validateConfig in cmd/threatd/main.go) refuses to start with a
 // non-positive MaxEntries, Retention, IngestRetention,
-// AllowlistRequestRetention or BasicDelay, so Run does not guard any of
+// AllowlistRequestRetention, BasicDelay or BasicMaxEntries, so Run does not guard any of
 // them a second time. A test that builds a Config literal must therefore set every field
 // it exercises -- see testConfig in consensus_test.go -- rather than lean on
 // a zero value silently skipping a step.
@@ -72,6 +73,11 @@ type Config struct {
 	// basic feed publishes it (BLOCKLIST_BASIC_DELAY). It is read only when
 	// Runner has a basic snapshot to fill; see BasicCutoff.
 	BasicDelay time.Duration
+
+	// BasicMaxEntries is the hard cap on the basic feed
+	// (BLOCKLIST_BASIC_MAX_ENTRIES), applied after the delay filter.
+	// threatd refuses to start with it above MaxEntries.
+	BasicMaxEntries int
 }
 
 func (c Config) rule() Rule {
@@ -100,8 +106,8 @@ func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 // boundary, and the delay is the same for every address rather than
 // anywhere between zero and a whole interval.
 //
-// Only additions are delayed. The basic feed is filtered out of the same
-// live rows the full feed is rendered from, on every pass, so an address
+// Only additions are delayed. The basic feed is read on every pass from the
+// same table state the full feed is rendered from, so an address
 // that expires or is newly allowlisted leaves both feeds on the same pass:
 // holding a wrong entry back for a day would make the free tier the one
 // that keeps blocking a legitimate address after an operator exempted it.
@@ -121,18 +127,6 @@ func BasicCutoff(now int64, delay time.Duration) int64 {
 		return math.MinInt64
 	}
 	return now - delay.Milliseconds()
-}
-
-// basicRows is the subset of live the basic feed publishes at now.
-func basicRows(live []threatstore.BlocklistRow, delay time.Duration, now int64) []threatstore.BlocklistRow {
-	cutoff := BasicCutoff(now, delay)
-	out := make([]threatstore.BlocklistRow, 0, len(live))
-	for _, row := range live {
-		if row.FirstListedAt <= cutoff {
-			out = append(out, row)
-		}
-	}
-	return out
 }
 
 // candidate is one attacker address folded across every system that reported
@@ -229,12 +223,8 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	if err := r.snap.Generate(live, r.cfg.rule(), capped, now); err != nil {
 		return err
 	}
-	// From the same capped live rows, so the basic feed is always a subset
-	// of the full one and every removal reaches both on this pass.
 	if r.basic != nil {
-		rule := r.cfg.rule()
-		rule.Delay = r.cfg.BasicDelay
-		if err := r.basic.Generate(basicRows(live, r.cfg.BasicDelay, now), rule, capped, now); err != nil {
+		if err := r.generateBasic(ctx, now); err != nil {
 			return err
 		}
 	}
@@ -243,6 +233,47 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		"candidates", len(rows), "promoted", len(promoted), "expired", expired,
 		"unlisted", unlisted, "entries", r.snap.View().Entries, "min_systems", r.cfg.MinSystems)
 	return nil
+}
+
+// generateBasic renders the basic feed: the live entries listed for at
+// least BasicDelay, capped at BasicMaxEntries.
+//
+// The delay is applied in SQL, before the cap, and the cap is the basic
+// feed's own. Filtering the full feed's already-capped rows instead would
+// starve it whenever BLOCKLIST_MAX_ENTRIES binds: the full cap keeps the
+// most recently seen rows, which are disproportionately the newly listed
+// ones the basic feed may not publish yet, so eligible rows would lose
+// their slots to rows it then drops.
+//
+// What this guarantees: every basic entry is a live, non-allowlisted row
+// listed at least BasicDelay ago, read after this pass's expiry and
+// unlisting, so a removal reaches both feeds on the same pass. While the
+// full feed is not capped, the basic feed is a subset of it. When the full
+// feed is capped, the basic feed may carry an eligible address the full
+// cap cut for being seen longer ago -- the two caps rank different sets --
+// which is the price of not starving it, and harmless: it is an address
+// the fleet agreed on, not one anybody removed.
+func (r *Runner) generateBasic(ctx context.Context, now int64) error {
+	rule := r.cfg.rule()
+	rule.Delay = r.cfg.BasicDelay
+	cutoff := BasicCutoff(now, r.cfg.BasicDelay)
+	if cutoff == math.MinInt64 {
+		// Fail closed without asking the store: an empty, ready feed.
+		return r.basic.Generate(nil, rule, false, now)
+	}
+	// One row past the cap, as for the full feed, only to learn whether
+	// it binds.
+	rows, err := r.store.ListBlocklistListedBy(ctx, now, cutoff, r.cfg.BasicMaxEntries+1)
+	if err != nil {
+		return fmt.Errorf("blocklist: list basic: %w", err)
+	}
+	capped := len(rows) > r.cfg.BasicMaxEntries
+	if capped {
+		rows = rows[:r.cfg.BasicMaxEntries]
+		slog.Warn("blocklist: basic feed capped at BLOCKLIST_BASIC_MAX_ENTRIES; the least recently seen addresses are left out",
+			"max_entries", r.cfg.BasicMaxEntries)
+	}
+	return r.basic.Generate(rows, rule, capped, now)
 }
 
 // allowlist loads the hand-maintained exclusions.

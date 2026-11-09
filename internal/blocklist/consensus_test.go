@@ -35,6 +35,7 @@ func testConfig() Config {
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
 		BasicDelay:                24 * time.Hour,
+		BasicMaxEntries:           15000,
 	}
 }
 
@@ -629,6 +630,15 @@ func (f *failingReader) DeleteBlocklistEntries(context.Context, []string) (int, 
 }
 func (f *failingReader) ListBlocklist(context.Context, int64, int) ([]threatstore.BlocklistRow, error) {
 	return f.rows, nil
+}
+func (f *failingReader) ListBlocklistListedBy(_ context.Context, _, listedBy int64, _ int) ([]threatstore.BlocklistRow, error) {
+	var out []threatstore.BlocklistRow
+	for _, r := range f.rows {
+		if r.FirstListedAt <= listedBy {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 func (f *failingReader) PruneThreatEvents(context.Context, int64) (int, error) { return 0, nil }
 func (f *failingReader) PruneThreatIngestDaily(context.Context, int64) (int, error) {

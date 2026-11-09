@@ -343,7 +343,10 @@ once. Since a listing expires a day after its last report, an address the
 fleet reported only briefly expires before it is due and never appears here;
 the basic feed carries the attackers the fleet keeps reporting. Removals are
 not delayed — an address that expires or is allowlisted leaves both feeds on
-the same five-minute pass — so the basic feed is always a subset of `feed`.
+the same five-minute pass. It has its own cap, `BLOCKLIST_BASIC_MAX_ENTRIES`
+(15 000 by default), which keeps the most recently seen of the addresses old
+enough to publish. While `feed` is not capped, the basic feed is a subset of
+it.
 
 The header's rule line names the delay:
 

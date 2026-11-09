@@ -728,9 +728,11 @@ load-bearing:
     always asks for `MaxEntries + 1`. `ListBlocklist` itself treats
     `limit <= 0` as every live entry rather than the UI listings' 200-row
     default, which used to cap the feed silently. The full feed is generated
-    first; the basic feed is then filtered out of **the same capped rows**
-    (`basicRows`; see "Basic feed" below), so it is always a subset of the full feed and
-    every removal of steps 5 and 6 reaches both on this pass.
+    first; the basic feed is then read with its own query,
+    `ListBlocklistListedBy`, which applies the delay in SQL before its own
+    cap, `BLOCKLIST_BASIC_MAX_ENTRIES`, and its own capped flag (see "Basic
+    feed" below). Both reads follow steps 5 and 6, so every removal reaches
+    both feeds on this pass.
 
 An error in steps 1–6 or 10 aborts the pass and returns (if the full feed
 generated and the basic one did not, the basic feed keeps its previous
@@ -823,6 +825,20 @@ would publish every entry the pass that lists it — the full feed, without
 the entitlement. `BasicCutoff` also fails closed on its own (a non-positive
 delay yields an empty basic feed), so a caller that skips the startup check
 cannot leak the live list.
+
+**The basic feed is capped on its own, after the delay.** It is cut at
+`BLOCKLIST_BASIC_MAX_ENTRIES` (default `15000`, validated positive and at
+most `BLOCKLIST_MAX_ENTRIES`), most recently seen first, with its own capped
+flag and its own warning. The delay is applied in SQL *before* that cap. An
+earlier version filtered the full feed's already-capped rows instead, and
+whenever `BLOCKLIST_MAX_ENTRIES` bound, the rows that cap keeps — the most
+recently seen, which are disproportionately the newly listed ones — took
+the slots and eligible rows were lost to the basic feed. The guarantee is
+therefore: every basic entry is live, non-allowlisted and listed at least
+the delay ago; while the full feed is uncapped, the basic feed is a subset
+of it; when the full feed is capped, the basic feed may carry an eligible
+address the full cap cut for being seen longer ago. That is accepted — it
+is an address the fleet agreed on, not one anybody removed.
 
 **The basic feed carries persistent attackers, by construction.** An entry
 expires `BLOCKLIST_TTL` after its last report, and it reaches the basic feed
@@ -2601,7 +2617,9 @@ listed for the delay, to the millisecond, two entries listed hours apart
 reach the basic feed hours apart, a zero or negative delay yields an empty
 feed, an allowlisted or expired one leaves both feeds on the same pass,
 every pass runs on a fresh `Runner` and fresh snapshots, as a restarted
-`threatd` would, and the two feeds' `ETag`s differ.
+`threatd` would, the two feeds' `ETag`s differ, the basic cap binds with
+its own capped flag while the full feed is uncapped, and a binding full cap
+does not starve the basic feed of eligible rows.
 
 ## Known limits
 

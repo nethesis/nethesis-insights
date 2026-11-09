@@ -43,10 +43,17 @@ func promoteThree(t *testing.T, s *threatstore.Store, ip string) {
 // no pass refreshes it: it stays exactly as seeded until it expires.
 func seedListed(t *testing.T, s *threatstore.Store, ip string, firstListed, expires int64) {
 	t.Helper()
+	seedListedSeen(t, s, ip, firstListed, firstListed, expires)
+}
+
+// seedListedSeen is seedListed with last_seen_at set too: the order both
+// caps cut on.
+func seedListedSeen(t *testing.T, s *threatstore.Store, ip string, firstListed, lastSeen, expires int64) {
+	t.Helper()
 	if err := s.UpsertBlocklistEntries(context.Background(), []threatstore.BlocklistRow{{
 		AttackerIP:      ip,
 		FirstListedAt:   firstListed,
-		LastSeenAt:      firstListed,
+		LastSeenAt:      lastSeen,
 		ExpiresAt:       expires,
 		DistinctSystems: 3,
 		Scenarios:       []string{"ssh_bruteforce"},
@@ -252,5 +259,54 @@ func TestBasicFeedNamesItsDelayAndHasItsOwnETag(t *testing.T) {
 	}
 	if full.View().ETag == basic.View().ETag {
 		t.Fatal("same entries, but the two feeds must not share an ETag")
+	}
+}
+
+// The basic feed has its own cap and its own capped flag: it can bind
+// while the full feed, under a larger cap, publishes everything. What is
+// cut is what the fleet saw longest ago, as for the full feed.
+func TestBasicCapBindsOnItsOwn(t *testing.T) {
+	s := newTestStore(t)
+	seedListedSeen(t, s, "203.0.113.1", now-30*hour, now-3*hour, now+2*day)
+	seedListedSeen(t, s, "203.0.113.2", now-30*hour, now-2*hour, now+2*day)
+	seedListedSeen(t, s, "203.0.113.3", now-30*hour, now-1*hour, now+2*day)
+	cfg := testConfig()
+	cfg.MaxEntries = 10
+	cfg.BasicMaxEntries = 2
+
+	full, basic := runBothCfg(t, s, cfg, now)
+	if v := full.View(); v.Capped || v.Entries != 3 {
+		t.Fatalf("full feed: capped=%v entries=%d, want uncapped with 3", v.Capped, v.Entries)
+	}
+	if v := basic.View(); !v.Capped || v.Entries != 2 {
+		t.Fatalf("basic feed: capped=%v entries=%d, want capped with 2", v.Capped, v.Entries)
+	}
+	if serves(basic, "203.0.113.1") || !serves(basic, "203.0.113.2") || !serves(basic, "203.0.113.3") {
+		t.Fatalf("basic cap kept the wrong rows:\n%s", basic.View().Body)
+	}
+}
+
+// When the full cap binds, the rows it keeps are the most recently seen,
+// which are mostly too new for the basic feed. The basic feed is filtered
+// before it is capped, so those rows cannot take the eligible ones' slots.
+func TestFullCapDoesNotStarveTheBasicFeed(t *testing.T) {
+	s := newTestStore(t)
+	// Listed an hour ago and seen a minute ago: first under the full cap,
+	// not yet eligible for the basic feed.
+	seedListedSeen(t, s, "198.51.100.1", now-hour, now-minute, now+2*day)
+	seedListedSeen(t, s, "198.51.100.2", now-hour, now-minute, now+2*day)
+	// Eligible, but seen two hours ago: cut by the full cap.
+	seedListedSeen(t, s, "203.0.113.1", now-30*hour, now-2*hour, now+2*day)
+	seedListedSeen(t, s, "203.0.113.2", now-30*hour, now-2*hour, now+2*day)
+	cfg := testConfig()
+	cfg.MaxEntries = 2
+	cfg.BasicMaxEntries = 2
+
+	full, basic := runBothCfg(t, s, cfg, now)
+	if v := full.View(); !v.Capped || v.Entries != 2 || !serves(full, "198.51.100.1") || !serves(full, "198.51.100.2") {
+		t.Fatalf("full feed: capped=%v entries=%d, want capped with the two fresh rows\n%s", v.Capped, v.Entries, v.Body)
+	}
+	if v := basic.View(); v.Capped || v.Entries != 2 || !serves(basic, "203.0.113.1") || !serves(basic, "203.0.113.2") {
+		t.Fatalf("basic feed: capped=%v entries=%d, want uncapped with the two eligible rows\n%s", v.Capped, v.Entries, v.Body)
 	}
 }

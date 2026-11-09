@@ -118,6 +118,13 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 		// accounting; a shorter retention would undercount it silently.
 		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be at least %s, got %s", regularWindow, cfg.IngestRetention))
 	}
+	if cfg.BasicMaxEntries <= 0 {
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_MAX_ENTRIES must be positive, got %d", cfg.BasicMaxEntries))
+	} else if cfg.BasicMaxEntries > cfg.MaxEntries {
+		// The basic feed is the free tier: it must never carry more
+		// addresses than the one the entitlement buys.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_MAX_ENTRIES (%d) must not exceed BLOCKLIST_MAX_ENTRIES (%d)", cfg.BasicMaxEntries, cfg.MaxEntries))
+	}
 	if cfg.BasicDelay <= 0 {
 		// A zero delay would publish every entry the moment it is listed,
 		// handing the full feed out without the entitlement.
@@ -175,6 +182,8 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	// entitlement buys is the list as it stands now.
 	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 24*time.Hour)
 	add(err)
+	blocklistBasicMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_BASIC_MAX_ENTRIES", 15000)
+	add(err)
 	threatRetention, err := svc.GetenvDurationStrict("THREAT_EVENT_RETENTION", 168*time.Hour)
 	add(err)
 	threatMaxDecisions, err := svc.GetenvIntStrict("THREAT_MAX_DECISIONS_PER_REQUEST", threat.DefaultMaxDecisions)
@@ -215,7 +224,8 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
 
-		BasicDelay: blocklistBasicDelay,
+		BasicDelay:      blocklistBasicDelay,
+		BasicMaxEntries: blocklistBasicMaxEntries,
 
 		IngestRetention:           threatIngestRetention,
 		AllowlistRequestRetention: allowlistRequestRetention,
@@ -352,6 +362,7 @@ func main() {
 		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
 		{Name: "BLOCKLIST_BASIC_DELAY", Value: consensusCfg.BasicDelay.String()},
+		{Name: "BLOCKLIST_BASIC_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.BasicMaxEntries)},
 		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
 		{Name: "THREAT_INGEST_RETENTION", Value: consensusCfg.IngestRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},

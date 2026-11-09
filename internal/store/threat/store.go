@@ -635,6 +635,25 @@ func (s *Store) ListBlocklist(ctx context.Context, now int64, limit int) ([]Bloc
 	`, now, limit)
 }
 
+// ListBlocklistListedBy is ListBlocklist restricted to the entries first
+// listed at or before listedBy: the basic feed's rows. The bound is applied
+// in SQL, before the limit, so a cap on the result keeps the most recently
+// seen *eligible* entries -- capping first and filtering after would let
+// entries too new to publish take the slots and leave eligible ones out.
+func (s *Store) ListBlocklistListedBy(ctx context.Context, now, listedBy int64, limit int) ([]BlocklistRow, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite: no limit
+	}
+	return s.queryBlocklist(ctx, `
+		SELECT attacker_ip, first_listed_at, last_seen_at, expires_at,
+		       distinct_systems, scenarios, listing_reason
+		FROM threat_blocklist
+		WHERE expires_at > ? AND first_listed_at <= ?
+		ORDER BY last_seen_at DESC, attacker_ip
+		LIMIT ?
+	`, now, listedBy, limit)
+}
+
 func (s *Store) queryBlocklist(ctx context.Context, query string, args ...any) ([]BlocklistRow, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
