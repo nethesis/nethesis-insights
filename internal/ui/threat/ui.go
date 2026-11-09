@@ -12,6 +12,7 @@ package threat
 import (
 	"context"
 	"embed"
+	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -53,6 +54,11 @@ type Reader interface {
 	// it to the days the page shows (feedDownloadsDays); the bound is what
 	// keeps it cheap enough not to need dailyStats' cache.
 	FeedDownloadStats(ctx context.Context, since int64, limit int) ([]threatstore.FeedDownloadDayRow, error)
+	// FeedDownloadMachines backs /downloads: one row per machine, feed and
+	// client from since's UTC day on, latest request first, optionally only
+	// the system_ids starting with prefix. Bounded by day for the same
+	// reason as FeedDownloadStats, and by limit on top.
+	FeedDownloadMachines(ctx context.Context, since int64, prefix string, limit int) ([]threatstore.FeedMachineRow, error)
 	ListThreatSystems(ctx context.Context) ([]threatstore.ThreatSystemRow, error)
 	ListThreatAllowlist(ctx context.Context) ([]threatstore.AllowlistRow, error)
 
@@ -126,18 +132,22 @@ const (
 	// shows, today included; feedDownloadsLimit is those days for both feeds.
 	feedDownloadsDays  = 30
 	feedDownloadsLimit = 2 * feedDownloadsDays
-	allowlistReqLimit  = 200
-	auditLimit         = 500
+	// downloadMachinesLimit bounds /downloads, which covers the same
+	// feedDownloadsDays.
+	downloadMachinesLimit = 500
+	allowlistReqLimit     = 200
+	auditLimit            = 500
 )
 
 // nav is this dashboard's nav bar structure. A single group with no label
-// renders as a flat row, which is right for seven pages.
+// renders as a flat row, which is right for eight pages.
 var nav = []chrome.NavGroup{
 	{Pages: []chrome.NavPage{
 		{Key: "index", Path: "/", Label: "Blocklist"},
 		{Key: "systems", Path: "/systems", Label: "Systems"},
 		{Key: "events", Path: "/events", Label: "Events"},
 		{Key: "stats", Path: "/stats", Label: "Stats"},
+		{Key: "downloads", Path: "/downloads", Label: "Downloads"},
 		{Key: "allowlist-requests", Path: "/allowlist-requests", Label: "Allowlist requests"},
 		{Key: "audit", Path: "/audit", Label: "Audit"},
 		{Key: "status", Path: "/status", Label: "Status"},
@@ -147,7 +157,7 @@ var nav = []chrome.NavGroup{
 // pages lists the content templates, each combined with chrome's layout into
 // its own *template.Template -- see chrome.ParseTemplates.
 var pages = []string{
-	"index.html", "systems.html", "events.html", "stats.html",
+	"index.html", "systems.html", "events.html", "stats.html", "downloads.html",
 	"allowlist-requests.html", "audit.html", "status.html",
 }
 
@@ -221,6 +231,7 @@ func NewServer(r Reader, feed, basic Feed, w Writer, rt Runtime, cfg chrome.Conf
 	cfg.Nav = nav
 	cfg.Pages = pages
 	cfg.Templates = pageTemplates
+	cfg.Funcs = template.FuncMap{"clientLabel": clientLabel}
 
 	base, err := chrome.New(cfg)
 	if err != nil {
@@ -307,6 +318,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleEvents(w, r)
 	case "/stats":
 		s.handleStats(w, r)
+	case "/downloads":
+		s.handleDownloads(w, r)
 	case "/allowlist-requests":
 		s.handleAllowlistRequests(w, r)
 	case "/audit":
@@ -581,6 +594,58 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Today:           threatstore.DayString(s.now()),
 		ComputedAt:      computedAt,
 	})
+}
+
+type downloadsPageData struct {
+	chrome.PageData
+	Machines []threatstore.FeedMachineRow
+	Query    string
+	Days     int
+	// Truncated says more rows matched than the page shows; Failed
+	// replaces the table with a short note when the read failed.
+	Truncated bool
+	Failed    bool
+	Limit     int
+}
+
+// handleDownloads lists who fetched the feeds over the last
+// feedDownloadsDays: one row per machine, feed and client, latest request
+// first. ?q= keeps the machine IDs starting with it. A failed read renders
+// the page with a note rather than a 503, the same way /stats degrades its
+// download table.
+func (s *server) handleDownloads(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	since := s.now() - int64(feedDownloadsDays-1)*24*time.Hour.Milliseconds()
+	// One row past the limit, to tell "exactly the limit" from "more".
+	machines, err := s.reader.FeedDownloadMachines(r.Context(), since, q, downloadMachinesLimit+1)
+	data := downloadsPageData{
+		PageData: s.chrome.PageData(r, "downloads"),
+		Query:    q,
+		Days:     feedDownloadsDays,
+		Limit:    downloadMachinesLimit,
+	}
+	if err != nil {
+		slog.Error("ui: feed download machines failed", "page", "downloads", "error", err)
+		data.Failed = true
+	} else {
+		if len(machines) > downloadMachinesLimit {
+			machines, data.Truncated = machines[:downloadMachinesLimit], true
+		}
+		data.Machines = machines
+	}
+	s.chrome.Render(w, "downloads.html", data)
+}
+
+// clientLabel is how /downloads names a stored client.
+func clientLabel(client string) string {
+	switch client {
+	case blocklist.ClientNethSecurity:
+		return "NethSecurity"
+	case blocklist.ClientCrowdSec:
+		return "NS8 CrowdSec"
+	default:
+		return client
+	}
 }
 
 // --- Allowlist requests: the review queue, and its write half ---

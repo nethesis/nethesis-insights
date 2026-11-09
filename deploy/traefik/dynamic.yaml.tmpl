@@ -91,6 +91,13 @@ http:
     strip-logs:
       stripPrefix:
         prefixes: ["/logs"]
+    # stripPrefix also adds X-Forwarded-Prefix with what it removed, and
+    # threatd labels feed-download statistics with it ("/blocklist" is
+    # NethSecurity, "/blocklist/crowdsec" NS8 CrowdSec; see
+    # blocklist.ClientForPrefix). Statistics only, never an access
+    # decision -- but changing either prefix, or replacing stripPrefix with
+    # a middleware that sets no such header, turns /blocklist/downloads'
+    # client column into "direct".
     strip-blocklist:
       stripPrefix:
         prefixes: ["/blocklist"]

@@ -32,12 +32,12 @@ func (w *recordingWriter) AddFeedDownloads(_ context.Context, rows []threatstore
 // 401) is not attributed to anyone.
 func TestDownloadsRecordClassifiesEachAnswer(t *testing.T) {
 	d := NewDownloads()
-	d.Record(now, FeedFull, "sys-a", http.StatusOK, true)
-	d.Record(now, FeedFull, "sys-a", http.StatusOK, false) // HEAD
-	d.Record(now, FeedFull, "sys-a", http.StatusNotModified, false)
-	d.Record(now, FeedFull, "sys-a", http.StatusServiceUnavailable, false)
-	d.Record(now, FeedFull, "", http.StatusUnauthorized, false)
-	d.Record(now, FeedBasic, "sys-a", http.StatusNotModified, false)
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-a", Code: http.StatusOK, Body: true})
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-a", Code: http.StatusOK, Body: false}) // HEAD
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-a", Code: http.StatusNotModified, Body: false})
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-a", Code: http.StatusServiceUnavailable, Body: false})
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "", Code: http.StatusUnauthorized, Body: false})
+	d.Record(now, Poll{Feed: FeedBasic, SystemID: "sys-a", Code: http.StatusNotModified, Body: false})
 
 	w := &recordingWriter{}
 	if _, err := d.Flush(context.Background(), w); err != nil {
@@ -45,8 +45,8 @@ func TestDownloadsRecordClassifiesEachAnswer(t *testing.T) {
 	}
 	day := threatstore.DayString(now)
 	want := []threatstore.FeedDownloadRow{
-		{Day: day, Feed: FeedBasic, SystemID: "sys-a", Requests: 1, NotModified: 1},
-		{Day: day, Feed: FeedFull, SystemID: "sys-a", Requests: 4, Downloads: 1, NotModified: 1},
+		{Day: day, Feed: FeedBasic, SystemID: "sys-a", Requests: 1, NotModified: 1, LastSeenAt: now},
+		{Day: day, Feed: FeedFull, SystemID: "sys-a", Requests: 4, Downloads: 1, NotModified: 1, LastSeenAt: now},
 	}
 	if !reflect.DeepEqual(w.rows, want) {
 		t.Fatalf("got %+v,\nwant %+v", w.rows, want)
@@ -63,18 +63,18 @@ func TestDownloadsRecordClassifiesEachAnswer(t *testing.T) {
 // them, and merges them with what arrived in between.
 func TestDownloadsFailedFlushIsRetried(t *testing.T) {
 	d := NewDownloads()
-	d.Record(now, FeedBasic, "sys-a", http.StatusOK, true)
+	d.Record(now, Poll{Feed: FeedBasic, SystemID: "sys-a", Code: http.StatusOK, Body: true})
 
 	if _, err := d.Flush(context.Background(), &recordingWriter{err: errBoom}); err == nil {
 		t.Fatal("Flush: got nil error from a failing writer")
 	}
-	d.Record(now, FeedBasic, "sys-a", http.StatusNotModified, false)
+	d.Record(now, Poll{Feed: FeedBasic, SystemID: "sys-a", Code: http.StatusNotModified, Body: false})
 
 	w := &recordingWriter{}
 	if _, err := d.Flush(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
-	want := []threatstore.FeedDownloadRow{{Day: threatstore.DayString(now), Feed: FeedBasic, SystemID: "sys-a", Requests: 2, Downloads: 1, NotModified: 1}}
+	want := []threatstore.FeedDownloadRow{{Day: threatstore.DayString(now), Feed: FeedBasic, SystemID: "sys-a", Requests: 2, Downloads: 1, NotModified: 1, LastSeenAt: now}}
 	if !reflect.DeepEqual(w.rows, want) {
 		t.Fatalf("got %+v, want %+v", w.rows, want)
 	}
@@ -85,10 +85,10 @@ func TestDownloadsFailedFlushIsRetried(t *testing.T) {
 func TestDownloadsAreBounded(t *testing.T) {
 	d := NewDownloads()
 	for i := range MaxDownloadKeys {
-		d.Record(now, FeedFull, "sys-"+strconv.Itoa(i), http.StatusOK, true)
+		d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-" + strconv.Itoa(i), Code: http.StatusOK, Body: true})
 	}
-	d.Record(now, FeedFull, "one-too-many", http.StatusOK, true)
-	d.Record(now, FeedFull, "sys-0", http.StatusOK, true) // an existing key
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "one-too-many", Code: http.StatusOK, Body: true})
+	d.Record(now, Poll{Feed: FeedFull, SystemID: "sys-0", Code: http.StatusOK, Body: true}) // an existing key
 
 	w := &recordingWriter{}
 	dropped, err := d.Flush(context.Background(), w)
@@ -117,7 +117,7 @@ func TestRunFlushesAndPrunesFeedDownloads(t *testing.T) {
 	r := New(s, NewSnapshot(), NewSnapshot(), cfg).WithDownloads(d)
 
 	for range 2 {
-		d.Record(now, FeedBasic, "sys-a", http.StatusOK, true)
+		d.Record(now, Poll{Feed: FeedBasic, SystemID: "sys-a", Code: http.StatusOK, Body: true})
 		if err := r.Run(ctx, now); err != nil {
 			t.Fatal(err)
 		}
@@ -130,5 +130,50 @@ func TestRunFlushesAndPrunesFeedDownloads(t *testing.T) {
 	want := []threatstore.FeedDownloadDayRow{{Day: threatstore.DayString(now), Feed: FeedBasic, Systems: 1, Requests: 2, Downloads: 2}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestClientForPrefix(t *testing.T) {
+	for prefix, want := range map[string]string{
+		"/blocklist":          ClientNethSecurity,
+		"/blocklist/crowdsec": ClientCrowdSec,
+		"":                    ClientDirect,
+		"/blocklist/":         ClientDirect,
+		"/blocklist/v1":       ClientDirect,
+		"/logs":               ClientDirect,
+		"/BLOCKLIST":          ClientDirect,
+	} {
+		if got := ClientForPrefix(prefix); got != want {
+			t.Errorf("ClientForPrefix(%q) = %q, want %q", prefix, got, want)
+		}
+	}
+}
+
+// One machine on two clients is two rows, and each keeps its latest
+// address: a later request wins even when it is recorded or merged back
+// out of order, while the counters still add.
+func TestDownloadsKeepTheLatestAddress(t *testing.T) {
+	d := NewDownloads()
+	d.Record(now+2000, Poll{Feed: FeedFull, Client: ClientNethSecurity, SystemID: "sys-a", IP: "198.51.100.2", Code: http.StatusOK, Body: true})
+	d.Record(now+1000, Poll{Feed: FeedFull, Client: ClientNethSecurity, SystemID: "sys-a", IP: "198.51.100.1", Code: http.StatusNotModified})
+	d.Record(now, Poll{Feed: FeedFull, Client: ClientCrowdSec, SystemID: "sys-a", IP: "198.51.100.3", Code: http.StatusOK, Body: true})
+
+	if _, err := d.Flush(context.Background(), &recordingWriter{err: errBoom}); err == nil {
+		t.Fatal("Flush: got nil error from a failing writer")
+	}
+	// Recorded after the failed flush but OLDER than what it restores.
+	d.Record(now+500, Poll{Feed: FeedFull, Client: ClientNethSecurity, SystemID: "sys-a", IP: "198.51.100.9", Code: http.StatusNotModified})
+
+	w := &recordingWriter{}
+	if _, err := d.Flush(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	day := threatstore.DayString(now)
+	want := []threatstore.FeedDownloadRow{
+		{Day: day, Feed: FeedFull, Client: ClientCrowdSec, SystemID: "sys-a", Requests: 1, Downloads: 1, LastIP: "198.51.100.3", LastSeenAt: now},
+		{Day: day, Feed: FeedFull, Client: ClientNethSecurity, SystemID: "sys-a", Requests: 3, Downloads: 1, NotModified: 2, LastIP: "198.51.100.2", LastSeenAt: now + 2000},
+	}
+	if !reflect.DeepEqual(w.rows, want) {
+		t.Fatalf("got %+v,\nwant %+v", w.rows, want)
 	}
 }

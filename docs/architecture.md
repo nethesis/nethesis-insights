@@ -252,7 +252,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
 | `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
-| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
+| `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, feed downloads per machine (`/downloads`), the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker and, only when `EMBED_URL` is set, the class-grouping pass loop together, runs graceful shutdown. |
@@ -714,7 +714,8 @@ load-bearing:
    have already aged out of `threat_events`. The same step flushes the
    in-memory feed-download counts (`blocklist.Downloads.Flush`, see "Feed
    downloads" below) and then prunes `threat_feed_downloads_daily` on the
-   same retention: both are per-system daily accounting, read on `/stats`.
+   same retention: both are per-system daily accounting, read on `/stats`
+   (and the download rows on `/downloads`).
 9. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
@@ -757,10 +758,15 @@ Both feed handlers report every answer through `Config.FeedServed`, which
 its own: `threatd_http_requests_total{method,route,status}` already counts
 `/v1/feed` and `/v1/basic-feed` separately by route, so a dedicated
 `{feed,code}` counter would only restate it. `blocklist.Downloads` is the
-persisted count: it counts, per UTC day, feed and `system_id`, every request
+persisted count: it counts, per UTC day, feed, client and `system_id`, every request
 (`requests`), the full-body answers (`downloads`: a `GET` answered `200`,
 never a `HEAD`) and the `304`s (`not_modified`); a `401` or `405` has no
-`system_id` and is not attributed. The consensus pass flushes it into
+`system_id` and is not attributed. Each key also keeps the latest
+request's time (`last_seen_at`, unix millis) and the machine's address
+(`last_ip`, from `httpx.ClientIP`, so `X-Forwarded-For` only from
+`TRUSTED_PROXY_CIDRS`); a merge — two requests, or a failed flush merged
+back — keeps the later of the two by `last_seen_at`, never by arrival
+order, and the store's upsert does the same. The consensus pass flushes it into
 `threat_feed_downloads_daily` with `ON CONFLICT … DO UPDATE` **adding** the
 counts, and `/stats` reads, per day and feed, the distinct systems that
 received the feed — `COUNT(DISTINCT CASE WHEN downloads + not_modified > 0
@@ -771,7 +777,36 @@ requests still are, in the `requests` sum. That read is bounded to the 30 days t
 page shows (`WHERE day >= ?`, a range on the primary key), never the whole
 retained table: at fleet scale that is about half a million rows, `LIMIT`
 applies only after `GROUP BY` has folded all of them, and the store's one
-connection would stall ingest and the pass for every page render.
+connection would stall ingest and the pass for every page render. A
+machine that called through both base URLs on one day is still one machine
+there.
+
+**The client is read off `X-Forwarded-Prefix`, for statistics only.**
+Traefik's `stripPrefix` adds the prefix it removed (`Header.Add`, verified
+in Traefik v3.7's `pkg/middlewares/stripprefix`), so threatd sees
+`/blocklist` from NethSecurity's base URL and `/blocklist/crowdsec` from
+NS8 CrowdSec's; `blocklist.ClientForPrefix` maps them to `nethsecurity` and
+`crowdsec`, and anything else to `direct`. The header is believed only from
+`TRUSTED_PROXY_CIDRS`, like `X-Forwarded-For`, and only its last value,
+since `Add` appends after anything a client sent — though Traefik's
+entrypoint already deletes every `X-Forwarded-*` header, this one included,
+from a client outside its empty `forwardedHeaders.trustedIPs`. It labels a
+download row and nothing else: the route's `forwardAuth` has already
+decided, and threatd still never learns *which entitlement* ran — the
+prefix names the URL that was called, not the check that let it through,
+and no answer may ever depend on it.
+
+`/downloads` reads the same table per machine:
+`FeedDownloadMachines` groups the last 30 days by `(system_id, feed,
+client)` — first day, summed counts, latest `last_seen_at` — newest first,
+capped at 500 rows (the page says when it cut), with an optional
+case-sensitive `system_id` prefix filter (`instr(...) = 1`, not `LIKE`,
+which ignores ASCII case). The latest address is joined from the row of
+the group's latest day on the full primary key: the recorder derives the
+day from the same instant it stamps `last_seen_at`, so that row holds the
+group's latest request, and the join is one key lookup per group rather
+than a subquery over the whole range. `last_ip` is a customer's public
+address, kept for `THREAT_INGEST_RETENTION` like the rest of the row.
 
 Counting in memory rather than writing per request is the point: ~2700
 nodes polling every few minutes would put one write per poll on the single
@@ -783,7 +818,7 @@ shutdown, after the HTTP servers and the consensus loop have stopped, so a
 restart loses nothing. A failed flush merges its batch back for the next
 pass instead of dropping it. The map is bounded at
 `blocklist.MaxDownloadKeys` keys between flushes — far above two feeds
-times the fleet — so nothing a client sends can grow it without limit;
+times the fleet, since a machine normally calls through one client — so nothing a client sends can grow it without limit;
 a request past the bound still counts on the Prometheus counter, and the
 flush logs how many were dropped from the daily table.
 
@@ -1250,7 +1285,7 @@ without a goroutine to leak.
 | `threat_blocklist` | One row per published address, with `first_listed_at`, the refreshing `expires_at`, and the `listing_reason` evidence snapshot. |
 | `threat_allowlist` | Hand-maintained CIDRs that must never be promoted. Written only through `internal/ui/threat`'s write routes — there is no separate admin plane or admin API any more. |
 | `threat_ingest_daily` | Per day and system ingest accounting — accepted, duplicates, and every drop reason. |
-| `threat_feed_downloads_daily` | Per day, feed (`full`, `basic`) and system: feed requests, full-body downloads and `304`s. **Accumulates** — each flush of `blocklist.Downloads` adds what was counted since the previous one. Pruned with `threat_ingest_daily` on `THREAT_INGEST_RETENTION`. |
+| `threat_feed_downloads_daily` | Per day, feed (`full`, `basic`), client (`nethsecurity`, `crowdsec`, `direct` — from `X-Forwarded-Prefix`, statistics only) and system: feed requests, full-body downloads and `304`s, plus the latest request's `last_seen_at` and the machine's public `last_ip`. The counters **accumulate** — each flush of `blocklist.Downloads` adds what was counted since the previous one — while `last_ip` follows the larger `last_seen_at`. Read on `/stats` (per day and feed) and `/downloads` (per machine). Pruned with `threat_ingest_daily` on `THREAT_INGEST_RETENTION`. |
 | `sizing_node_daily` | One node-day of measurements plus the derived `pressure`, its four axis penalties, `pressure_reasons` and `pressure_version`. Keyed `(system_id, node_id, day)` — a `system_id` is a *cluster*, so one report writes N rows. Every measurement column is nullable and `NULL` means **not measured**, never zero. |
 | `sizing_module_daily` | One module family per node-day: `instances`, plus a display-only `facts_ok` and `versions` JSON array. Nothing derived reads either. |
 | `sizing_module_metric` | The open workload map, **normalised to rows** so the cohort pass groups it in SQL. The pass reads a value only through `sizing.IsPlatform`, which decides whether a family is ignorable when testing "solo" (samba's answer turns on its share count). A JSON blob would force ~1.4M rows through the single-writer connection and a JSON parse each, hourly. |

@@ -37,13 +37,24 @@ func TestFeedAnswersAreCountedPerSystem(t *testing.T) {
 	h := NewServer(&fakeThreatStore{}, nil, full, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		FeedServed: func(fr FeedRequest) {
-			downloads.Record(threatNow, fr.Feed, fr.SystemID, fr.Code, fr.Body)
+			downloads.Record(threatNow, blocklist.Poll{
+				Feed: fr.Feed, Client: fr.Client, SystemID: fr.SystemID, IP: fr.IP,
+				Code: fr.Code, Body: fr.Body,
+			})
 		},
 	}, metrics.Handler(reg), metrics.NewHTTP(reg))
 
 	do := func(method, path, etag string, auth bool) int {
 		req := httptest.NewRequest(method, path, nil)
 		req.RemoteAddr = "127.0.0.1:12345"
+		// As Traefik sends them: the full feed through NethSecurity's base
+		// URL, the basic one through NS8 CrowdSec's.
+		req.Header.Set("X-Forwarded-For", "198.51.100.9")
+		if strings.HasPrefix(path, "/v1/basic-feed") {
+			req.Header.Set("X-Forwarded-Prefix", "/blocklist/crowdsec")
+		} else {
+			req.Header.Set("X-Forwarded-Prefix", "/blocklist")
+		}
 		if etag != "" {
 			req.Header.Set("If-None-Match", etag)
 		}
@@ -94,10 +105,40 @@ func TestFeedAnswersAreCountedPerSystem(t *testing.T) {
 	// The 401 and the 405 carry no system and are not attributed; the HEAD
 	// is a request but not a download.
 	want := []threatstore.FeedDownloadRow{
-		{Day: day, Feed: blocklist.FeedBasic, SystemID: testSystemID, Requests: 1},
-		{Day: day, Feed: blocklist.FeedFull, SystemID: testSystemID, Requests: 4, Downloads: 2, NotModified: 1},
+		{Day: day, Feed: blocklist.FeedBasic, Client: blocklist.ClientCrowdSec, SystemID: testSystemID,
+			Requests: 1, LastIP: "198.51.100.9", LastSeenAt: threatNow},
+		{Day: day, Feed: blocklist.FeedFull, Client: blocklist.ClientNethSecurity, SystemID: testSystemID,
+			Requests: 4, Downloads: 2, NotModified: 1, LastIP: "198.51.100.9", LastSeenAt: threatNow},
 	}
 	if !reflect.DeepEqual(sink.rows, want) {
 		t.Fatalf("daily counts: got %+v,\nwant %+v", sink.rows, want)
+	}
+}
+
+// The client label comes from the LAST X-Forwarded-Prefix value, and only
+// from a trusted proxy: stripPrefix appends its value after any the client
+// sent, and a request from anywhere else is "direct" whatever it claims.
+func TestFeedClientTrustsOnlyTheProxysPrefix(t *testing.T) {
+	for _, c := range []struct {
+		name, remote string
+		prefixes     []string
+		want         string
+	}{
+		{"nethsecurity", "127.0.0.1:1", []string{"/blocklist"}, blocklist.ClientNethSecurity},
+		{"crowdsec", "127.0.0.1:1", []string{"/blocklist/crowdsec"}, blocklist.ClientCrowdSec},
+		{"no header", "127.0.0.1:1", nil, blocklist.ClientDirect},
+		{"client value before traefik's", "127.0.0.1:1", []string{"/blocklist/crowdsec", "/blocklist"}, blocklist.ClientNethSecurity},
+		{"untrusted remote", "203.0.113.50:1", []string{"/blocklist"}, blocklist.ClientDirect},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/feed", nil)
+			req.RemoteAddr = c.remote
+			for _, p := range c.prefixes {
+				req.Header.Add("X-Forwarded-Prefix", p)
+			}
+			if got := feedClient(req, trustedProxy); got != c.want {
+				t.Fatalf("feedClient = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

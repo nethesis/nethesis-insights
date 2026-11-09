@@ -6,6 +6,7 @@ package threat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,6 +51,9 @@ type fakeReader struct {
 	downloads        []threatstore.FeedDownloadDayRow
 	downloadsSince   atomic.Int64 // the since FeedDownloadStats was last called with
 	downloadsErr     error        // when set, FeedDownloadStats alone returns it
+	machines         []threatstore.FeedMachineRow
+	machinesSince    atomic.Int64 // the since FeedDownloadMachines was last called with
+	machinesErr      error        // when set, FeedDownloadMachines alone returns it
 
 	err error // when set, every method returns this error instead
 
@@ -126,6 +130,27 @@ func (f *fakeReader) FeedDownloadStats(_ context.Context, since int64, _ int) ([
 		return nil, f.downloadsErr
 	}
 	return f.downloads, f.err
+}
+
+func (f *fakeReader) FeedDownloadMachines(_ context.Context, since int64, prefix string, limit int) ([]threatstore.FeedMachineRow, error) {
+	f.machinesSince.Store(since)
+	if f.machinesErr != nil {
+		return nil, f.machinesErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []threatstore.FeedMachineRow
+	for _, m := range f.machines {
+		if !strings.HasPrefix(m.SystemID, prefix) {
+			continue
+		}
+		out = append(out, m)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeReader) ListThreatSystems(_ context.Context) ([]threatstore.ThreatSystemRow, error) {
@@ -699,5 +724,80 @@ func TestPOSTMethodNotAllowed(t *testing.T) {
 				t.Fatalf("POST %s: status = %d, want 405", rt.path, rec.Code)
 			}
 		})
+	}
+}
+
+// /downloads lists one row per machine, feed and client with the client
+// spelled for an operator, reads exactly the thirty days /stats does, and
+// filters on a machine-ID prefix.
+func TestDownloadsPageListsMachines(t *testing.T) {
+	r := threatReader()
+	r.machines = []threatstore.FeedMachineRow{
+		{SystemID: "sys-alpha", Feed: "full", Client: "nethsecurity", FirstDay: "2026-08-01", LastSeenAt: testNow - 60_000, LastIP: "198.51.100.21", Downloads: 7, NotModified: 90},
+		{SystemID: "sys-beta", Feed: "basic", Client: "crowdsec", FirstDay: "2026-08-20", LastSeenAt: testNow - 120_000, LastIP: "2001:db8::5", Downloads: 3, NotModified: 11},
+		{SystemID: "other-1", Feed: "basic", Client: "direct", FirstDay: "2026-08-25", LastSeenAt: testNow - 180_000, LastIP: "127.0.0.1", Downloads: 1},
+	}
+	h := newTestServerWithFeed(t, r, nil)
+
+	rec := get(t, h, "/downloads")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/downloads status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"sys-alpha", "198.51.100.21", "2026-08-01", "NethSecurity",
+		"sys-beta", "2001:db8::5", "NS8 CrowdSec",
+		"other-1", ">direct<",
+		`href="/downloads"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/downloads is missing %q", want)
+		}
+	}
+	if strings.Contains(body, "Showing the") {
+		t.Error("/downloads says it is truncated when it is not")
+	}
+	if got := threatstore.DayString(r.machinesSince.Load()); got != "2026-07-30" {
+		t.Fatalf("/downloads read from %s, want 2026-07-30", got)
+	}
+
+	filtered := get(t, h, "/downloads?q=sys-").Body.String()
+	if !strings.Contains(filtered, "sys-alpha") || !strings.Contains(filtered, "sys-beta") || strings.Contains(filtered, "other-1") {
+		t.Fatalf("?q=sys- did not filter to the sys- machines:\n%s", filtered)
+	}
+	if !strings.Contains(get(t, h, "/downloads?q=nobody").Body.String(), "no machine ID starts with that") {
+		t.Fatal("/downloads with an unmatched filter should say so")
+	}
+}
+
+// More matching rows than the page shows: the page shows the limit and
+// says it was cut.
+func TestDownloadsPageSaysWhenTruncated(t *testing.T) {
+	r := threatReader()
+	for i := range downloadMachinesLimit + 5 {
+		r.machines = append(r.machines, threatstore.FeedMachineRow{
+			SystemID: fmt.Sprintf("sys-%04d", i), Feed: "full", Client: "nethsecurity", LastSeenAt: testNow,
+		})
+	}
+	body := get(t, newTestServerWithFeed(t, r, nil), "/downloads").Body.String()
+	if !strings.Contains(body, "Showing the 500 most recently seen rows only") {
+		t.Fatal("/downloads should say it is truncated")
+	}
+	if !strings.Contains(body, "sys-0499") || strings.Contains(body, "sys-0500") {
+		t.Fatal("/downloads should show exactly the first 500 rows")
+	}
+}
+
+// A failed read degrades the page instead of failing it.
+func TestDownloadsPageDegradesWhenTheReadFails(t *testing.T) {
+	r := threatReader()
+	r.machinesErr = errStore
+	rec := get(t, newTestServerWithFeed(t, r, nil), "/downloads")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/downloads status: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Feed downloads unavailable right now") || strings.Contains(body, "no feed downloads recorded yet") {
+		t.Fatalf("/downloads should say the downloads are unavailable:\n%s", body)
 	}
 }

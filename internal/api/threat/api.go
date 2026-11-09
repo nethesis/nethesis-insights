@@ -135,11 +135,16 @@ type Config struct {
 
 // FeedRequest is one answered feed request. Feed is blocklist.FeedFull or
 // blocklist.FeedBasic. SystemID is empty when the request carried none (the
-// 401 and the 405, which is checked first). Body is true only when the list
-// itself was sent: a GET answered 200, never a HEAD.
+// 401 and the 405, which is checked first). Client is the public base URL
+// the request came in on (see feedClient) and IP the requester's address as
+// httpx.ClientIP resolved it; both are statistics, never consulted to
+// answer the request. Body is true only when the list itself was sent: a
+// GET answered 200, never a HEAD.
 type FeedRequest struct {
 	Feed     string
 	SystemID string
+	Client   string
+	IP       string
 	Code     int
 	Body     bool
 }

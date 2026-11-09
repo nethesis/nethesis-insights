@@ -187,12 +187,36 @@ func (s *server) handleBasicFeed(w http.ResponseWriter, r *http.Request) {
 // serveFeed answers one feed request and reports the answer to
 // Config.FeedServed.
 func (s *server) serveFeed(w http.ResponseWriter, r *http.Request, feed string, snap *blocklist.Snapshot) {
-	req := FeedRequest{Feed: feed}
+	req := FeedRequest{Feed: feed, Client: feedClient(r, s.trusted), IP: httpx.ClientIP(r, s.trusted)}
 	req.Code, req.SystemID = s.writeFeed(w, r, snap)
 	req.Body = req.Code == http.StatusOK && r.Method == http.MethodGet
 	if s.cfg.FeedServed != nil {
 		s.cfg.FeedServed(req)
 	}
+}
+
+// feedClient names the public base URL a feed request came in on, from the
+// X-Forwarded-Prefix header Traefik's stripPrefix middleware adds -- see
+// blocklist.ClientForPrefix for the mapping.
+//
+// The header is believed only from a trusted proxy, like X-Forwarded-For,
+// and only its last value: stripPrefix appends (Header.Add) rather than
+// overwrites, so a value a client sent itself would come first. Traefik's
+// entrypoint already deletes every X-Forwarded-* header, this one included,
+// from a client outside its forwardedHeaders.trustedIPs (empty in
+// deploy/traefik), so in the deployed shape there is exactly one value and
+// it is Traefik's own. It only labels download statistics: the route's
+// forwardAuth already decided whether the request may have the feed, and
+// threatd still never learns which entitlement that check was.
+func feedClient(r *http.Request, trusted httpx.TrustedProxies) string {
+	if !trusted.Contains(r.RemoteAddr) {
+		return blocklist.ClientDirect
+	}
+	vals := r.Header.Values("X-Forwarded-Prefix")
+	if len(vals) == 0 {
+		return blocklist.ClientDirect
+	}
+	return blocklist.ClientForPrefix(strings.TrimSpace(vals[len(vals)-1]))
 }
 
 // writeFeed writes the response and returns its status code and the

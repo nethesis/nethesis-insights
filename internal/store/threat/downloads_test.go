@@ -154,3 +154,121 @@ func TestFeedDownloadStatsCountsOnlySystemsThatReceivedTheFeed(t *testing.T) {
 		t.Fatalf("got %+v,\nwant %+v", got, want)
 	}
 }
+
+// A row's counters add across flushes while last_ip follows last_seen_at:
+// a flush carrying an older request (a batch merged back after a failed
+// write, say) must not overwrite a newer address.
+func TestAddFeedDownloadsKeepsTheLatestAddress(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const day = "2026-11-09"
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC).UnixMilli()
+
+	for _, r := range []FeedDownloadRow{
+		{Requests: 1, Downloads: 1, LastIP: "198.51.100.1", LastSeenAt: t0},
+		{Requests: 2, NotModified: 2, LastIP: "198.51.100.2", LastSeenAt: t0 + 2000},
+		{Requests: 1, NotModified: 1, LastIP: "198.51.100.3", LastSeenAt: t0 + 1000}, // older
+	} {
+		r.Day, r.Feed, r.Client, r.SystemID = day, "full", "nethsecurity", "sys-a"
+		if err := s.AddFeedDownloads(ctx, []FeedDownloadRow{r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.FeedDownloadMachines(ctx, 0, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FeedMachineRow{{
+		SystemID: "sys-a", Feed: "full", Client: "nethsecurity", FirstDay: day,
+		LastSeenAt: t0 + 2000, LastIP: "198.51.100.2", Requests: 4, Downloads: 1, NotModified: 3,
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v,\nwant %+v", got, want)
+	}
+}
+
+// One row per (system, feed, client), folded across days, its address
+// taken from its latest day; latest request first; the prefix filter is
+// case-sensitive and exact ids are their own prefix; rows before since's
+// day are not read at all; the limit cuts the tail.
+func TestFeedDownloadMachines(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := func(day string, hour int) int64 {
+		d, err := time.Parse("2006-01-02", day)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.Add(time.Duration(hour) * time.Hour).UnixMilli()
+	}
+	row := func(day, feed, client, sys, ip string, hour int) FeedDownloadRow {
+		return FeedDownloadRow{Day: day, Feed: feed, Client: client, SystemID: sys,
+			Requests: 1, Downloads: 1, LastIP: ip, LastSeenAt: at(day, hour)}
+	}
+	if err := s.AddFeedDownloads(ctx, []FeedDownloadRow{
+		row("2026-09-01", "full", "nethsecurity", "sys-a", "192.0.2.99", 9), // before since
+		row("2026-11-07", "full", "nethsecurity", "sys-a", "192.0.2.1", 9),
+		row("2026-11-09", "full", "nethsecurity", "sys-a", "192.0.2.2", 8),
+		row("2026-11-08", "basic", "crowdsec", "sys-a", "192.0.2.3", 23),
+		row("2026-11-09", "basic", "crowdsec", "sys-b", "192.0.2.4", 11),
+		row("2026-11-09", "basic", "direct", "SYS-C", "192.0.2.5", 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	since := at("2026-10-11", 12)
+
+	got, err := s.FeedDownloadMachines(ctx, since, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FeedMachineRow{
+		{SystemID: "sys-b", Feed: "basic", Client: "crowdsec", FirstDay: "2026-11-09", LastSeenAt: at("2026-11-09", 11), LastIP: "192.0.2.4", Requests: 1, Downloads: 1},
+		{SystemID: "sys-a", Feed: "full", Client: "nethsecurity", FirstDay: "2026-11-07", LastSeenAt: at("2026-11-09", 8), LastIP: "192.0.2.2", Requests: 2, Downloads: 2},
+		{SystemID: "SYS-C", Feed: "basic", Client: "direct", FirstDay: "2026-11-09", LastSeenAt: at("2026-11-09", 1), LastIP: "192.0.2.5", Requests: 1, Downloads: 1},
+		{SystemID: "sys-a", Feed: "basic", Client: "crowdsec", FirstDay: "2026-11-08", LastSeenAt: at("2026-11-08", 23), LastIP: "192.0.2.3", Requests: 1, Downloads: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v,\nwant %+v", got, want)
+	}
+
+	for prefix, wantN := range map[string]int{"sys-": 3, "sys-a": 2, "sys-b": 1, "SYS": 1, "sys-a-longer": 0, "ys": 0} {
+		got, err := s.FeedDownloadMachines(ctx, since, prefix, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != wantN {
+			t.Errorf("prefix %q: got %d rows, want %d: %+v", prefix, len(got), wantN, got)
+		}
+	}
+
+	got, err = s.FeedDownloadMachines(ctx, since, "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want[:2]) {
+		t.Fatalf("limit 2: got %+v, want %+v", got, want[:2])
+	}
+}
+
+// /stats' Machines number keeps its meaning with the client in the key: a
+// system that fetched one feed through both base URLs on one day is one
+// machine, and its requests still all count.
+func TestFeedDownloadStatsCountsASystemOnceAcrossClients(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.AddFeedDownloads(ctx, []FeedDownloadRow{
+		{Day: "2026-11-09", Feed: "basic", Client: "nethsecurity", SystemID: "sys-a", Requests: 2, Downloads: 1, NotModified: 1},
+		{Day: "2026-11-09", Feed: "basic", Client: "crowdsec", SystemID: "sys-a", Requests: 1, Downloads: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FeedDownloadStats(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FeedDownloadDayRow{{Day: "2026-11-09", Feed: "basic", Systems: 1, Requests: 3, Downloads: 2, NotModified: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}

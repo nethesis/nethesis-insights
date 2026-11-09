@@ -345,7 +345,10 @@ func main() {
 			}
 		},
 		FeedServed: func(fr threatapi.FeedRequest) {
-			downloads.Record(time.Now().UnixMilli(), fr.Feed, fr.SystemID, fr.Code, fr.Body)
+			downloads.Record(time.Now().UnixMilli(), blocklist.Poll{
+				Feed: fr.Feed, Client: fr.Client, SystemID: fr.SystemID, IP: fr.IP,
+				Code: fr.Code, Body: fr.Body,
+			})
 		},
 	}, metrics.Handler(reg), httpMetrics)
 
