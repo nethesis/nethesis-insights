@@ -721,20 +721,21 @@ load-bearing:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent, and the audit
    trail is never pruned.
-10. The snapshots are regenerated from the live entries. `ListBlocklist` returns
-    them most recently seen first and is asked for one row past
-    `BLOCKLIST_MAX_ENTRIES`, only to learn whether the cap binds; when it
-    does, the addresses seen longest ago are cut, a warning is logged and the
-    snapshot is marked capped, which both dashboard pages that show the feed
-    report. An active attacker matters more than one the fleet last saw hours
-    ago. `BLOCKLIST_MAX_ENTRIES` is validated positive at startup, so `Run`
-    always asks for `MaxEntries + 1`. `ListBlocklist` itself treats
-    `limit <= 0` as every live entry rather than the UI listings' 200-row
-    default, which used to cap the feed silently. The full feed is generated
-    first; the basic feed is then read with its own query,
-    `ListBlocklistListedBy`, which applies the delay in SQL before its own
-    cap, `BLOCKLIST_BASIC_MAX_ENTRIES`, and its own capped flag (see "Basic
-    feed" below). Both reads follow steps 5 and 6, so every removal reaches
+10. The snapshots are regenerated from the live entries, read **once**:
+    `ListBlocklist` with `limit <= 0` returns every live entry, most
+    recently seen first, and both feeds are cut from that one slice in Go,
+    so the pass does not sort the live table twice. The full feed is its
+    first `BLOCKLIST_MAX_ENTRIES` rows; when there are more, the addresses
+    seen longest ago are cut, a warning is logged and the snapshot is marked
+    capped, which both dashboard pages that show the feed report. An active
+    attacker matters more than one the fleet last saw hours ago.
+    (`limit <= 0` meaning every live entry, rather than the UI listings'
+    200-row default, is also what stopped that default capping the feed
+    silently.)
+    The basic feed keeps the rows of the same slice listed at least the
+    delay ago, then takes the first `BLOCKLIST_BASIC_MAX_ENTRIES` of those,
+    with its own capped flag (see "Basic feed" below). The read follows
+    steps 5 and 6, so every removal reaches
     both feeds on this pass. Each feed's size, capped flag and
     `generated_at` are shown side by side on the dashboard's index and
     status pages, exported as `threatd_blocklist_entries{feed="full"|"basic"}`,
@@ -875,8 +876,9 @@ cannot leak the live list.
 **The basic feed is capped on its own, after the delay.** It is cut at
 `BLOCKLIST_BASIC_MAX_ENTRIES` (default `15000`, validated positive and at
 most `BLOCKLIST_MAX_ENTRIES`), most recently seen first, with its own capped
-flag and its own warning. The delay is applied in SQL *before* that cap. An
-earlier version filtered the full feed's already-capped rows instead, and
+flag and its own warning. The delay filter runs over every live entry of
+the pass's one read *before* that cap, never over the full feed's
+already-capped rows. An earlier version filtered the full feed's already-capped rows instead, and
 whenever `BLOCKLIST_MAX_ENTRIES` bound, the rows that cap keeps — the most
 recently seen, which are disproportionately the newly listed ones — took
 the slots and eligible rows were lost to the basic feed. The guarantee is

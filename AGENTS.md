@@ -206,8 +206,9 @@ Threat Shield rules that are as load-bearing as the gate's:
   positive. The delay is part of `Rule`, hence of the header and
   the `ETag`, so the two feeds never share a tag. **It has its own cap,
   applied after the delay**: `BLOCKLIST_BASIC_MAX_ENTRIES` (at most
-  `BLOCKLIST_MAX_ENTRIES`) and its own capped flag, with the delay bound in
-  SQL (`ListBlocklistListedBy`). Filtering the full feed's already-capped rows
+  `BLOCKLIST_MAX_ENTRIES`) and its own capped flag, with the delay filter run
+  over every live entry of the pass's one `ListBlocklist` read, before the
+  cap. Filtering the full feed's already-capped rows
   starved it — the full cap keeps the most recently seen rows, mostly ones
   too new to publish — so the basic feed is a subset of the full one only
   while the full feed is uncapped; never restore that order to win the

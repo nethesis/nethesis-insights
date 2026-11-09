@@ -25,7 +25,6 @@ type Reader interface {
 	UpsertBlocklistEntries(ctx context.Context, rows []threatstore.BlocklistRow) error
 	ExpireBlocklist(ctx context.Context, now int64) (int, error)
 	ListBlocklist(ctx context.Context, now int64, limit int) ([]threatstore.BlocklistRow, error)
-	ListBlocklistListedBy(ctx context.Context, now, listedBy int64, limit int) ([]threatstore.BlocklistRow, error)
 	ListBlocklistIPs(ctx context.Context, now int64) ([]string, error)
 	DeleteBlocklistEntries(ctx context.Context, ips []string) (int, error)
 	PruneThreatEvents(ctx context.Context, olderThan int64) (int, error)
@@ -235,16 +234,17 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		slog.Debug("blocklist: pruned stale allowlist requests", "rows", pruned)
 	}
 
-	// One row past the cap is asked for only to learn whether the cap binds.
-	// The store orders most recently seen first, so what is cut is what the
-	// fleet saw longest ago: a feed that outgrows its consumers' memory is
-	// worse than a truncated one, but the truncation must be visible.
-	// MaxEntries is validated positive at startup, so this never asks for
-	// an uncapped list.
-	live, err := r.store.ListBlocklist(ctx, now, r.cfg.MaxEntries+1)
+	// One read of every live entry feeds both feeds; each is cut from it
+	// in Go. The store orders most recently seen first, so what a cap cuts
+	// is what the fleet saw longest ago: a feed that outgrows its
+	// consumers' memory is worse than a truncated one, but the truncation
+	// must be visible. limit 0 is every live entry -- the caps are applied
+	// here, not in SQL, so the basic feed can be filtered before its own.
+	all, err := r.store.ListBlocklist(ctx, now, 0)
 	if err != nil {
 		return fmt.Errorf("blocklist: list: %w", err)
 	}
+	live := all
 	capped := len(live) > r.cfg.MaxEntries
 	if capped {
 		live = live[:r.cfg.MaxEntries]
@@ -259,7 +259,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		"unlisted", unlisted, "entries", r.snap.View().Entries,
 	}
 	if r.basic != nil {
-		if err := r.generateBasic(ctx, now); err != nil {
+		if err := r.generateBasic(all, now); err != nil {
 			return err
 		}
 		attrs = append(attrs, "basic_entries", r.basic.View().Entries)
@@ -270,12 +270,13 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	return nil
 }
 
-// generateBasic renders the basic feed: the live entries listed for at
+// generateBasic renders the basic feed from all, the pass's one read of
+// every live entry (most recently seen first): the entries listed for at
 // least BasicDelay, capped at BasicMaxEntries.
 //
-// The delay is applied in SQL, before the cap, and the cap is the basic
-// feed's own. Filtering the full feed's already-capped rows instead would
-// starve it whenever BLOCKLIST_MAX_ENTRIES binds: the full cap keeps the
+// The delay filter runs on every live entry, before the cap, and the cap
+// is the basic feed's own. Filtering the full feed's already-capped rows
+// instead would starve it whenever BLOCKLIST_MAX_ENTRIES binds: the full cap keeps the
 // most recently seen rows, which are disproportionately the newly listed
 // ones the basic feed may not publish yet, so eligible rows would lose
 // their slots to rows it then drops.
@@ -288,19 +289,24 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 // cap cut for being seen longer ago -- the two caps rank different sets --
 // which is the price of not starving it, and harmless: it is an address
 // the fleet agreed on, not one anybody removed.
-func (r *Runner) generateBasic(ctx context.Context, now int64) error {
+func (r *Runner) generateBasic(all []threatstore.BlocklistRow, now int64) error {
 	rule := r.cfg.rule()
 	rule.Delay = r.cfg.BasicDelay
 	cutoff := BasicCutoff(now, r.cfg.BasicDelay)
 	if cutoff == math.MinInt64 {
-		// Fail closed without asking the store: an empty, ready feed.
+		// Fail closed: an empty, ready feed.
 		return r.basic.Generate(nil, rule, false, now)
 	}
-	// One row past the cap, as for the full feed, only to learn whether
-	// it binds.
-	rows, err := r.store.ListBlocklistListedBy(ctx, now, cutoff, r.cfg.BasicMaxEntries+1)
-	if err != nil {
-		return fmt.Errorf("blocklist: list basic: %w", err)
+	// Collect one eligible row past the cap only to learn whether it binds.
+	rows := make([]threatstore.BlocklistRow, 0, min(len(all), r.cfg.BasicMaxEntries+1))
+	for _, row := range all {
+		if row.FirstListedAt > cutoff {
+			continue
+		}
+		rows = append(rows, row)
+		if len(rows) > r.cfg.BasicMaxEntries {
+			break
+		}
 	}
 	capped := len(rows) > r.cfg.BasicMaxEntries
 	if capped {
