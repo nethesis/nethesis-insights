@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/nethesis/nethesis-insights/internal/platform/auth"
+	"github.com/nethesis/nethesis-insights/internal/platform/httpx"
 	"github.com/nethesis/nethesis-insights/internal/platform/metrics"
 	"github.com/nethesis/nethesis-insights/internal/platform/svc"
 )
@@ -68,6 +69,15 @@ func main() {
 	listenAddr := svc.Getenv("AUTH_LISTEN_ADDR", ":9590")
 	validateURL := svc.Getenv("AUTH_VALIDATE_URL", defaultAuthValidateURL)
 	timeout := svc.GetenvDuration("AUTH_TIMEOUT", 5*time.Second)
+	// Only for the denial log line: the address a denied request really came
+	// from is Traefik's X-Forwarded-For, believed from these proxies alone.
+	// Every pod member reaches authd over loopback, as for the pipelines.
+	trustedProxyCIDRs := svc.Getenv("TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
+	trusted, err := httpx.ParseTrustedProxies(trustedProxyCIDRs)
+	if err != nil {
+		slog.Error("invalid TRUSTED_PROXY_CIDRS", "error", err)
+		os.Exit(1)
+	}
 
 	pepper, pepperSource := resolvePepper(svc.Getenv)
 	if pepperSource == "ephemeral" {
@@ -105,13 +115,14 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              listenAddr,
-		Handler:           newHandler(fa, metrics.Handler(reg), httpMetrics),
+		Handler:           newHandler(fa, trusted, metrics.Handler(reg), httpMetrics),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	slog.Info("authd: listening",
 		"addr", listenAddr,
 		"validate_url", validateURL,
+		"trusted_proxy_cidrs", trustedProxyCIDRs,
 		"pepper", pepperSource,
 		"positive_ttl", fa.PositiveTTL,
 		"negative_ttl", fa.NegativeTTL,

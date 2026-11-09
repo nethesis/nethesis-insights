@@ -558,7 +558,12 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*` —
 never another pipeline's. Traefik terminates the deploy-configured host, strips
 a per-pipeline path prefix, and calls `authd` as a `forwardAuth` middleware
 before any pipeline sees a request; `authd` is a thin HTTP shell over
-`internal/platform/auth` and owns no store and no UI.
+`internal/platform/auth` and owns no store and no UI. Every 401/403 it
+answers is one `authd: denied` log line — username only, never any other
+part of the `Authorization` header (`claimed_system_id` on a 401), forwarded
+method/path/address believed only from `TRUSTED_PROXY_CIDRS` — which
+`scripts/feed-denials.sh` reads back from the journal. Denials stay log-only:
+no table, no page, no metric label.
 
 `ui/logs`, `ui/threat` and `ui/sizing` sit beside their pipeline's `api`
 package, not under it: each depends on its own `store/*` package (through a

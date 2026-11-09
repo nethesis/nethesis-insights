@@ -378,6 +378,7 @@ depth. It never logs a credential: the model API key appears only as
 | `AUTH_CACHE_TTL`, `AUTH_NEG_CACHE_TTL` | how long a positive/negative validator outcome is cached (default `5m`/`30s`) |
 | `AUTH_CACHE_MAX_ENTRIES`, `AUTH_NEG_CACHE_MAX_ENTRIES` | cache size caps, counted separately so a flood of wrong credentials cannot evict the fleet's valid entries (default `8192`/`4096`, about 3 MB together) |
 | `AUTH_TIMEOUT` | validator request timeout (default `5s`) |
+| `TRUSTED_PROXY_CIDRS` | CIDRs, comma-separated, whose forwarded headers (`X-Forwarded-For`, `-Method`, `-Uri`) `authd` repeats in its denial log line (default `127.0.0.0/8`, where Traefik calls it from). Unlike in the pipelines it decides nothing: it only keeps a forged header out of the log — see "Who was refused" |
 
 ### `insightsd`
 
@@ -520,6 +521,47 @@ places. A node without the entitlement should be configured to use
 `basic-feed` instead, which never answers `403`. If a customer reports that
 the blocklist stopped updating, check for `403` first — the node will still be reporting its own bans successfully, which
 makes the credential look healthy from every other angle.
+
+**Who was refused.** A refused request never reaches a pipeline — the proxy
+answers it with `authd`'s verdict — so the only record of it is one line in
+`authd`'s log per `401` or `403`:
+
+```
+level=INFO msg="authd: denied" outcome=not_entitled system_id=NETH-1234 service=ng-blacklist method=GET path=/blocklist/v1/feed client_addr=203.0.113.9 err="not entitled: ..."
+```
+
+`outcome` is `invalid_credentials` for a `401` and `not_entitled` for a
+`403`; `path` is the address the machine called (without its query string)
+and `client_addr` the public address it called from. The log never contains
+the password. `scripts/feed-denials.sh` turns these lines into a table for
+the four feed addresses — how many times each machine was refused, from
+where, and when last — over the last day, or `--since 7d`; give it the
+server's name to read the log over `ssh`:
+
+```bash
+scripts/feed-denials.sh --since 7d root@insights.example.com
+```
+
+```
+COUNT  OUTCOME              SYSTEM_ID  CLIENT_ADDR   PATH                               LAST
+3      not_entitled         NETH-1234  203.0.113.9   /blocklist/v1/feed                 2026-11-09T08:31:02.100Z
+2      invalid_credentials  typo id    2001:db8::7   /blocklist/crowdsec/v1/basic-feed  2026-11-09T09:15:00.000Z
+```
+
+Two things to keep in mind reading it:
+
+- A **`403` on `/blocklist/v1/feed` or `/blocklist/crowdsec/v1/feed`** is a
+  genuine subscriber asking for the full feed without the add-on. Its
+  `system_id` is real. These are the machines that want Threat Shield — or
+  that should be switched to `basic-feed`.
+- A **`401`** says the credential was wrong, so its `system_id` is only
+  whatever the caller typed (the log calls it `claimed_system_id` for that
+  reason, and it is empty when the header could not be read at all). The
+  client address is the better clue to who it really is.
+
+The same lines cover every other route `authd` guards; the script only
+filters on the feeds. The log keeps them as long as the journal does (see
+"Bound the journal").
 
 Adding a future entitlement is a Traefik change, not a release: `authd` builds
 the upstream URL from the service name in its own path

@@ -50,6 +50,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 - [LLM integration](#llm-integration)
 - [Authentication](#authentication)
   - [Entitlements: a second route, one cache](#entitlements-a-second-route-one-cache)
+  - [Denials are log-only](#denials-are-log-only)
 - [Configuration and wiring](#configuration-and-wiring)
 - [Testing strategy](#testing-strategy)
 - [Known limits](#known-limits)
@@ -254,7 +255,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, feed downloads per machine (`/downloads`), the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
-| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI. Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
+| `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI: every `401`/`403` is one `authd: denied` log line and nothing else (see "Denials are log-only"). Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
 | `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker and, only when `EMBED_URL` is set, the class-grouping pass loop together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
@@ -2646,6 +2647,43 @@ decision if it is ever bound off loopback or published, if it starts taking
 input from anywhere else, or if a model or image swap comes from a source
 other than `ggml-org`. Pinning the image by digest and the model by
 revision would narrow the first two and is the cheaper fix than moving it.
+
+### Denials are log-only
+
+A `401` or `403` is answered by Traefik with `authd`'s verdict, so the
+request never reaches a pipeline and no pipeline can count it. `authd`
+writes one `authd: denied` line per denial instead — `outcome`
+(`invalid_credentials` or `not_entitled`), the Basic username, `service`,
+the original `method` and `path` (from Traefik's `X-Forwarded-Method` and
+`X-Forwarded-Uri`, query string dropped) and `client_addr` (rightmost
+`X-Forwarded-For`, which Traefik's `forwardAuth` sets to the connection it
+accepted). `scripts/feed-denials.sh` folds those lines from the journal into
+a table for the four feed paths; the message and field names are its
+interface.
+
+It stays a log line on purpose. `authd` owns no store and no UI, and giving
+it one for this would make the one process every request crosses also a
+database writer, for a question asked a few times a month and answered well
+enough by `journalctl`. A metric would need a `system_id` or an address
+label to be useful, and no metric carries either. What the line carries is
+bounded by the same rule as every other `authd` line:
+
+- **Only the username of the `Authorization` header**, from
+  `auth.ParseBasic`, the secret discarded where it is returned. On a `403`
+  the credential was genuine and the field is `system_id`; on a `401` it is
+  `claimed_system_id`, whatever the caller typed, and empty when the header
+  did not parse — the shape a credential sent without its `system_id`
+  takes, so the whole decoded value would be the secret. A credential with
+  its two halves swapped still puts the secret in that field; the `err` of
+  `ErrInvalidCredentials` has always named the presented `system_id`, so
+  this is not new exposure, but it is why the field says *claimed*.
+- **Forwarded headers only from `TRUSTED_PROXY_CIDRS`** (default
+  `127.0.0.0/8`, read by `authd` for this alone). From anywhere else
+  `method` and `path` are empty and `client_addr` is `RemoteAddr`. Nothing
+  `authd` decides depends on them.
+- **Client-controlled values are capped** (username 128 bytes, path 256)
+  and slog's text handler quotes and escapes them, so a hostile username
+  cannot forge a field or start a line.
 
 `api.StaticAuth`, the hardcoded system/secret pair used before this split for
 tests and local development, no longer exists: a pipeline no longer holds an
