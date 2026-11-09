@@ -785,7 +785,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
 | `threatd_blocklist_entries{feed}` | `threatd` | addresses in each published feed — what nodes download, after the allowlist and each feed's cap: `feed="full"` (the add-on's `/v1/feed`, capped by `BLOCKLIST_MAX_ENTRIES`) and `feed="basic"` (`/v1/basic-feed`, capped by `BLOCKLIST_BASIC_MAX_ENTRIES`) |
-| `threatd_feed_requests_total{feed,code}` | `threatd` | every answer the two blocklist feeds gave, by feed (`full`, `basic`) and HTTP status: `200` sent the list, `304` told the machine its copy is current, `503` means no feed generated yet, `401`/`405` a bad request |
+| `threatd_http_requests_total{route,status}` for the two feed routes | `threatd` | per-feed request counts come from the generic request counter, by route: `/v1/feed` is the full feed, `/v1/basic-feed` the basic one. `200` sent the list, `304` told the machine its copy is current, `503` means no feed generated yet, `401`/`405` a bad request. There is no separate feed counter; daily downloads and machines per feed are on `/blocklist/stats` |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -801,8 +801,7 @@ known list — the four `insightsd_llm_calls_total` outcomes, the
 `insightsd_budget_rejections_total` reason, the three
 `insightsd_windows_total` results, both `insightsd_gate_templates_total`
 results, every `threatd_events_total` result, both
-`authd_*` families, `threatd_ingestq_full_total`, every
-`threatd_feed_requests_total` feed and code, and both
+`authd_*` families, `threatd_ingestq_full_total`, and both
 `<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
 counts has ever happened. That is what lets an alert like

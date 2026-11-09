@@ -318,7 +318,6 @@ func main() {
 	downloads := blocklist.NewDownloads()
 	consensus := blocklist.New(s, snapshot, basicSnapshot, consensusCfg).WithDownloads(downloads)
 	feedNames := []string{blocklist.FeedFull, blocklist.FeedBasic}
-	feedMetrics := metrics.NewFeedRequests(reg, feedNames, threatapi.FeedCodes)
 
 	// The queue's handler is bound to the store here, before either the queue
 	// or the API server exists: the queue's handler must be fixed at
@@ -346,7 +345,6 @@ func main() {
 			}
 		},
 		FeedServed: func(fr threatapi.FeedRequest) {
-			feedMetrics.Inc(fr.Feed, fr.Code)
 			downloads.Record(time.Now().UnixMilli(), fr.Feed, fr.SystemID, fr.Code, fr.Body)
 		},
 	}, metrics.Handler(reg), httpMetrics)

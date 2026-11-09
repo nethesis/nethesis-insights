@@ -13,8 +13,7 @@ import (
 )
 
 // The two feed names, as stored in threat_feed_downloads_daily.feed and
-// exported as the feed label of threatd_feed_requests_total and
-// threatd_blocklist_entries.
+// exported as the feed label of threatd_blocklist_entries.
 const (
 	FeedFull  = "full"
 	FeedBasic = "basic"
@@ -25,7 +24,7 @@ const (
 // a flush runs every consensus pass, so a real deployment stays far below
 // it; it exists so that nothing a client sends can grow this map without
 // limit. A request whose key would exceed it is dropped from the daily
-// counts (the Prometheus counter still sees it) and reported by Flush.
+// counts (threatd_http_requests_total still counts it) and reported by Flush.
 const MaxDownloadKeys = 50000
 
 // DownloadWriter is the store method a flush writes through.

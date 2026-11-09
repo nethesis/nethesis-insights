@@ -752,10 +752,11 @@ and publish an address someone had explicitly excluded.
 ### Feed downloads: counted in memory, flushed on the pass
 
 Both feed handlers report every answer through `Config.FeedServed`, which
-`threatd` wires to two counters. `threatd_feed_requests_total{feed,code}`
-is the live rate, with every `(feed, code)` the handler can answer
-(`api/threat.FeedCodes`) pre-created at 0. `blocklist.Downloads` is the
-persisted one: it counts, per UTC day, feed and `system_id`, every request
+`threatd` wires to `blocklist.Downloads`. The live rate needs no counter of
+its own: `threatd_http_requests_total{method,route,status}` already counts
+`/v1/feed` and `/v1/basic-feed` separately by route, so a dedicated
+`{feed,code}` counter would only restate it. `blocklist.Downloads` is the
+persisted count: it counts, per UTC day, feed and `system_id`, every request
 (`requests`), the full-body answers (`downloads`: a `GET` answered `200`,
 never a `HEAD`) and the `304`s (`not_modified`); a `401` or `405` has no
 `system_id` and is not attributed. The consensus pass flushes it into

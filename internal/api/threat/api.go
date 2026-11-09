@@ -126,16 +126,11 @@ type Config struct {
 	Events func(model.ThreatCounters)
 
 	// FeedServed, when set, is told about every answer either feed handler
-	// gives -- threatd wires it to threatd_feed_requests_total and to the
-	// in-memory daily download counts (blocklist.Downloads).
+	// gives -- threatd wires it to the in-memory daily download counts
+	// (blocklist.Downloads). The live per-feed request rate needs no hook:
+	// threatd_http_requests_total already counts /v1/feed and
+	// /v1/basic-feed by route and status.
 	FeedServed func(FeedRequest)
-}
-
-// FeedCodes is every status code a feed handler answers with, for
-// pre-creating threatd_feed_requests_total's children at 0.
-var FeedCodes = []int{
-	http.StatusOK, http.StatusNotModified, http.StatusUnauthorized,
-	http.StatusMethodNotAllowed, http.StatusServiceUnavailable,
 }
 
 // FeedRequest is one answered feed request. Feed is blocklist.FeedFull or

@@ -24,11 +24,12 @@ func (d *downloadSink) AddFeedDownloads(_ context.Context, rows []threatstore.Fe
 }
 
 // Every feed answer reaches FeedServed, wired here exactly as threatd wires
-// it: threatd_feed_requests_total counts each one by feed and code, and the
-// daily download counts attribute each to its system.
-func TestFeedRequestsAreCountedPerFeedAndCode(t *testing.T) {
+// it: the daily download counts attribute each to its system and tell a
+// download from a not-modified answer. The live per-feed rate has no
+// counter of its own; threatd_http_requests_total separates the two feeds
+// by route.
+func TestFeedAnswersAreCountedPerSystem(t *testing.T) {
 	reg := metrics.NewRegistry("threatd")
-	counter := metrics.NewFeedRequests(reg, []string{blocklist.FeedFull, blocklist.FeedBasic}, FeedCodes)
 	downloads := blocklist.NewDownloads()
 
 	full := generatedSnapshot(t, "203.0.113.7", threatNow)
@@ -36,10 +37,9 @@ func TestFeedRequestsAreCountedPerFeedAndCode(t *testing.T) {
 	h := NewServer(&fakeThreatStore{}, nil, full, nil, trustedProxy, Config{
 		MaxDecisions: 500,
 		FeedServed: func(fr FeedRequest) {
-			counter.Inc(fr.Feed, fr.Code)
 			downloads.Record(threatNow, fr.Feed, fr.SystemID, fr.Code, fr.Body)
 		},
-	}, metrics.Handler(reg), nil)
+	}, metrics.Handler(reg), metrics.NewHTTP(reg))
 
 	do := func(method, path, etag string, auth bool) int {
 		req := httptest.NewRequest(method, path, nil)
@@ -76,13 +76,10 @@ func TestFeedRequestsAreCountedPerFeedAndCode(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 	for _, want := range []string{
-		`threatd_feed_requests_total{code="200",feed="full"} 3`,
-		`threatd_feed_requests_total{code="304",feed="full"} 1`,
-		`threatd_feed_requests_total{code="401",feed="full"} 1`,
-		`threatd_feed_requests_total{code="405",feed="full"} 1`,
-		`threatd_feed_requests_total{code="503",feed="basic"} 1`,
-		// Pre-created at 0, before anything was answered with it.
-		`threatd_feed_requests_total{code="200",feed="basic"} 0`,
+		`threatd_http_requests_total{method="GET",route="/v1/feed",status="200"} 2`,
+		`threatd_http_requests_total{method="HEAD",route="/v1/feed",status="200"} 1`,
+		`threatd_http_requests_total{method="GET",route="/v1/feed",status="304"} 1`,
+		`threatd_http_requests_total{method="GET",route="/v1/basic-feed",status="503"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape is missing %q", want)
