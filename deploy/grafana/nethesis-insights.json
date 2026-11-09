@@ -1953,7 +1953,7 @@
       "type": "timeseries",
       "id": 37,
       "title": "Active systems",
-      "description": "Systems with at least one threat event observed in the last 24 hours.",
+      "description": "active: systems with at least one threat event in the last 24 hours. A mass scan that touches many quiet systems at once makes this jump for a day. regular: systems that reported on at least 2 of the last 7 days, which leaves those one-off wake-ups out.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1972,9 +1972,20 @@
           },
           "editorMode": "code",
           "expr": "threatd_active_systems{system=\"insights\", instance=\"$instance\"}",
-          "legendFormat": "systems",
+          "legendFormat": "active (24 h)",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "threatd_regular_systems{system=\"insights\", instance=\"$instance\"}",
+          "legendFormat": "regular (2 of 7 days)",
+          "range": true,
+          "refId": "B"
         }
       ],
       "fieldConfig": {

@@ -95,6 +95,9 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		// threat_ingest_daily grows one row per reporting system per
 		// day forever without a floor on its own retention.
 		{name: "zero ingest retention", mutateCfg: func(c *blocklist.Config) { c.IngestRetention = 0 }, interval: time.Minute, wantVar: "THREAT_INGEST_RETENTION"},
+		// threatd_regular_systems looks back regularWindowDays of
+		// ingest accounting; a shorter retention silently undercounts it.
+		{name: "ingest retention below the regular-systems window", mutateCfg: func(c *blocklist.Config) { c.IngestRetention = 6 * 24 * time.Hour }, interval: time.Minute, wantVar: "THREAT_INGEST_RETENTION"},
 		// An unbounded queue timeout, size or workers count, or an
 		// unbounded per-request cap, each silently loses data one way or
 		// another -- see the doc comment on ingestLimits.

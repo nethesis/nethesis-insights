@@ -220,6 +220,33 @@ func (s *Store) ActiveSystems(ctx context.Context, since int64) (int, error) {
 	return n, nil
 }
 
+// RegularSystems counts the distinct systems that reported on at least
+// minDays UTC days from sinceDay onward, for threatd_regular_systems.
+// threat_ingest_daily rather than threat_events, for two reasons: it records
+// a report even when every decision in it was dropped, and it is kept for
+// THREAT_INGEST_RETENTION rather than the much shorter event retention.
+// (day, system_id) is the primary key, so count(*) per system is its number
+// of distinct days.
+//
+// This exists beside ActiveSystems because a reporter sends only when it has
+// a ban to report. A quiet system is therefore invisible until something
+// touches it, and one mass scan wakes hundreds of them at once: on
+// production one address added 372 first-time systems in ten minutes, and
+// almost none reported again. Requiring a second day leaves those out.
+func (s *Store) RegularSystems(ctx context.Context, sinceDay string, minDays int) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM (
+			SELECT system_id FROM threat_ingest_daily
+			WHERE day >= ?
+			GROUP BY system_id
+			HAVING count(*) >= ?
+		) AS regular`, sinceDay, minDays).Scan(&n); err != nil {
+		return 0, fmt.Errorf("threat: count regular systems: %w", err)
+	}
+	return n, nil
+}
+
 // ThreatEventRow is one stored threat_events row.
 type ThreatEventRow struct {
 	ID, SystemID, AttackerIP, Scenario string

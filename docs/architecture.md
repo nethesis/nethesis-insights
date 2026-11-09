@@ -967,7 +967,8 @@ gauge is never queried at scrape time: each pipeline has exactly one SQLite
 writer, and a gauge that ran a query per scrape would compete with it on the
 scraper's schedule. The ones that exist -- `insightsd_active_systems`,
 `insightsd_findings{status}`, `threatd_active_systems`,
-`threatd_blocklist_entries` -- are `metrics.StoreGauges`: computed once on
+`threatd_regular_systems`, `threatd_blocklist_entries` -- are
+`metrics.StoreGauges`: computed once on
 the pipeline's own periodic pass and served from memory. `svc.Then(pass,
 refresh)` runs the refresh after every pass whatever the pass returned (a
 failed consensus pass must not also freeze the gauges) and fails the run if
@@ -981,6 +982,24 @@ hours. "Active" means reported within `metrics.ActiveWindow` (24 h), one
 value for both binaries; threatd measures it on `threat_events.observed_at`
 rather than `threat_ingest_daily`, whose day key would make the count jump
 at every UTC midnight.
+
+`threatd_regular_systems` sits beside it because "active" is the wrong count
+for a reporter that sends only when it has a ban. A quiet system is invisible
+until something touches it, and one mass scan touches hundreds at once: on
+production on 2026-11-03 a single address added 372 first-time systems in ten
+minutes, and almost none of them reported again. The active count jumps for a
+day on every such sweep. The regular count is the systems with a
+`threat_ingest_daily` row on at least 2 of the last 7 UTC days, today
+included. It reads `threat_ingest_daily`, not `threat_events`, because that
+table records a report even when every decision in it was dropped, and it is
+kept for `THREAT_INGEST_RETENTION` rather than the much shorter event
+retention. That is why `THREAT_INGEST_RETENTION` has a 7-day floor: a shorter
+value would undercount it silently. The day key does move this count at UTC
+midnight, unlike the active count, but only by the systems whose second day
+just fell out of the window. The scanners themselves are **not** filtered
+from anything: their sightings are real evidence, and an address many systems
+report at once is exactly what the consensus pass promotes. Only the gauge
+asks for a second day.
 
 **Every enumerable child is pre-created at 0.** A prometheus `CounterVec`
 creates a child only on the first `WithLabelValues` call, and a family with
