@@ -197,7 +197,11 @@ Threat Shield rules that are as load-bearing as the gate's:
   blocking a legitimate address after an operator exempted it. **It is derived
   from `first_listed_at`, never from an in-memory copy**, so a threatd restart
   does not hand every subscriber the full list; a re-promoted entry gets a new
-  `first_listed_at` and waits out the whole delay again. **It has no router
+  `first_listed_at` and waits out the whole delay again — which holds only
+  because `Run` expires **before** it promotes: the upsert keeps
+  `first_listed_at`, so an address back before its expired row was deleted
+  would otherwise refresh the dead row and skip the delay
+  (`TestRepromotionAfterExpiryRestartsFirstListedAt`). **It has no router
   of its own**: it rides the subscription-only `blocklist-api` /
   `blocklist-crowdsec-api` `PathPrefix` routers on purpose, so it must stay
   out of the entitled routers' exact `Path` list (`/feed`,

@@ -243,7 +243,7 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses` and `system_nodes` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
-| `internal/blocklist` | `Runner.Run` — one consensus pass: promote, expire, unlist the newly allowlisted, prune, regenerate the full feed and then the basic one from the same rows (`BasicCutoff`). `Snapshot` holds one rendered feed behind an `RWMutex`; `threatd` holds two. |
+| `internal/blocklist` | `Runner.Run` — one consensus pass: expire, promote, unlist the newly allowlisted, prune, regenerate the full feed and then the basic one from the same rows (`BasicCutoff`). `Snapshot` holds one rendered feed behind an `RWMutex`; `threatd` holds two. |
 | `internal/store/threat` | threatd's only store package: ingest, consensus inputs, the promoted blocklist, the allowlist and its client-facing review queue, the append-only allowlist audit trail, and the per-system ingest accounting. |
 | `internal/sizing` | Fleet sizing's pure half: `Sanitize` (every ingest drop rule, including the numbers-only workload rule), `Evaluate` (the `pressure` score), `EvaluateVerdict` (the multi-day k-of-n verdict), `ClusterPlacement`, the two cohort keyings and `IsPlatform` (which families are ignorable when testing "solo"). Owns `PressureVersion`. |
 | `internal/baseline` | `Runner.Run` — one cohort pass: recompute stale pressure, verdicts, cluster imbalance, cohorts, publish, expire, roll up, prune. Deliberately the same shape as `internal/blocklist`. |
@@ -657,11 +657,18 @@ load-bearing:
 1. `ConsensusCandidates(now - BLOCKLIST_WINDOW)` returns
    `(attacker_ip, scenario, system_id)` triples.
 2. Go folds them per address into a distinct-system set, a scenario set, a hit
-   sum and the latest sighting.
-3. Allowlisted addresses are dropped — **at promotion, not at read**, so
-   adding an entry unlists an address rather than hiding it.
-4. Addresses with at least `BLOCKLIST_MIN_SYSTEMS` distinct systems are
-   upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
+   sum and the latest sighting, and the allowlist is loaded.
+3. Expired entries are deleted — **before** step 4's upsert, not after it.
+   The upsert keeps an existing row's `first_listed_at`, which is right for
+   an address that never left the list, but an address whose listing
+   expired and that the fleet reports again before a pass has deleted the
+   row would otherwise refresh the dead row and keep its old
+   `first_listed_at` — skipping the basic feed's delay on a listing that
+   had already ended. Deleted first, it gets a new row and waits the whole
+   delay again.
+4. Allowlisted addresses are dropped — **at promotion, not at read**, so
+   adding an entry unlists an address rather than hiding it. Addresses with
+   at least `BLOCKLIST_MIN_SYSTEMS` distinct systems are upserted with `expires_at = last_seen + BLOCKLIST_TTL` and a
    `listing_reason` snapshot of the evidence. `last_seen` is clamped to `now`
    here if the newest sighting is dated later than that: the feed is ordered
    by `last_seen_at DESC` and `BLOCKLIST_MAX_ENTRIES` cuts on that order, so a
@@ -670,9 +677,8 @@ load-bearing:
    hangs off the same value, extend their listing by the same margin. Only
    the derived `threat_blocklist` row is clamped; the `threat_events` row
    keeps whatever timestamp it was stored with.
-5. Expired entries are deleted.
-6. `Runner.unlist` deletes the **live** entries the allowlist now covers —
-   `ListBlocklistIPs` then `DeleteBlocklistEntries`. Step 3 is only half of
+5. `Runner.unlist` deletes the **live** entries the allowlist now covers —
+   `ListBlocklistIPs` then `DeleteBlocklistEntries`. Step 4 is only half of
    "applied at promotion": it declines to *add* a row, while an address the
    fleet already agreed about keeps one until its TTL runs out, and
    `ExpireBlocklist` deletes on `expires_at` alone. Two properties of this
@@ -680,11 +686,11 @@ load-bearing:
    pass's candidates** — the TTL outlives the observation window many times
    over, so by the time an operator exempts a listed address its events have
    usually aged out and the candidate set holds nothing for it. And it runs
-   **before** the `ListBlocklist` of step 10, so the address leaves the served
+   **before** the `ListBlocklist` of step 9, so the address leaves the served
    feed on the same pass it leaves the table. `ListBlocklistIPs` is uncapped
    on purpose: capping it would leave an allowlisted row in the table until it
    drifted inside the feed's cap, and the operator UI lists the table itself.
-7. `PruneThreatEvents(now - THREAT_EVENT_RETENTION)`. Nothing is rolled up
+6. `PruneThreatEvents(now - THREAT_EVENT_RETENTION)`. Nothing is rolled up
    first: `/stats` counts the retained events directly, so threat history is
    exactly the retention window. A `threat_daily_stats` rollup used to run
    here and was removed — recomputed every pass while this prune cut mid-day,
@@ -704,7 +710,7 @@ load-bearing:
    fix, and the page says so: the oldest retained day, because the rolling
    prune above cuts it mid-day rather than at a boundary, and today (UTC),
    because it has not finished yet.
-8. `PruneThreatIngestDaily(now - THREAT_INGEST_RETENTION)` drops per-system
+7. `PruneThreatIngestDaily(now - THREAT_INGEST_RETENTION)` drops per-system
    ingest-accounting rows past their own, much longer retention (default
    `2160h`, 90 days, against `THREAT_EVENT_RETENTION`'s default week).
    `ListThreatSystems` is driven by this table, not `threat_events`, so
@@ -717,13 +723,13 @@ load-bearing:
    downloads" below) and then prunes `threat_feed_downloads_daily` on the
    same retention: both are per-system daily accounting, read on `/stats`
    (and the download rows on `/downloads`).
-9. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
+8. `PruneAllowlistRequests(now - THREAT_ALLOWLIST_REQUEST_RETENTION)` drops
    unreviewed client allowlist requests. It rides along here because this is
    the only periodic job `threatd` runs, and the table is client-fed:
    handling a request deletes its rows, so an unreviewed one would otherwise
    live for the life of the deployment. Order-independent, and the audit
    trail is never pruned.
-10. The snapshots are regenerated from the live entries, read **once**:
+9. The snapshots are regenerated from the live entries, read **once**:
     `ListBlocklist` with `limit <= 0` returns every live entry, most
     recently seen first, and both feeds are cut from that one slice in Go,
     so the pass does not sort the live table twice. The full feed is its
@@ -737,18 +743,17 @@ load-bearing:
     The basic feed keeps the rows of the same slice listed at least the
     delay ago, then takes the first `BLOCKLIST_BASIC_MAX_ENTRIES` of those,
     with its own capped flag (see "Basic feed" below). The read follows
-    steps 5 and 6, so every removal reaches
-    both feeds on this pass. Each feed's size, capped flag and
+    steps 3 and 5, so every removal reaches both feeds on this pass. Each feed's size, capped flag and
     `generated_at` are shown side by side on the dashboard's index and
     status pages, exported as `threatd_blocklist_entries{feed="full"|"basic"}`,
     and logged on the pass's `blocklist consensus pass` line as `entries`
     and `basic_entries`.
 
-An error in steps 1–6 or 10 aborts the pass and returns (if the full feed
+An error in steps 1–5 or 9 aborts the pass and returns (if the full feed
 generated and the basic one did not, the basic feed keeps its previous
-snapshot, like any failed pass); all three prunes (7, 8, 9) and the
-feed-download flush are logged and skipped instead, because housekeeping must not stop the feed reflecting
-promotions already made. A malformed allowlist row is the
+snapshot, like any failed pass); all three prunes (6, 7, 8) and the
+feed-download flush are logged and skipped instead, because housekeeping
+must not stop the feed reflecting promotions already made. A malformed allowlist row is the
 one housekeeping-shaped thing that *does* abort: skipping it would fail open
 and publish an address someone had explicitly excluded.
 
@@ -888,7 +893,7 @@ properties are load-bearing:
 
 - **Only additions are delayed.** The basic rows are read on every pass from
   the same table state the full feed was just rendered from — after this
-  pass's expiry (step 5) and unlisting (step 6, `Runner.unlist`) — so an
+  pass's expiry (step 3) and unlisting (step 5, `Runner.unlist`) — so an
   address that expires or is newly allowlisted leaves both feeds on the same
   pass. Delaying removals too — a copy of the full feed frozen two days ago —
   would make the free tier the one that keeps blocking a legitimate address

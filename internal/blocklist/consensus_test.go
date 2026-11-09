@@ -274,6 +274,51 @@ func TestRefreshExtendsTTLButKeepsFirstListedAt(t *testing.T) {
 	}
 }
 
+// An address that expired and is promoted again before a pass has deleted
+// its row is a new listing, not a refresh: it must get a new
+// first_listed_at, or it would skip the basic feed's delay on the strength of
+// a listing that had already ended. Expiry therefore runs before promotion.
+func TestRepromotionAfterExpiryRestartsFirstListedAt(t *testing.T) {
+	s := newTestStore(t)
+	report(t, s, "sys-a", "203.0.113.7", "ssh_bruteforce", 30*minute)
+	report(t, s, "sys-b", "203.0.113.7", "ssh_bruteforce", 30*minute)
+	report(t, s, "sys-c", "203.0.113.7", "ssh_bruteforce", 30*minute)
+
+	snap := NewSnapshot()
+	r := New(s, snap, nil, testConfig())
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	first, _ := s.ListBlocklist(context.Background(), now, 0)
+	if len(first) != 1 {
+		t.Fatalf("first pass rows: got %d, want 1", len(first))
+	}
+
+	// The listing expires with no pass in between, then all three report
+	// again just before the next pass runs.
+	later := first[0].ExpiresAt + 2*minute
+	for _, sys := range []string{"sys-a", "sys-b", "sys-c"} {
+		_, _, err := s.InsertThreatEvents(context.Background(), sys, []model.ThreatEvent{{
+			AttackerIP: "203.0.113.7", Scenario: "ssh_bruteforce", ObservedAt: later - minute, HitCount: 1,
+		}})
+		if err != nil {
+			t.Fatalf("second round insert: %v", err)
+		}
+	}
+	if err := r.Run(context.Background(), later); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+
+	second, _ := s.ListBlocklist(context.Background(), later, 0)
+	if len(second) != 1 {
+		t.Fatalf("second pass rows: got %d, want 1", len(second))
+	}
+	if second[0].FirstListedAt != later {
+		t.Fatalf("first_listed_at: got %d, want %d (a new listing); the expired row was refreshed instead",
+			second[0].FirstListedAt, later)
+	}
+}
+
 func TestExpiryRemovesTheEntry(t *testing.T) {
 	s := newTestStore(t)
 	report(t, s, "sys-a", "203.0.113.7", "ssh_bruteforce", 30*minute)

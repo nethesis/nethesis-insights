@@ -153,11 +153,16 @@ type candidate struct {
 	lastSeen  int64
 }
 
-// Run executes promote -> expire -> unlist -> housekeeping (the prunes and
+// Run executes expire -> promote -> unlist -> housekeeping (the prunes and
 // the feed-download flush) -> regenerate (the full feed, then the basic
 // one, both from one ListBlocklist read).
 //
-// Order matters twice: the unlist must precede the ListBlocklist that feeds
+// Order matters three times. Expiry precedes promotion so an address that
+// comes back after its listing expired, but before a pass deleted the row,
+// gets a new row and a new first_listed_at: the upsert keeps
+// first_listed_at, so refreshing the dead row would let the address skip
+// the basic feed's delay on a listing that had already ended. The unlist
+// must precede the ListBlocklist that feeds
 // Generate so an exempted address leaves the served feed on the same pass it
 // leaves the table, and the snapshot is regenerated last so it reflects the
 // expiries and unlistings this pass performed. The prunes and the
@@ -174,14 +179,14 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		return err
 	}
 
-	promoted := r.promote(rows, allow, now)
-	if err := r.store.UpsertBlocklistEntries(ctx, promoted); err != nil {
-		return fmt.Errorf("blocklist: promote: %w", err)
-	}
-
 	expired, err := r.store.ExpireBlocklist(ctx, now)
 	if err != nil {
 		return fmt.Errorf("blocklist: expire: %w", err)
+	}
+
+	promoted := r.promote(rows, allow, now)
+	if err := r.store.UpsertBlocklistEntries(ctx, promoted); err != nil {
+		return fmt.Errorf("blocklist: promote: %w", err)
 	}
 
 	unlisted, err := r.unlist(ctx, allow, now)
