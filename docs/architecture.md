@@ -2389,9 +2389,31 @@ crosses a NAT boundary and `RemoteAddr` really is `127.0.0.1` by construction,
 which is what makes the default `TRUSTED_PROXY_CIDRS=127.0.0.0/8` correct
 without a per-deployment value.
 Every pod member, the `embedder` included, connects from `127.0.0.0/8` and is
-therefore inside this trust boundary: a compromised embedder (a third-party
-server parsing log-derived text) could claim any `system_id` on the `insightsd`,
-`threatd` and `sizingd` ingest.
+therefore inside this trust boundary. A compromised embedder (a third-party
+server parsing log-derived text) reaches every pod listener without passing
+through Traefik, so it could:
+
+- claim any `system_id` on the `insightsd`, `threatd` and `sizingd` ingest;
+- read each pipeline's API as any `system_id` (for example
+  `GET /v1/findings`), since a request from the trusted range is believed
+  with any password;
+- read every operator UI page (`127.0.0.1:9596`, `:9606`, `:9616`): their
+  `GET` routes have no app-layer auth, and Traefik's BasicAuth, which is
+  what normally guards them, is never in that path;
+- call `authd` directly on `127.0.0.1:9590`.
+
+It cannot write through an operator UI: those routes still require
+`ADMIN_API_KEY` in the app. This whole exposure, fleet-wide reads included
+and not only ingest spoofing, is accepted: the embedder stays in the pod,
+and moving it out was considered and declined (2026-10-30) on cost against
+benefit. Moving it out needs a second network, a trusted range that is no
+longer loopback by construction, and a per-deployment value for
+`TRUSTED_PROXY_CIDRS`, the setting whose default is correct today only
+because the pod shares one namespace. The risk being bought down is small:
+the embedder is upstream's llama.cpp server at a pinned build tag
+(`deploy/quadlet/embedder.container`), listens only on loopback, and
+receives nothing but the text `insightsd` sends it. Revisit this if any of
+those three stops being true.
 
 `api.StaticAuth`, the hardcoded system/secret pair used before this split for
 tests and local development, no longer exists: a pipeline no longer holds an

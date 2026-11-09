@@ -189,7 +189,14 @@ Threat Shield rules that are as load-bearing as the gate's:
   default `TRUSTED_PROXY_CIDRS=127.0.0.0/8` correct without a per-deployment value.
   Every pod member, the embedder included, connects from that range and so sits
   inside the trust boundary: a compromised embedder (a third-party server parsing
-  log-derived text) could claim any `system_id` on insightsd, threatd and sizingd ingest.
+  log-derived text) could claim any `system_id` on insightsd, threatd and sizingd ingest,
+  read their APIs as any `system_id`, read every operator UI's `GET` pages (Traefik's
+  BasicAuth is not in that path) and call authd directly — not write through the UI,
+  which still needs `ADMIN_API_KEY`. **This is accepted and settled (2026-10-30):
+  the embedder stays in the pod.** Do not move it out, narrow `TRUSTED_PROXY_CIDRS`
+  around it or raise it as open work; the cost-against-benefit reason is in
+  `docs/architecture.md`, next to the trust boundary, with the conditions that
+  would reopen it.
 - **Nothing is ever allowlisted automatically.** A client request
   (`POST /blocklist/v1/allowlist-requests`) is a ranked review queue entry and nothing else; only
   an explicit admin approval creates an entry. Never add a consensus threshold that

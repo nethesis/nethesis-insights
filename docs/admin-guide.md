@@ -534,9 +534,13 @@ Two consequences:
   what makes the default value correct: all six containers in the pod share one network
   namespace, so the proxy's connection really is `127.0.0.1` by construction.
   Every pod member, the `embedder` included, connects from that range and is
-  therefore inside the trust boundary: a compromised embedder (a third-party
-  server parsing log-derived text) could claim any `system_id` on the three
-  pipelines' ingest.
+  therefore inside the trust boundary. A compromised embedder (a third-party
+  server parsing log-derived text) could send data as any `system_id` to the
+  three pipelines, read their data as any `system_id`, and open every
+  operator dashboard page, because inside the pod nothing passes through
+  Traefik's password check. It cannot change anything through a dashboard:
+  those actions still need `ADMIN_API_KEY`. This risk is known and accepted —
+  the embedder stays in the pod by design, so do not move it out on your own.
 - Widen it only for a client you would trust unauthenticated. Testing a
   pipeline from another machine needs it widened to that machine's address,
   which grants that machine the ability to claim any `system_id`.
