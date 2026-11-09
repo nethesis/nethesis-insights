@@ -203,7 +203,7 @@ http:
     #
     # GET /blocklist/v1/basic-feed is here too, deliberately: it is the
     # list every subscriber may download without the entitlement, taking on
-    # new addresses once per BLOCKLIST_BASIC_INTERVAL. It must never be
+    # each new address BLOCKLIST_BASIC_DELAY late. It must never be
     # added to blocklist-entitled's Path list.
     blocklist-api:
       rule: "Host(`${INSIGHTS_HOST}`) && PathPrefix(`/blocklist/v1/`)"

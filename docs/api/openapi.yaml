@@ -27,7 +27,7 @@ info:
       separately authorised: every subscriber posts events, only a node
       carrying the Threat Shield entitlement may fetch the feed or ask for
       an allowlist entry. Every subscriber may fetch the basic feed: the
-      same list, taking on new addresses only once a day. The same routes
+      same list, publishing each new address a day later. The same routes
       are served twice, once per
       client and entitlement: NethSecurity firewalls call `/blocklist/v1/`
       (`ng-blacklist`), NS8 CrowdSec nodes call `/blocklist/crowdsec/v1/`
@@ -533,16 +533,17 @@ paths:
         every node already uses to post events.
 
         **Only additions are delayed.** An address is served here once it
-        was first listed before the most recent refresh boundary: the
-        current time rounded down to a multiple of
-        `BLOCKLIST_BASIC_INTERVAL` (default 24h, so 00:00 UTC). A new
-        address therefore reaches this feed up to one interval after it
-        reaches `/blocklist/v1/feed`. Removals are not delayed: an address
+        has been listed for `BLOCKLIST_BASIC_DELAY` (default 24h), measured
+        from its own first listing: each new address reaches this feed on
+        the first consensus pass that long after it reaches
+        `/blocklist/v1/feed`, so additions arrive through the day rather
+        than all at one time.
+        Removals are not delayed: an address
         that expires or is allowlisted leaves both feeds on the same
         consensus pass. The feed is still regenerated on every pass, so
         poll it like the full feed; most polls answer `304`.
 
-        The header's rule line ends in `/ new entries every 24h0m0s`, and
+        The header's rule line ends in `/ new entries after 24h0m0s`, and
         the two feeds never share an `ETag`.
       security:
         - basicAuth: []

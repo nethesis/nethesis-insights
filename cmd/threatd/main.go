@@ -118,10 +118,10 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 		// accounting; a shorter retention would undercount it silently.
 		errs = append(errs, fmt.Errorf("THREAT_INGEST_RETENTION must be at least %s, got %s", regularWindow, cfg.IngestRetention))
 	}
-	if cfg.BasicInterval <= 0 {
-		// BasicCutoff would publish every entry the moment it is listed,
+	if cfg.BasicDelay <= 0 {
+		// A zero delay would publish every entry the moment it is listed,
 		// handing the full feed out without the entitlement.
-		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_INTERVAL must be positive, got %s", cfg.BasicInterval))
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_DELAY must be positive, got %s", cfg.BasicDelay))
 	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))
@@ -171,9 +171,9 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 	blocklistMaxEntries, err := svc.GetenvIntStrict("BLOCKLIST_MAX_ENTRIES", 50000)
 	add(err)
 	// The basic feed, served to every subscriber without an entitlement,
-	// takes on new addresses once a day: what the entitlement buys is the
-	// list as it stands now.
-	blocklistBasicInterval, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_INTERVAL", 24*time.Hour)
+	// publishes each new address a day after the full feed does: what the
+	// entitlement buys is the list as it stands now.
+	blocklistBasicDelay, err := svc.GetenvDurationStrict("BLOCKLIST_BASIC_DELAY", 24*time.Hour)
 	add(err)
 	threatRetention, err := svc.GetenvDurationStrict("THREAT_EVENT_RETENTION", 168*time.Hour)
 	add(err)
@@ -215,7 +215,7 @@ func loadStartupConfig() (blocklist.Config, time.Duration, ingestLimits, error) 
 		MaxEntries: blocklistMaxEntries,
 		Retention:  threatRetention,
 
-		BasicInterval: blocklistBasicInterval,
+		BasicDelay: blocklistBasicDelay,
 
 		IngestRetention:           threatIngestRetention,
 		AllowlistRequestRetention: allowlistRequestRetention,
@@ -351,7 +351,7 @@ func main() {
 		{Name: "BLOCKLIST_MIN_SYSTEMS", Value: strconv.Itoa(consensusCfg.MinSystems)},
 		{Name: "BLOCKLIST_TTL", Value: consensusCfg.TTL.String()},
 		{Name: "BLOCKLIST_MAX_ENTRIES", Value: strconv.Itoa(consensusCfg.MaxEntries)},
-		{Name: "BLOCKLIST_BASIC_INTERVAL", Value: consensusCfg.BasicInterval.String()},
+		{Name: "BLOCKLIST_BASIC_DELAY", Value: consensusCfg.BasicDelay.String()},
 		{Name: "THREAT_EVENT_RETENTION", Value: consensusCfg.Retention.String()},
 		{Name: "THREAT_INGEST_RETENTION", Value: consensusCfg.IngestRetention.String()},
 		{Name: "THREAT_MAX_DECISIONS_PER_REQUEST", Value: strconv.Itoa(limits.MaxDecisions)},

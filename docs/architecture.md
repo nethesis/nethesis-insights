@@ -780,56 +780,61 @@ The same list for subscribers without the add-on, served by
 `handleBasicFeed` through the same `serveFeed` code as `/v1/feed` —
 `ETag`, gzip, `304`, `503` before the first pass — from a second
 `blocklist.Snapshot` that `Runner.Run` fills on every pass. What the
-entitlement buys is the list **as it stands now**; this one takes on new
-addresses once per `BLOCKLIST_BASIC_INTERVAL` (default `24h`).
+entitlement buys is the list **as it stands now**; this one publishes each
+new address only once it has been listed for `BLOCKLIST_BASIC_DELAY`
+(default `24h`).
 
 ```
-BasicCutoff(now, interval) = now - now mod interval     (unix millis)
-basic feed = { live row r : r.first_listed_at < BasicCutoff(now) }
+BasicCutoff(now, delay) = now - delay                    (unix millis)
+basic feed = { live row r : r.first_listed_at <= BasicCutoff(now) }
 ```
 
-The cutoff is `now` rounded down to a multiple of the interval since the
-Unix epoch, so the default refreshes at 00:00 UTC and a new address reaches
-the basic feed between 0 and 24 hours after the full one. Three properties
-are load-bearing:
+The delay is measured from each address's own `first_listed_at`, so every
+new address reaches the basic feed exactly one delay after the full one, and
+additions land spread across the day as they were promoted. An earlier
+version rounded `now` down to an epoch multiple of the interval instead: the
+real delay was then anywhere from minutes to a whole day, and every pending
+addition landed on the whole fleet's basic feed at 00:00 UTC at once. Three
+properties are load-bearing:
 
-- **Only additions are delayed.** The filter runs on every pass over the
-  same capped live rows the full feed was just rendered from, so an address
-  that expires (step 5) or is newly allowlisted (step 6, `Runner.unlist`)
-  leaves both feeds on the same pass. Delaying removals too — a copy of the
-  full feed frozen once a day — would make the free tier the one that keeps
-  blocking a legitimate address for up to a day after an operator exempted
-  it, and a wrong entry is exactly what removal exists to correct.
+- **Only additions are delayed.** The basic rows are read on every pass from
+  the same table state the full feed was just rendered from — after this
+  pass's expiry (step 5) and unlisting (step 6, `Runner.unlist`) — so an
+  address that expires or is newly allowlisted leaves both feeds on the same
+  pass. Delaying removals too — a copy of the full feed frozen a day ago —
+  would make the free tier the one that keeps blocking a legitimate address
+  for up to a day after an operator exempted it, and a wrong entry is
+  exactly what removal exists to correct.
 - **It is derived from `first_listed_at`, not from state kept in memory.**
   `first_listed_at` is stored and survives a restart, so the basic feed
-  after a restart is the same set as before it. A once-a-day in-memory copy
-  would be empty at startup and refilled from the live list, handing every
+  after a restart is the same set as before it. An in-memory copy would be
+  empty at startup and refilled from the live list, handing every
   subscriber the full feed each time `threatd` restarted. An entry that
   expires and is later promoted again gets a new `first_listed_at` and
-  waits for the next boundary again — correct, since it was off the list.
+  waits out the whole delay again — correct, since it was off the list.
 - **The delay is part of the rule.** `Rule.Delay` is set only on the basic
-  snapshot and renders into the header as `… / new entries every 24h0m0s`;
+  snapshot and renders into the header as `… / new entries after 24h0m0s`;
   since the `ETag` hashes the rule, the two feeds never share a tag even when
   their entry sets agree, so a cache keyed on it cannot answer one feed's
   poll with the other's body.
 
-`BLOCKLIST_BASIC_INTERVAL` is validated positive at startup: a zero
-interval would publish every entry the pass that lists it — the full feed,
-without the entitlement. `BasicCutoff` also fails closed on its own (a
-non-positive interval yields an empty basic feed), so a caller that skips
-the startup check cannot leak the live list. Boundaries are epoch multiples
-of the interval, so only an interval that divides 24h refreshes at fixed
-times of day.
+`BLOCKLIST_BASIC_DELAY` is validated positive at startup: a zero delay
+would publish every entry the pass that lists it — the full feed, without
+the entitlement. `BasicCutoff` also fails closed on its own (a non-positive
+delay yields an empty basic feed), so a caller that skips the startup check
+cannot leak the live list.
 
 **The basic feed carries persistent attackers, by construction.** An entry
 expires `BLOCKLIST_TTL` after its last report, and it reaches the basic feed
-only at the next boundary. With the defaults (both 24h) an address reported
-for a few minutes and then never again is on the basic feed for at most the
-gap between its listing time-of-day and midnight — possibly minutes — while
-one the fleet keeps reporting stays on it. That is accepted rather than
-worked around: lengthening the basic feed's TTL would publish addresses the
-full feed has already dropped, and short-lived attacks are exactly what the
-live feed is for.
+only `BLOCKLIST_BASIC_DELAY` after it was first listed. With the defaults
+(both 24h) an address reported for a few minutes and then never again
+expires just before it would have reached the basic feed, so it never does;
+one the fleet re-reports after its promotion reaches it a day after listing
+and stays as long as the fleet keeps reporting it. That is intended, and
+there is deliberately no startup rule tying the delay to the TTL:
+lengthening the basic feed's TTL would publish addresses the full feed has
+already dropped, and short-lived attacks are exactly what the live feed is
+for.
 
 **This route needs only a subscription.** It has no Traefik router of its
 own: `/blocklist/v1/basic-feed` and `/blocklist/crowdsec/v1/basic-feed`
@@ -2239,7 +2244,7 @@ run.
 | Failure | Consequence |
 |---|---|
 | validator (`AUTH_VALIDATE_URL`) unreachable | `authd` answers `503`, not `401`, and prefers a stale cache entry if it has one; the edge retries inside its 6-hour window. A stale entry replays as the verdict it was, so an unentitled node stays `403` rather than being promoted by an outage |
-| subscriber without the Threat Shield entitlement | `403` on the feed and `allowlist-requests` of the base URL whose entitlement it lacks (`/blocklist/v1/`: `ng-blacklist`; `/blocklist/crowdsec/v1/`: `crowdsec-advanced-threat-shield`), never `401`; `events` and `basic-feed` are unaffected on either, so the node keeps contributing to consensus and still consumes the list, only with new addresses up to `BLOCKLIST_BASIC_INTERVAL` late |
+| subscriber without the Threat Shield entitlement | `403` on the feed and `allowlist-requests` of the base URL whose entitlement it lacks (`/blocklist/v1/`: `ng-blacklist`; `/blocklist/crowdsec/v1/`: `crowdsec-advanced-threat-shield`), never `401`; `events` and `basic-feed` are unaffected on either, so the node keeps contributing to consensus and still consumes the list, only with each new address `BLOCKLIST_BASIC_DELAY` late |
 | `authd` itself down | Traefik's `forwardAuth` fails and every API request becomes a Traefik-generated `500`. Indistinguishable from a backend fault at the HTTP layer — `Wants=authd.service` on the other units makes it visible in `systemctl status`, not in the response |
 | LLM provider down | bundles accumulate in the bounded queue and are analysed on recovery; a transient error leaves the window claimable so the edge's retry is not rejected as a duplicate. Once the queue fills, ingest answers `503` until it drains |
 | `LLM_SERVICE_TIER` capacity unavailable (a `429` from the provider) | the call is repeated once without the tier, at the standard price (and the cost ledger prices it so, from the answer's `service_tier`), rather than handed back as a transient error: a failed window is analysed again only if the edge happens to resend it |
@@ -2407,7 +2412,7 @@ entitled nodes would shrink the evidence base that promotion's
 three-distinct-systems rule is measured against, while leaving the live feed
 open would give away the thing being sold. What is sold is freshness, not
 access: `GET /blocklist/v1/basic-feed` stays on the subscription check and
-serves the same list with new addresses up to a day late (see "Basic feed"
+serves the same list with each new address a day late (see "Basic feed"
 under Request flow).
 
 **Two clients, two entitlements, two base URLs.** NethSecurity firewalls carry
@@ -2591,8 +2596,10 @@ grouping *is* the SQL: the boundary cases (two systems do not promote, three
 do; one system reporting three times does not; one system across two
 categories is still one system) cannot be checked against a fake that
 reimplements the query. The basic feed is tested the same way
-(`internal/blocklist/basic_test.go`): a new entry is withheld until the next
-boundary, an allowlisted or expired one leaves both feeds on the same pass,
+(`internal/blocklist/basic_test.go`): an entry is withheld until it has been
+listed for the delay, to the millisecond, two entries listed hours apart
+reach the basic feed hours apart, a zero or negative delay yields an empty
+feed, an allowlisted or expired one leaves both feeds on the same pass,
 every pass runs on a fresh `Runner` and fresh snapshots, as a restarted
 `threatd` would, and the two feeds' `ETag`s differ.
 

@@ -175,8 +175,8 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	s.serveFeed(w, r, s.snap)
 }
 
-// handleBasicFeed serves the basic feed: the same list, taking on new
-// addresses only once per BLOCKLIST_BASIC_INTERVAL (see
+// handleBasicFeed serves the basic feed: the same list, publishing each new
+// address only BLOCKLIST_BASIC_DELAY after its listing (see
 // blocklist.BasicCutoff). The handler is identical to handleFeed's; what
 // differs is the Traefik route in front of it, which checks only the system
 // credential, never an entitlement.

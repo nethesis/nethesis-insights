@@ -43,7 +43,7 @@ const MinSystemsFloor = 3
 // Runner trusts a validated Config: threatd's startup validation
 // (validateConfig in cmd/threatd/main.go) refuses to start with a
 // non-positive MaxEntries, Retention, IngestRetention,
-// AllowlistRequestRetention or BasicInterval, so Run does not guard any of
+// AllowlistRequestRetention or BasicDelay, so Run does not guard any of
 // them a second time. A test that builds a Config literal must therefore set every field
 // it exercises -- see testConfig in consensus_test.go -- rather than lean on
 // a zero value silently skipping a step.
@@ -68,10 +68,10 @@ type Config struct {
 	// for the life of the deployment.
 	AllowlistRequestRetention time.Duration
 
-	// BasicInterval is how often the basic feed takes on new addresses
-	// (BLOCKLIST_BASIC_INTERVAL). It is read only when Runner has a
-	// basic snapshot to fill; see BasicCutoff.
-	BasicInterval time.Duration
+	// BasicDelay is how long an entry must have been listed before the
+	// basic feed publishes it (BLOCKLIST_BASIC_DELAY). It is read only when
+	// Runner has a basic snapshot to fill; see BasicCutoff.
+	BasicDelay time.Duration
 }
 
 func (c Config) rule() Rule {
@@ -92,10 +92,13 @@ func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 	return &Runner{store: r, snap: snap, basic: basic, cfg: cfg}
 }
 
-// BasicCutoff is the most recent refresh boundary of the basic feed at
-// now: now rounded down to a multiple of interval since the Unix epoch, so a
-// 24h interval refreshes at 00:00 UTC. The basic feed publishes a live
-// entry only if it was first listed before this boundary.
+// BasicCutoff is the latest first_listed_at the basic feed publishes at
+// now: a live entry is on the basic feed once it has been listed for at
+// least delay, i.e. iff first_listed_at <= now - delay. Each address waits
+// out the delay from its own listing, so additions reach the basic feed
+// spread over the day as they were promoted, not all at one fleet-wide
+// boundary, and the delay is the same for every address rather than
+// anywhere between zero and a whole interval.
 //
 // Only additions are delayed. The basic feed is filtered out of the same
 // live rows the full feed is rendered from, on every pass, so an address
@@ -107,26 +110,25 @@ func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 // memory so that it survives a restart unchanged -- an in-memory copy would
 // hand every subscriber the full list each time threatd restarted. An entry
 // that expires and is later promoted again gets a new first_listed_at and
-// waits for the next boundary again, which is correct: it was off the list.
+// waits out the whole delay again, which is correct: it was off the list.
 //
-// A non-positive interval fails closed: the cutoff is the minimum int64, so
+// A non-positive delay fails closed: the cutoff is the minimum int64, so
 // nothing qualifies and the basic feed is empty. threatd refuses to start
 // with one, but a caller that skipped that check must not hand the live
 // list out without the entitlement.
-func BasicCutoff(now int64, interval time.Duration) int64 {
-	iv := interval.Milliseconds()
-	if iv <= 0 {
+func BasicCutoff(now int64, delay time.Duration) int64 {
+	if delay <= 0 {
 		return math.MinInt64
 	}
-	return now - now%iv
+	return now - delay.Milliseconds()
 }
 
 // basicRows is the subset of live the basic feed publishes at now.
-func basicRows(live []threatstore.BlocklistRow, interval time.Duration, now int64) []threatstore.BlocklistRow {
-	cutoff := BasicCutoff(now, interval)
+func basicRows(live []threatstore.BlocklistRow, delay time.Duration, now int64) []threatstore.BlocklistRow {
+	cutoff := BasicCutoff(now, delay)
 	out := make([]threatstore.BlocklistRow, 0, len(live))
 	for _, row := range live {
-		if row.FirstListedAt < cutoff {
+		if row.FirstListedAt <= cutoff {
 			out = append(out, row)
 		}
 	}
@@ -231,8 +233,8 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	// of the full one and every removal reaches both on this pass.
 	if r.basic != nil {
 		rule := r.cfg.rule()
-		rule.Delay = r.cfg.BasicInterval
-		if err := r.basic.Generate(basicRows(live, r.cfg.BasicInterval, now), rule, capped, now); err != nil {
+		rule.Delay = r.cfg.BasicDelay
+		if err := r.basic.Generate(basicRows(live, r.cfg.BasicDelay, now), rule, capped, now); err != nil {
 			return err
 		}
 	}

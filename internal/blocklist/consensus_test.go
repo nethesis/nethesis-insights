@@ -34,7 +34,7 @@ func testConfig() Config {
 		Retention:                 168 * time.Hour,
 		IngestRetention:           2160 * time.Hour,
 		AllowlistRequestRetention: 2160 * time.Hour,
-		BasicInterval:             24 * time.Hour,
+		BasicDelay:                24 * time.Hour,
 	}
 }
 

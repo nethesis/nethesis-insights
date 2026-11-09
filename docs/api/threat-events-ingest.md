@@ -28,7 +28,7 @@ URL events keep working and the feed answers `403`.
 |---|---|---|---|
 | `POST` | `/blocklist/v1/events` | the edge reports ban decisions | a subscription |
 | `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed | a subscription **and** the Threat Shield entitlement |
-| `GET`  | `/blocklist/v1/basic-feed` | the edge fetches the same feed, new entries up to a day late | a subscription |
+| `GET`  | `/blocklist/v1/basic-feed` | the edge fetches the same feed, each new entry a day late | a subscription |
 
 `threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
 behind the same Traefik proxy. Traefik strips the base URL's prefix before
@@ -335,17 +335,21 @@ cscli decisions delete --scenario nethesis/threat-shield
 The same feed for a subscriber without the Threat Shield entitlement: same
 format, same headers, same `ETag`/`304`/gzip behaviour, same `503` before the
 first pass and the same client rules. It differs in one way: **a newly listed
-address is added only at the next refresh boundary**, by default once a day at
-00:00 UTC (`BLOCKLIST_BASIC_INTERVAL`, `24h`), so it appears 0–24 hours after
-it appears on `feed`. Removals are not delayed — an address that expires or is
-allowlisted leaves both feeds on the same five-minute pass — so the basic
-feed is always a subset of `feed`.
+address is added only once it has been listed for a day**
+(`BLOCKLIST_BASIC_DELAY`, `24h`). The day is measured from each address's own
+listing, so an address appears on the first five-minute pass a day after it
+appeared on `feed`, and additions arrive spread through the day, not all at
+once. Since a listing expires a day after its last report, an address the
+fleet reported only briefly expires before it is due and never appears here;
+the basic feed carries the attackers the fleet keeps reporting. Removals are
+not delayed — an address that expires or is allowlisted leaves both feeds on
+the same five-minute pass — so the basic feed is always a subset of `feed`.
 
 The header's rule line names the delay:
 
 ```
 # nethesis threat shield v1
-# generated: 2026-08-28T10:05:00Z  entries: 1790  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries every 24h0m0s
+# generated: 2026-08-28T10:05:00Z  entries: 1790  rule: 3 systems / 1h0m0s window / 24h0m0s ttl / new entries after 24h0m0s
 ```
 
 The delay is part of the rule and so of the `ETag`: the two feeds never share

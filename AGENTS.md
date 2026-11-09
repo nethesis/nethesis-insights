@@ -179,10 +179,12 @@ Threat Shield rules that are as load-bearing as the gate's:
   `GET /v1/basic-feed` (public `/blocklist/v1/basic-feed` and
   `/blocklist/crowdsec/v1/basic-feed`) is the same list for subscribers
   without the add-on; the entitlement buys the list as it stands now. It
-  publishes a live entry only if its `first_listed_at` is before
-  `blocklist.BasicCutoff(now, BLOCKLIST_BASIC_INTERVAL)` — `now` rounded
-  down to a multiple of the interval since the Unix epoch, so the default
-  `24h` takes on new addresses at 00:00 UTC. Three parts are load-bearing.
+  publishes a live entry only once it has been listed for
+  `BLOCKLIST_BASIC_DELAY` (default `24h`): `first_listed_at <=
+  blocklist.BasicCutoff(now, delay)`, which is `now - delay`. The delay is
+  per address, never an epoch-aligned boundary — that made the real delay
+  anywhere from minutes to a day and landed every addition on the whole
+  fleet at 00:00 UTC. Three parts are load-bearing.
   **Only additions are delayed**: it is filtered on every pass from the same
   capped live rows `Generate` renders the full feed from, so expiry and a newly
   added allowlist entry (`Runner.unlist`) remove an address from both feeds on
@@ -190,11 +192,11 @@ Threat Shield rules that are as load-bearing as the gate's:
   blocking a legitimate address after an operator exempted it. **It is derived
   from `first_listed_at`, never from an in-memory copy**, so a threatd restart
   does not hand every subscriber the full list; a re-promoted entry gets a new
-  `first_listed_at` and waits for the next boundary again. **It has no router
+  `first_listed_at` and waits out the whole delay again. **It has no router
   of its own**: it rides the subscription-only `blocklist-api` /
   `blocklist-crowdsec-api` `PathPrefix` routers on purpose, so it must stay
   out of the entitled routers' exact `Path` list (`/feed`,
-  `/allowlist-requests`). `BLOCKLIST_BASIC_INTERVAL` must be positive —
+  `/allowlist-requests`). `BLOCKLIST_BASIC_DELAY` must be positive —
   threatd refuses to start otherwise, since zero would hand out the full feed
   without the entitlement. The delay is part of `Rule`, hence of the header and
   the `ETag`, so the two feeds never share a tag.
@@ -438,7 +440,7 @@ against, before assuming a bug:
 | Review | built per **finding class**: `fingerprint.Class` (the fingerprint without `system_id`), `findings.class_key`, `finding_classes` (visibility `pending`/`customer`/`operator`/`dismissed`, `security` tag, `severity_override`, `doc_ref`, `first_prompt_version`) and append-only `class_decisions`, in `internal/store/logs/{classes,review}.go`. The system alone decides when to pay. `ListFindings` returns only findings whose class is `visibility = customer` — **pending is withheld, security included**: security is a tag (seeded from the edge's category on first sight, never reset by recurrence, operator-editable, returned as `Finding.security`), and the gate's security condition is cost, not visibility. It applies `severity_override`/`doc_ref` and the class wording (`class_texts`: title/summary/suggested action seeded by the class's first finding, operator-editable, blank restores the seed) there and only there (`OpenFindings` joins neither table). `dismissed` hides a class from every view, operator ones included, but is **hidden, not dropped**: its findings still upsert and `OpenFindings` still returns them, so it never reaches the prompt and saves no money. Three review routes on `ui/logs` (decide/group/bulk) in `writableRoutes` — `decide` is the class dialog's one form carrying visibility, security, severity, doc-ref and wording together — one `class_decisions` row per changed field, `/review`, `/review/stats` per `first_prompt_version`, `/review/audit`; maint prunes an undecided class once no retained finding names it. A decision applies to the whole class on every system, including systems that raise it later. **Grouping is built**: `internal/{grouping,embed,classgroup}`, `class_groups`, a bge-small llama.cpp sidecar (`deploy/quadlet/embedder.container`, `EMBED_URL`/`REVIEW_GROUP_SIMILARITY`/`GROUP_INTERVAL`), `/review` shows "group of N" and "Suggested: …", `?group=<anchor>` is a GET view of one group and only `POST /review/group` decides its pending classes. See § Review grouping rules above and `docs/architecture.md` § "Grouping and suggested decisions" | per-finding (per-system) decisions, deliberately — a decision is per class. Trigger ignore, merge and trigger visibility were removed 2026-09-25; the **trigger memory** itself (`internal/trigger`, `system_triggers`, `trigger_key`, `TRIGGER_REUSE_WINDOW`, `trigger_hit`) was removed 2026-10-08 with the volume condition, because every reuse it ever made was a volume-only window and a novelty trigger cannot recur once its templates are recorded |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
 | Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
-| Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Two feeds from one pass: `/v1/feed` (entitlement) and `/v1/basic-feed` (subscription; new entries once per `BLOCKLIST_BASIC_INTERVAL`). Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
+| Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, seven UI pages including `/audit`, on `cmd/threatd`. Two feeds from one pass: `/v1/feed` (entitlement) and `/v1/basic-feed` (subscription; each new entry `BLOCKLIST_BASIC_DELAY` late). Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
 
 The prototype's `internal/api` currently carries both ingest and read handlers;
 the design splits ingest into `internal/ingest`.

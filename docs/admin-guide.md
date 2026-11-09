@@ -427,7 +427,7 @@ in `systemctl status threatd`.
 | `BLOCKLIST_MIN_SYSTEMS` | distinct machines required to publish an address (default `3`). It can be raised, never lowered: below `3` the service refuses to start |
 | `BLOCKLIST_TTL` | how long a listing survives its last sighting (default `24h`). At least `BLOCKLIST_WINDOW`, or a listing would be written already expired |
 | `BLOCKLIST_MAX_ENTRIES` | hard cap on the served feed (default `50000`). Must be positive. When more addresses are listed, the ones seen least recently are left out, and the blocklist dashboard says the feed is capped |
-| `BLOCKLIST_BASIC_INTERVAL` | how often the basic feed — the one for subscribers without the Threat Shield add-on — takes on newly listed addresses (default `24h`, which means once a day at midnight UTC; pick a value that divides 24h to keep a fixed time of day). Removals are never delayed. Must be positive: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
+| `BLOCKLIST_BASIC_DELAY` | how long a newly listed address waits before the basic feed — the one for subscribers without the Threat Shield add-on — publishes it (default `24h`). Each address waits from its own listing time, so new addresses reach the basic feed one by one through the day, exactly this long after the full feed. Removals are never delayed. Must be positive: the service refuses to start otherwise, because zero would give the up-to-date list away without the add-on |
 | `THREAT_EVENT_RETENTION` | how long raw sightings are kept (default `168h`). It is also how far back the dashboard's daily totals go: there is no longer-term history. At least `BLOCKLIST_WINDOW`, or sightings would be deleted before consensus counts them. A reported decision older than this is dropped at ingest and counted as `dropped_time`, the same as an unparseable `created_at`: the next prune would delete it anyway |
 | `THREAT_INGEST_RETENTION` | how long per-system ingest-accounting rows are kept (default `2160h`, 90 days). This is what `/systems` is driven by, not `THREAT_EVENT_RETENTION` — deliberately much longer, so a system that has gone quiet still shows up there for a quarter after its raw sightings have aged out. Pruned as a step in the consensus pass. Must be at least `168h` (7 days), because `threatd_regular_systems` looks back that far |
 | `THREAT_MAX_DECISIONS_PER_REQUEST` | per-request cap; over-cap batches are truncated, not rejected (default `500`). Must be positive |
@@ -1503,16 +1503,18 @@ collected, counted and handed back.
    (`GET /blocklist/crowdsec/v1/basic-feed`, or
    `GET /blocklist/v1/basic-feed` for a firewall) and needs only its
    subscription. It gets the same list with one difference: a newly published
-   address is added to it only at the next midnight UTC (with the default
-   `BLOCKLIST_BASIC_INTERVAL` of `24h`), so it shows up anywhere from a few
-   minutes to a day later than on the full feed. That freshness is what the
+   address is added to it only once it has been on the full feed for
+   `BLOCKLIST_BASIC_DELAY` (a day, by default). That freshness is what the
    add-on buys. Removals are **not** delayed: an address that expires, or that
    an operator puts on the allowlist, leaves both lists within minutes, so a
    customer without the add-on is never left blocking an address that has
    already been cleared. Restarting the server does not change what the
    basic feed contains. In practice the basic feed carries the attackers the
-   fleet keeps seeing: an address reported for a few minutes and then never
-   again usually expires before, or soon after, it reaches the basic feed.
+   fleet keeps seeing: with the defaults, an address reported for a few
+   minutes and then never again expires (24 hours after its last report) just
+   before it would reach the basic feed, so it never does, while one the fleet
+   keeps reporting reaches it a day after it was listed and stays as long as
+   the reports continue. That is intended.
 
 ### The safety net
 

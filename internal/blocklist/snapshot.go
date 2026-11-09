@@ -27,7 +27,8 @@ import (
 // consumer can see what the list means without reading our documentation.
 //
 // Delay is set only on the basic feed (see Runner and BasicCutoff): it
-// is how often that feed takes on new addresses. Being part of the rule, it
+// is how long an entry waits after its listing before that feed publishes
+// it. Being part of the rule, it
 // is also part of the ETag, so the two feeds never share a tag even when
 // their entries happen to agree.
 type Rule struct {
@@ -40,7 +41,7 @@ type Rule struct {
 func (r Rule) String() string {
 	s := fmt.Sprintf("%d systems / %s window / %s ttl", r.MinSystems, r.Window, r.TTL)
 	if r.Delay > 0 {
-		s += fmt.Sprintf(" / new entries every %s", r.Delay)
+		s += fmt.Sprintf(" / new entries after %s", r.Delay)
 	}
 	return s
 }
