@@ -820,10 +820,12 @@ properties are load-bearing:
   their entry sets agree, so a cache keyed on it cannot answer one feed's
   poll with the other's body.
 
-`BLOCKLIST_BASIC_DELAY` is validated positive at startup: a zero delay
+`BLOCKLIST_BASIC_DELAY` must be at least `1ms` at startup: a zero delay
 would publish every entry the pass that lists it — the full feed, without
-the entitlement. `BasicCutoff` also fails closed on its own (a non-positive
-delay yields an empty basic feed), so a caller that skips the startup check
+the entitlement — and `first_listed_at` is in milliseconds, so a
+sub-millisecond delay truncates to zero. `BasicCutoff` also fails closed on
+its own (a delay whose `Milliseconds()` is not positive yields an empty
+basic feed, never a zero delay), so a caller that skips the startup check
 cannot leak the live list.
 
 **The basic feed is capped on its own, after the delay.** It is cut at

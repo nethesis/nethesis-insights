@@ -125,10 +125,12 @@ func validateConfig(cfg blocklist.Config, interval time.Duration, limits ingestL
 		// addresses than the one the entitlement buys.
 		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_MAX_ENTRIES (%d) must not exceed BLOCKLIST_MAX_ENTRIES (%d)", cfg.BasicMaxEntries, cfg.MaxEntries))
 	}
-	if cfg.BasicDelay <= 0 {
+	if cfg.BasicDelay < time.Millisecond {
 		// A zero delay would publish every entry the moment it is listed,
-		// handing the full feed out without the entitlement.
-		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_DELAY must be positive, got %s", cfg.BasicDelay))
+		// handing the full feed out without the entitlement. Sub-millisecond
+		// counts as zero: first_listed_at is in milliseconds, and the
+		// blocklist package truncates the delay to match.
+		errs = append(errs, fmt.Errorf("BLOCKLIST_BASIC_DELAY must be at least 1ms, got %s", cfg.BasicDelay))
 	}
 	if limits.QueueSize <= 0 {
 		errs = append(errs, fmt.Errorf("THREAT_QUEUE_SIZE must be positive, got %d", limits.QueueSize))

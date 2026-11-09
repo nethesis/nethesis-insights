@@ -74,6 +74,8 @@ func TestBasicCutoffIsTheDelayBeforeNow(t *testing.T) {
 	}{
 		{"one day", 24 * time.Hour, now - day},
 		{"one hour", time.Hour, now - hour},
+		{"one millisecond", time.Millisecond, now - 1},
+		{"sub-millisecond delay publishes nothing", 500 * time.Microsecond, math.MinInt64},
 		{"zero delay publishes nothing", 0, math.MinInt64},
 		{"negative delay publishes nothing", -time.Hour, math.MinInt64},
 	}
@@ -224,8 +226,9 @@ func TestBasicFeedRemovalsReachBothFeedsOnTheSamePass(t *testing.T) {
 
 // A delay that cannot hold anything back fails closed: an empty, ready
 // basic feed, never the live list handed out without the entitlement.
+// 500us truncates to zero milliseconds, the unit first_listed_at is in.
 func TestBasicFeedFailsClosedOnANonPositiveDelay(t *testing.T) {
-	for _, delay := range []time.Duration{0, -time.Hour} {
+	for _, delay := range []time.Duration{500 * time.Microsecond, 0, -time.Hour} {
 		t.Run(delay.String(), func(t *testing.T) {
 			s := newTestStore(t)
 			seedListed(t, s, "203.0.113.7", now-30*day, now+2*day)

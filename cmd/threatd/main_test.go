@@ -99,6 +99,7 @@ func TestValidateConfigRefusesEachBadValue(t *testing.T) {
 		{name: "zero basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = 0 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
 		{name: "negative basic max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = -1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
 		{name: "basic max entries above max entries", mutateCfg: func(c *blocklist.Config) { c.BasicMaxEntries = c.MaxEntries + 1 }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_MAX_ENTRIES"},
+		{name: "sub-millisecond basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = 500 * time.Microsecond }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
 		{name: "negative basic delay", mutateCfg: func(c *blocklist.Config) { c.BasicDelay = -time.Hour }, interval: time.Minute, wantVar: "BLOCKLIST_BASIC_DELAY"},
 		// Events pruned before the window closes are never counted.
 		{name: "retention below window", mutateCfg: func(c *blocklist.Config) { c.Retention = 30 * time.Minute }, interval: time.Minute, wantVar: "THREAT_EVENT_RETENTION"},

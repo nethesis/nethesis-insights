@@ -118,15 +118,19 @@ func New(r Reader, snap, basic *Snapshot, cfg Config) *Runner {
 // that expires and is later promoted again gets a new first_listed_at and
 // waits out the whole delay again, which is correct: it was off the list.
 //
-// A non-positive delay fails closed: the cutoff is the minimum int64, so
-// nothing qualifies and the basic feed is empty. threatd refuses to start
-// with one, but a caller that skipped that check must not hand the live
-// list out without the entitlement.
+// A delay under one millisecond fails closed: the cutoff is the minimum
+// int64, so nothing qualifies and the basic feed is empty. The check is on
+// the truncated millisecond value, not on the Duration: first_listed_at is
+// in milliseconds, so 500us would otherwise become a cutoff of now -- the
+// live list. threatd refuses to start with such a delay, but a caller that
+// skipped that check must not hand the live list out without the
+// entitlement.
 func BasicCutoff(now int64, delay time.Duration) int64 {
-	if delay <= 0 {
+	ms := delay.Milliseconds()
+	if ms <= 0 {
 		return math.MinInt64
 	}
-	return now - delay.Milliseconds()
+	return now - ms
 }
 
 // candidate is one attacker address folded across every system that reported

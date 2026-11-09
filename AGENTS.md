@@ -196,9 +196,11 @@ Threat Shield rules that are as load-bearing as the gate's:
   of its own**: it rides the subscription-only `blocklist-api` /
   `blocklist-crowdsec-api` `PathPrefix` routers on purpose, so it must stay
   out of the entitled routers' exact `Path` list (`/feed`,
-  `/allowlist-requests`). `BLOCKLIST_BASIC_DELAY` must be positive —
+  `/allowlist-requests`). `BLOCKLIST_BASIC_DELAY` must be at least `1ms` —
   threatd refuses to start otherwise, since zero would hand out the full feed
-  without the entitlement. The delay is part of `Rule`, hence of the header and
+  without the entitlement and a sub-millisecond delay truncates to zero;
+  `BasicCutoff` fails closed on its own when `Milliseconds()` is not
+  positive. The delay is part of `Rule`, hence of the header and
   the `ETag`, so the two feeds never share a tag. **It has its own cap,
   applied after the delay**: `BLOCKLIST_BASIC_MAX_ENTRIES` (at most
   `BLOCKLIST_MAX_ENTRIES`) and its own capped flag, with the delay bound in
