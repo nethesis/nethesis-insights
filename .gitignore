@@ -5,3 +5,4 @@ bin/
 coverage.out
 .serena/
 plan.md
+deploy/local/
