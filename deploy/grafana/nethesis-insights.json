@@ -2258,6 +2258,100 @@
       }
     },
     {
+      "type": "timeseries",
+      "id": 41,
+      "title": "Feed downloads per hour",
+      "description": "Feed requests per hour by feed and answer: 200 is a full download, 304 a node whose copy was already current. Which machines downloaded, and how many distinct ones, is on the blocklist dashboard's /stats and /downloads pages: metrics never carry a machine ID. Requests refused by the proxy (wrong credential, no add-on) never reach threatd and are not counted here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(threatd_http_requests_total{system=\"insights\", instance=\"$instance\", route=\"/v1/feed\", status=~\"200|304\"}[$__rate_interval]) * 3600)",
+          "legendFormat": "full {{status}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(threatd_http_requests_total{system=\"insights\", instance=\"$instance\", route=\"/v1/basic-feed\", status=~\"200|304\"}[$__rate_interval]) * 3600)",
+          "legendFormat": "basic {{status}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "spanNulls": false,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisBorderShow": false,
+            "axisGridShow": true,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "id": 17,
       "title": "Forward auth (authd)",
@@ -2266,7 +2360,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "panels": []
     },
@@ -2283,7 +2377,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -2397,7 +2491,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -2522,7 +2616,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "panels": []
     },
@@ -2539,7 +2633,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 67
+        "y": 75
       },
       "targets": [
         {
@@ -2612,7 +2706,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 67
+        "y": 75
       },
       "targets": [
         {
@@ -2726,7 +2820,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 67
+        "y": 75
       },
       "targets": [
         {
@@ -2851,7 +2945,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "panels": []
     },
@@ -2868,7 +2962,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3012,7 +3106,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3079,7 +3173,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3152,7 +3246,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3217,7 +3311,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 78
+        "y": 86
       },
       "targets": [
         {
@@ -3342,7 +3436,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "panels": []
     },
@@ -3359,7 +3453,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -3503,7 +3597,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -3647,7 +3741,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
