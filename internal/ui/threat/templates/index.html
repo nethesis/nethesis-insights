@@ -9,28 +9,40 @@ distinct systems independently report it inside the consensus window, and it
 expires when nobody has reported it for the TTL.</small></p>
 
 <article>
-<header><strong>Served snapshot</strong></header>
-{{if not .Feed.Present}}
-<p>n/a &mdash; the threat pipeline is not wired into this process.</p>
-{{else if not .Feed.Ready}}
-<p>Not generated yet &mdash; <code>GET /v1/feed</code> answers <code>503</code>
-until the first successful consensus pass. An empty body would mean
-&ldquo;no threats&rdquo; to every client that imports it.</p>
-{{else}}
-<figure>
+<header><strong>Served feeds</strong></header>
+<p><small>Nodes with the Threat Shield add-on download the full feed; every
+other subscriber downloads the basic one, the same list with each new address
+added <code>BLOCKLIST_BASIC_DELAY</code> later. A feed not generated yet
+answers <code>503</code>, because an empty body would mean &ldquo;no
+threats&rdquo; to every client that imports it.</small></p>
+<figure class="overflow-auto">
 <table class="striped">
+<thead>
+<tr><th scope="col">Feed</th><th scope="col" class="num">Entries served</th><th scope="col">Capped</th><th scope="col">Generated</th><th scope="col">ETag</th></tr>
+</thead>
 <tbody>
-<tr><th scope="row">Entries served</th><td class="num">{{.Feed.Entries}}</td></tr>
-<tr><th scope="row">Generated</th><td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td></tr>
-<tr><th scope="row">ETag</th><td class="mono">{{.Feed.ETag}}</td></tr>
+{{range .Feeds}}
+<tr>
+<th scope="row">{{.Name}} <code>{{.Route}}</code></th>
+{{if not .Present}}
+<td colspan="4">n/a &mdash; not wired into this process</td>
+{{else if not .Ready}}
+<td colspan="4">Not generated yet &mdash; answers <code>503</code> until the first successful consensus pass</td>
+{{else}}
+<td class="num">{{.Entries}}</td>
+<td>{{if .Capped}}<mark>yes</mark>{{else}}no{{end}}</td>
+<td class="mono" title="{{fmtTime .GeneratedAt}}">{{fmtAgo .GeneratedAt}}</td>
+<td class="mono">{{.ETag}}</td>
+{{end}}
+</tr>
+{{end}}
 </tbody>
 </table>
 </figure>
-{{if .Feed.Capped}}
-<p><mark>Capped at <code>BLOCKLIST_MAX_ENTRIES</code>: the addresses seen least
-recently are left out of the feed.</mark></p>
-{{end}}
-{{end}}
+{{range .Feeds}}{{if and .Ready .Capped}}
+<p><mark>{{.Name}} feed capped at <code>{{.CapVar}}</code>: the addresses seen
+least recently are left out of it.</mark></p>
+{{end}}{{end}}
 </article>
 
 <h2>Promoted entries</h2>

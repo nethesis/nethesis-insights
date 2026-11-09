@@ -784,7 +784,7 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `threatd_regular_systems` | `threatd` | machines that reported on at least 2 of the last 7 days (UTC, today included). A machine sends only when it has a ban to report, so a quiet machine is invisible until something touches it. When one scanner sweeps the internet it wakes hundreds of quiet machines at once, and `threatd_active_systems` jumps for a day. This count needs a second day of reports, so a one-off wake-up does not move it. Machines that have never blocked anything are counted by neither |
 | `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
-| `threatd_blocklist_entries` | `threatd` | addresses in the published feed — what nodes download, after the allowlist and `BLOCKLIST_MAX_ENTRIES` |
+| `threatd_blocklist_entries{feed}` | `threatd` | addresses in each published feed — what nodes download, after the allowlist and each feed's cap: `feed="full"` (the add-on's `/v1/feed`, capped by `BLOCKLIST_MAX_ENTRIES`) and `feed="basic"` (`/v1/basic-feed`, capped by `BLOCKLIST_BASIC_MAX_ENTRIES`) |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
 | `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
@@ -824,7 +824,7 @@ and reading it on every scrape would compete with the pipeline's own writes.
 each maintenance pass (every `MAINT_INTERVAL`, default 10 minutes), so a
 graph of them moves in steps of that size. Right after a restart they are
 missing until the first pass finishes, and `threatd_blocklist_entries` stays
-missing until a consensus pass has succeeded: "not counted yet" is not the
+missing until a consensus pass has generated both feeds: "not counted yet" is not the
 same as zero. If a refresh fails, the previous values stay up and the pass
 is counted as failed in `<svc>_pass_runs_total`.
 
@@ -1008,13 +1008,13 @@ the effective configuration, lives alongside it.
 
 | Page | What you're looking at |
 |---|---|
-| `/blocklist/` | What the fleet currently agrees is malicious. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist, i.e. the reason an address might *never* appear here despite the fleet reporting it. |
+| `/blocklist/` | What the fleet currently agrees is malicious. At the top, both feeds nodes download — the full one (Threat Shield add-on) and the basic one (every other subscriber) — each with how many addresses it serves, whether its cap cut it short, and when it was last generated. Each row expands to the evidence that got it published — how many machines, how many hits, under which rule. Below it: the allowlist, i.e. the reason an address might *never* appear here despite the fleet reporting it. |
 | `/blocklist/systems` | One row per machine that has ever reported a CrowdSec decision, including a machine whose every report was a duplicate or got dropped by the sanitizer and therefore never shows up anywhere else. |
 | `/blocklist/events` | The raw sightings behind the list. Filter by address to answer "who reported this, and when" — useful when somebody's customer asks why they got blocked. |
 | `/blocklist/stats` | Two things: the day-by-day threat totals broken down by CrowdSec scenario, with a per-day total, over the days still kept (`THREAT_EVENT_RETENTION`, a week by default); and what each machine contributed — including how much of what it sent was discarded, and for which reason. The daily totals are recomputed at most every five minutes, whatever the page traffic, and the page says when they were last computed. The oldest day and today are marked as partial/in-progress, since neither one is a complete day's total. |
 | `/blocklist/allowlist-requests` | The review queue: which addresses customers have asked to have left alone, how many different machines asked, and the reasons they gave. Approve or reject from here — the buttons on this page and the allowlist itself are the only things on any of the three dashboards that make a change. |
 | `/blocklist/audit` | The append-only trail of every allowlist change: who added, removed, approved or rejected what, and when. This exists because deleting an allowlist entry destroys the row that would otherwise say who removed the exemption that let something through. |
-| `/blocklist/status` | Is the server healthy? Uptime, build version, and the full effective configuration it's running with. |
+| `/blocklist/status` | Is the server healthy? Uptime, build version, the state of both feeds, and the full effective configuration it's running with. |
 
 **The sizing dashboard**, at `/sizing`:
 

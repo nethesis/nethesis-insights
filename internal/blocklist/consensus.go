@@ -227,15 +227,19 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	if err := r.snap.Generate(live, r.cfg.rule(), capped, now); err != nil {
 		return err
 	}
+	attrs := []any{
+		"candidates", len(rows), "promoted", len(promoted), "expired", expired,
+		"unlisted", unlisted, "entries", r.snap.View().Entries,
+	}
 	if r.basic != nil {
 		if err := r.generateBasic(ctx, now); err != nil {
 			return err
 		}
+		attrs = append(attrs, "basic_entries", r.basic.View().Entries)
 	}
+	attrs = append(attrs, "min_systems", r.cfg.MinSystems)
 
-	slog.Info("blocklist consensus pass",
-		"candidates", len(rows), "promoted", len(promoted), "expired", expired,
-		"unlisted", unlisted, "entries", r.snap.View().Entries, "min_systems", r.cfg.MinSystems)
+	slog.Info("blocklist consensus pass", attrs...)
 	return nil
 }
 

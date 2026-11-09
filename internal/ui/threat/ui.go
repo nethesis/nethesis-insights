@@ -86,11 +86,11 @@ type Writer interface {
 // separate locks used to back this interface, and a Generate landing between
 // two of those calls could pair one generation's ETag with another's entry
 // count or capped flag -- the same torn read the feed handler itself was
-// once fixed for. *blocklist.Snapshot satisfies it. It may be nil -- tests,
-// and a misconfigured deployment -- in which case the pages render "n/a"
-// rather than panicking. feedState is built from one View call; the two
-// pages that show the feed never read View.Body or View.Gzip, only the
-// status fields.
+// once fixed for. *blocklist.Snapshot satisfies it. threatd wires two, the
+// full feed and the basic one; either may be nil -- tests, and a
+// misconfigured deployment -- in which case its row renders "n/a" rather
+// than panicking. feedState is built from one View call; the two pages that
+// show the feeds never read View.Body or View.Gzip, only the status fields.
 type Feed interface {
 	View() blocklist.View
 }
@@ -173,6 +173,7 @@ type server struct {
 	chrome     *chrome.Base
 	reader     Reader
 	feed       Feed
+	basic      Feed
 	writer     Writer
 	rt         Runtime
 	config     []chrome.ConfigItem
@@ -181,8 +182,10 @@ type server struct {
 	dailyStats *dailyStatsCache
 }
 
-// NewServer builds threatd's operator UI handler. feed, w and rt may all be
-// nil: a nil feed renders "n/a" on the status and blocklist pages, a nil
+// NewServer builds threatd's operator UI handler. feed is the full blocklist
+// snapshot (GET /v1/feed) and basic the basic one (GET /v1/basic-feed).
+// feed, basic, w and rt may all be nil: a nil feed renders its row "n/a" on
+// the status and blocklist pages, a nil
 // writer (equivalently, cfg.AdminKey == "") leaves every write route
 // unreachable -- an operator who has not set ADMIN_API_KEY gets the plain
 // read-only dashboard, with no write form reachable at all -- and a nil rt
@@ -193,7 +196,7 @@ type server struct {
 // one, cut mid-day by the rolling prune rather than complete. now is the
 // injected clock both /stats' cache and its day labels read -- one clock, so
 // a test can pin "today" and the cache's notion of elapsed time together.
-func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, retention time.Duration, now func() int64) (http.Handler, error) {
+func NewServer(r Reader, feed, basic Feed, w Writer, rt Runtime, cfg chrome.Config, retention time.Duration, now func() int64) (http.Handler, error) {
 	pageTemplates, err := fs.Sub(pageAssets, "templates")
 	if err != nil {
 		// Only reachable if the embed directive above stops matching the
@@ -216,6 +219,7 @@ func NewServer(r Reader, feed Feed, w Writer, rt Runtime, cfg chrome.Config, ret
 		chrome:     base,
 		reader:     r,
 		feed:       feed,
+		basic:      basic,
 		writer:     w,
 		rt:         rt,
 		config:     cfg.Info.Config,
@@ -308,6 +312,11 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 // value rather than the Feed itself so a nil feed renders as "off" instead
 // of panicking in the template.
 type feedState struct {
+	// Name, Route and CapVar say which feed this is: its label, the route
+	// threatd serves it on, and the variable whose cap its Capped flag
+	// refers to.
+	Name, Route, CapVar string
+
 	Present     bool
 	Ready       bool
 	Entries     int
@@ -316,12 +325,23 @@ type feedState struct {
 	Capped      bool
 }
 
-func (s *server) feedState() feedState {
-	if s.feed == nil {
-		return feedState{}
+// feeds lists both served feeds, full first, each read with one View call.
+func (s *server) feeds() []feedState {
+	return []feedState{
+		readFeed(s.feed, feedState{Name: "Full", Route: "/v1/feed", CapVar: "BLOCKLIST_MAX_ENTRIES"}),
+		readFeed(s.basic, feedState{Name: "Basic", Route: "/v1/basic-feed", CapVar: "BLOCKLIST_BASIC_MAX_ENTRIES"}),
 	}
-	v := s.feed.View()
+}
+
+func readFeed(f Feed, id feedState) feedState {
+	if f == nil {
+		return id
+	}
+	v := f.View()
 	return feedState{
+		Name:        id.Name,
+		Route:       id.Route,
+		CapVar:      id.CapVar,
 		Present:     true,
 		Ready:       v.Ready,
 		Entries:     v.Entries,
@@ -337,7 +357,7 @@ func (s *server) feedState() feedState {
 type statusPageData struct {
 	chrome.PageData
 	Counts     threatstore.Counts
-	Feed       feedState
+	Feeds      []feedState
 	HasQueue   bool
 	QueueDepth int
 	QueueCap   int
@@ -354,7 +374,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	data := statusPageData{
 		PageData: s.chrome.PageData(r, "status"),
 		Counts:   counts,
-		Feed:     s.feedState(),
+		Feeds:    s.feeds(),
 		HasQueue: s.rt != nil,
 		Config:   s.config,
 	}
@@ -368,7 +388,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 type indexPageData struct {
 	chrome.PageData
-	Feed      feedState
+	Feeds     []feedState
 	Entries   []threatstore.BlocklistRow
 	Allowlist []threatstore.AllowlistRow
 	Now       int64
@@ -391,7 +411,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	s.chrome.Render(w, "index.html", indexPageData{
 		PageData:  s.chrome.PageData(r, "index"),
-		Feed:      s.feedState(),
+		Feeds:     s.feeds(),
 		Entries:   entries,
 		Allowlist: allowlist,
 		Now:       time.Now().UnixMilli(),

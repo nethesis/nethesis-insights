@@ -40,31 +40,33 @@ already are.</small></p>
 </article>
 
 <article>
-<h2>Blocklist feed</h2>
-{{if not .Feed.Present}}
-<p>n/a &mdash; the blocklist feed is not wired into this process.</p>
-{{else if not .Feed.Ready}}
-<p>Not generated yet &mdash; the feed answers <code>503</code> until the first
-successful consensus pass, because an empty body would read as
-&ldquo;no threats&rdquo;.</p>
-{{else}}
-<figure>
+<h2>Blocklist feeds</h2>
+<figure class="overflow-auto">
 <table class="striped">
-<thead><tr><th scope="col" class="num">Entries</th><th scope="col">Generated</th><th scope="col">ETag</th></tr></thead>
+<thead><tr><th scope="col">Feed</th><th scope="col" class="num">Entries</th><th scope="col">Capped</th><th scope="col">Generated</th><th scope="col">ETag</th></tr></thead>
 <tbody>
+{{range .Feeds}}
 <tr>
-<td class="num">{{.Feed.Entries}}</td>
-<td class="mono" title="{{fmtTime .Feed.GeneratedAt}}">{{fmtAgo .Feed.GeneratedAt}}</td>
-<td class="mono">{{.Feed.ETag}}</td>
+<th scope="row">{{.Name}} <code>{{.Route}}</code></th>
+{{if not .Present}}
+<td colspan="4">n/a &mdash; not wired into this process</td>
+{{else if not .Ready}}
+<td colspan="4">Not generated yet &mdash; answers <code>503</code> until the first successful consensus pass, because an empty body would read as &ldquo;no threats&rdquo;</td>
+{{else}}
+<td class="num">{{.Entries}}</td>
+<td>{{if .Capped}}<mark>yes</mark>{{else}}no{{end}}</td>
+<td class="mono" title="{{fmtTime .GeneratedAt}}">{{fmtAgo .GeneratedAt}}</td>
+<td class="mono">{{.ETag}}</td>
+{{end}}
 </tr>
+{{end}}
 </tbody>
 </table>
 </figure>
-{{if .Feed.Capped}}
-<p><mark>Capped at <code>BLOCKLIST_MAX_ENTRIES</code>: the addresses seen least
-recently are left out of the feed.</mark></p>
-{{end}}
-{{end}}
+{{range .Feeds}}{{if and .Ready .Capped}}
+<p><mark>{{.Name}} feed capped at <code>{{.CapVar}}</code>: the addresses seen
+least recently are left out of it.</mark></p>
+{{end}}{{end}}
 </article>
 
 <article>

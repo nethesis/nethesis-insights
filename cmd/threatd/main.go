@@ -41,11 +41,11 @@ import (
 // turns it on. retention is THREAT_EVENT_RETENTION: /stats needs it to know
 // which of the days it shows is the oldest one, cut mid-day by the rolling
 // prune rather than complete.
-func newUIServer(addr, basePath string, r threatui.Reader, feed threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info, retention time.Duration) *http.Server {
+func newUIServer(addr, basePath string, r threatui.Reader, feed, basic threatui.Feed, w threatui.Writer, rt threatui.Runtime, adminKey string, info chrome.Info, retention time.Duration) *http.Server {
 	if addr == "" {
 		return nil
 	}
-	handler, err := threatui.NewServer(r, feed, w, rt, chrome.Config{
+	handler, err := threatui.NewServer(r, feed, basic, w, rt, chrome.Config{
 		BasePath: basePath,
 		AdminKey: adminKey,
 		Info:     info,
@@ -325,7 +325,8 @@ func main() {
 	storeGauges := metrics.NewStoreGauges(reg,
 		metrics.StoreGauge{Name: "active_systems", Help: "Distinct systems with a threat event observed in the last 24 hours."},
 		metrics.StoreGauge{Name: "regular_systems", Help: "Distinct systems that reported on at least 2 of the last 7 UTC days, today included."},
-		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in the published blocklist feed."},
+		metrics.StoreGauge{Name: "blocklist_entries", Help: "Addresses in each published blocklist feed: full (the entitled /v1/feed) and basic (/v1/basic-feed).",
+			Label: "feed", Values: []string{"full", "basic"}},
 	)
 
 	handler := threatapi.NewServer(s, ingestQueue, snapshot, basicSnapshot, trusted, threatapi.Config{
@@ -381,7 +382,7 @@ func main() {
 	// set ADMIN_API_KEY still gets the plain read-only dashboard. ingestQueue
 	// satisfies threatui.Runtime (Depth/Cap/Workers), the same shape
 	// insightsd's queue already reports through logsui.Runtime.
-	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, s, ingestQueue, adminAPIKey, chrome.Info{
+	uiServer := newUIServer(uiListenAddr, uiBasePath, s, snapshot, basicSnapshot, s, ingestQueue, adminAPIKey, chrome.Info{
 		StartedAt: startedAt,
 		Build:     chrome.BuildInfo(),
 		Config:    cfgItems,
@@ -417,7 +418,7 @@ func main() {
 	// five minutes with a database full of promoted entries.
 	consensusCtx, stopConsensus := context.WithCancel(context.Background())
 	consensusDone := svc.RunPassLoop(consensusCtx, consensusName,
-		svc.Then(consensus, threatGauges(s, snapshot, storeGauges)), consensusInterval, passMetrics)
+		svc.Then(consensus, threatGauges(s, snapshot, basicSnapshot, storeGauges)), consensusInterval, passMetrics)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -461,12 +462,14 @@ const (
 )
 
 // threatGauges refreshes threatd's database-derived gauges after each
-// consensus pass: the systems reporting now, from the store, and the
-// published feed's size, from the snapshot the pass just generated -- the
-// number the fleet actually downloads, after the allowlist and
-// BLOCKLIST_MAX_ENTRIES. While no pass has ever succeeded there is no feed,
-// so that family is left out rather than reported as an empty blocklist.
-func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.StoreGauges) func(context.Context, int64) error {
+// consensus pass: the systems reporting now, from the store, and each
+// published feed's size, from the snapshots the pass just generated -- the
+// numbers the fleet actually downloads, after the allowlist and each feed's
+// cap. The family is exported only once both feeds are ready: its label set
+// is closed, so a feed missing from the reading would be exported as 0, and
+// "no feed yet" must not read as an empty blocklist. Both are generated on
+// the same pass, so in practice they become ready together.
+func threatGauges(s activeSystemsReader, full, basic *blocklist.Snapshot, g *metrics.StoreGauges) func(context.Context, int64) error {
 	return func(ctx context.Context, now int64) error {
 		active, err := s.ActiveSystems(ctx, now-metrics.ActiveWindow.Milliseconds())
 		if err != nil {
@@ -480,10 +483,20 @@ func threatGauges(s *threatstore.Store, snap *blocklist.Snapshot, g *metrics.Sto
 			"active_systems":  {"": float64(active)},
 			"regular_systems": {"": float64(regular)},
 		}
-		if v := snap.View(); v.Ready {
-			reading["blocklist_entries"] = map[string]float64{"": float64(v.Entries)}
+		if f, b := full.View(), basic.View(); f.Ready && b.Ready {
+			reading["blocklist_entries"] = map[string]float64{
+				"full":  float64(f.Entries),
+				"basic": float64(b.Entries),
+			}
 		}
 		g.Set(reading)
 		return nil
 	}
+}
+
+// activeSystemsReader is the store methods threatGauges reads.
+// *threatstore.Store satisfies it.
+type activeSystemsReader interface {
+	ActiveSystems(ctx context.Context, since int64) (int, error)
+	RegularSystems(ctx context.Context, sinceDay string, minDays int) (int, error)
 }

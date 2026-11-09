@@ -732,7 +732,11 @@ load-bearing:
     `ListBlocklistListedBy`, which applies the delay in SQL before its own
     cap, `BLOCKLIST_BASIC_MAX_ENTRIES`, and its own capped flag (see "Basic
     feed" below). Both reads follow steps 5 and 6, so every removal reaches
-    both feeds on this pass.
+    both feeds on this pass. Each feed's size, capped flag and
+    `generated_at` are shown side by side on the dashboard's index and
+    status pages, exported as `threatd_blocklist_entries{feed="full"|"basic"}`,
+    and logged on the pass's `blocklist consensus pass` line as `entries`
+    and `basic_entries`.
 
 An error in steps 1–6 or 10 aborts the pass and returns (if the full feed
 generated and the basic one did not, the basic feed keeps its previous
@@ -1074,8 +1078,9 @@ failed consensus pass must not also freeze the gauges) and fails the run if
 either failed, so a broken refresh shows on `<svc>_pass_runs_total`. A
 failed refresh leaves the last good reading up; before the first one every
 family is absent, because "not counted yet" must not read as "none". The
-same reason leaves `threatd_blocklist_entries` out until the feed is
-`Ready`. Their resolution is therefore the pass interval -- 5 minutes for
+same reason leaves `threatd_blocklist_entries{feed}` out until both feeds
+are `Ready`: its `feed` label (`full`, `basic`) is a closed set, and a
+closed-set family exports every value it does not read as 0. Their resolution is therefore the pass interval -- 5 minutes for
 consensus, 10 for maintenance -- which is plenty for counts that move over
 hours. "Active" means reported within `metrics.ActiveWindow` (24 h), one
 value for both binaries; threatd measures it on `threat_events.observed_at`

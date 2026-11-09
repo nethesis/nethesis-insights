@@ -244,7 +244,7 @@ func testInfo() chrome.Info {
 // meant to exercise. Use newWriteTestServer for the write-route tests.
 func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, feed, nil, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -255,7 +255,7 @@ func newTestServerWithFeed(t *testing.T, r Reader, feed Feed) http.Handler {
 // live state on the status page.
 func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, nil, nil, rt, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, nil, nil, nil, rt, chrome.Config{Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -266,7 +266,7 @@ func newTestServerWithRuntime(t *testing.T, r Reader, rt Runtime) http.Handler {
 // w, authenticated with adminKey.
 func newWriteTestServer(t *testing.T, r Reader, feed Feed, w Writer, adminKey string) http.Handler {
 	t.Helper()
-	h, err := NewServer(r, feed, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testRetention, testClock)
+	h, err := NewServer(r, feed, nil, w, nil, chrome.Config{AdminKey: adminKey, Info: testInfo()}, testRetention, testClock)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -429,6 +429,43 @@ func TestACappedFeedIsFlaggedOnBothPages(t *testing.T) {
 				t.Fatalf("%s with capped=%v: warning shown=%v", path, capped, got)
 			}
 		}
+	}
+}
+
+// Both feeds are shown, each from its own snapshot, on both pages: the
+// basic feed's size, cap and freshness must be as visible as the full
+// feed's, and each capped flag must name its own variable.
+func TestBothFeedsAreShownOnBothPages(t *testing.T) {
+	full := fakeFeed{ready: true, entries: 4242, generatedAt: 1700000100000, etag: `"sha256-full"`}
+	basic := fakeFeed{ready: true, entries: 1717, generatedAt: 1700000100000, etag: `"sha256-basic"`, capped: true}
+	h, err := NewServer(threatReader(), full, basic, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/status"} {
+		body := get(t, h, path).Body.String()
+		for _, want := range []string{
+			"/v1/feed", "/v1/basic-feed",
+			"4242", "1717",
+			"sha256-full", "sha256-basic",
+			"Basic feed capped at <code>BLOCKLIST_BASIC_MAX_ENTRIES</code>",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s is missing %q:\n%s", path, want, body)
+			}
+		}
+		if strings.Contains(body, "Full feed capped") {
+			t.Fatalf("%s flags the uncapped full feed as capped", path)
+		}
+	}
+
+	// A basic feed that has not generated yet says so on its own row.
+	h, err = NewServer(threatReader(), full, fakeFeed{}, nil, nil, chrome.Config{Info: testInfo()}, testRetention, testClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := get(t, h, "/").Body.String(); !strings.Contains(body, "Not generated yet") || !strings.Contains(body, "4242") {
+		t.Fatalf("/ should show the full feed and a not-generated basic one:\n%s", body)
 	}
 }
 
