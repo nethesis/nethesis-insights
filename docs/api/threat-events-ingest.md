@@ -18,15 +18,21 @@ client needs to build a request. The reasoning behind each rule is in
 - [`GET /blocklist/v1/feed`](#get-blocklistv1feed)
 - [Promotion rule](#promotion-rule)
 
+**`ns8-crowdsec`: every path in this document is written with the
+NethSecurity base URL `/blocklist/v1/`. Use `/blocklist/crowdsec/v1/` in its
+place** — see [Base URL per client](#base-url-per-client). On the wrong base
+URL events keep working and the feed answers `403`.
+
 | method | path | who | needs |
 |---|---|---|---|
 | `POST` | `/blocklist/v1/events` | the edge reports ban decisions | a subscription |
 | `GET`  | `/blocklist/v1/feed` | the edge fetches the consensus feed | a subscription **and** the Threat Shield entitlement |
 
 `threatd` is a separate binary from the log-bundle pipeline (`insightsd`),
-behind the same Traefik proxy; Traefik strips the `/blocklist` prefix before
-the request reaches it, so these two paths are what a client sends and
-`/v1/events`/`/v1/feed` are what the server's own route table says.
+behind the same Traefik proxy. Traefik strips the base URL's prefix before
+the request reaches it — `/blocklist` for NethSecurity, `/blocklist/crowdsec`
+for `ns8-crowdsec` — so `/v1/events`/`/v1/feed` are what the server's own
+route table says, whichever base URL the client used.
 
 ### Base URL per client
 

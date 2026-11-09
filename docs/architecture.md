@@ -1046,9 +1046,13 @@ public path and needs the backend's fixed `/metrics` back afterwards --
 `stripPrefix` alone cannot do this: stripping a request path's entire length
 leaves `""`, which Traefik forces to `"/"`, never `"/metrics"` -- each
 `strip-metrics-*` middleware is chained with one shared `add-metrics-prefix`
-(`addPrefix: {prefix: /metrics}`) rather than the single `stripPrefix` the
-six pipeline routers use, whose public prefix (`/logs`, `/blocklist`,
-`/sizing`) is always followed by more path, not the whole thing.
+(`addPrefix: {prefix: /metrics}`) rather than the single `stripPrefix` each
+pipeline router uses, whose public prefix (`/logs`, `/blocklist`,
+`/blocklist/crowdsec`, `/sizing`) is always followed by more path, not the
+whole thing. One pipeline router strips less than its match on purpose:
+`blocklist-crowdsec-fence` matches `/blocklist/crowdsec` but strips only
+`/blocklist`, so `threatd` sees `/crowdsec/...` and answers `404` (see
+"Entitlements: a second route, one cache").
 
 Traefik's file provider is pointed at the **directory** `/etc/traefik/dynamic`
 rather than at `dynamic.yaml` itself, so a host that needs extra routers can
@@ -2302,10 +2306,11 @@ A subscription is not always enough. `GET /auth/service/{service}` is the same
 check plus a named entitlement: `authd` calls
 `AUTH_VALIDATE_URL/service/<name>` instead of `AUTH_VALIDATE_URL`, and a `403`
 from there becomes `auth.ErrForbidden` and a `403` to the node. Threat Shield
-is the only user today — every subscriber posts ban decisions through
-`POST /blocklist/v1/events`, but `GET /blocklist/v1/feed` and
-`POST /blocklist/v1/allowlist-requests` are routed through a second
-`forwardAuth` middleware pointing at `/auth/service/ng-blacklist`. Reporting
+is the only user today, with two entitlements, one per client (next
+paragraph) — every subscriber posts ban decisions through the events route,
+but the feed and allowlist-requests routes go through a second `forwardAuth`
+middleware pointing at `/auth/service/ng-blacklist` (NethSecurity) or
+`/auth/service/crowdsec-advanced-threat-shield` (NS8 CrowdSec). Reporting
 and consuming are different privileges: narrowing the reporting pool to
 entitled nodes would shrink the evidence base that promotion's
 three-distinct-systems rule is measured against, while leaving the feed open
@@ -2337,7 +2342,8 @@ from either client. That full strip is why `blocklist-crowdsec-api` stops at
 credential would meet the operator BasicAuth. It strips only `/blocklist`, so
 `threatd` sees `/crowdsec/...` and answers `404`.
 
-Three properties of that design are load-bearing:
+Three properties of the entitlement route itself are load-bearing, and they
+hold the same for either entitlement:
 
 - **The service is part of the cache key.** A node posts threat events minutes
   before it polls the feed. Keyed on the credential alone, the subscription
@@ -2409,11 +2415,28 @@ and moving it out was considered and declined (2026-10-30) on cost against
 benefit. Moving it out needs a second network, a trusted range that is no
 longer loopback by construction, and a per-deployment value for
 `TRUSTED_PROXY_CIDRS`, the setting whose default is correct today only
-because the pod shares one namespace. The risk being bought down is small:
-the embedder is upstream's llama.cpp server at a pinned build tag
-(`deploy/quadlet/embedder.container`), listens only on loopback, and
-receives nothing but the text `insightsd` sends it. Revisit this if any of
-those three stops being true.
+because the pod shares one namespace. The risk being bought down is small
+but not nil. The embedder (`deploy/quadlet/embedder.container`) is
+upstream's llama.cpp server, listens only on loopback and is never
+published, so nothing outside the pod can reach it. It takes input from
+three places, and only one of them is ours:
+
+- **its image**, `ghcr.io/ggml-org/llama.cpp:server-b11429`, pinned by a
+  build tag, not by digest — upstream could re-push the tag;
+- **its model**, which llama-server downloads from Hugging Face
+  (`ggml-org/bge-small-en-v1.5-Q8_0-GGUF`) on the first start against an
+  empty `insights-models` volume, at whatever revision that repo holds
+  then, and reads from the volume on every later start;
+- **the text `insightsd` sends it**, which is log-derived and therefore
+  attacker-influenced.
+
+The first two are supply-chain trust in `ggml-org`, the same trust
+already placed in any third-party image; the third is why it runs as a
+read-only, capability-free container with a memory ceiling. Revisit the
+decision if it is ever bound off loopback or published, if it starts taking
+input from anywhere else, or if a model or image swap comes from a source
+other than `ggml-org`. Pinning the image by digest and the model by
+revision would narrow the first two and is the cheaper fix than moving it.
 
 `api.StaticAuth`, the hardcoded system/secret pair used before this split for
 tests and local development, no longer exists: a pipeline no longer holds an

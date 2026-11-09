@@ -145,9 +145,9 @@ func New(validateURL, pepper string, timeout time.Duration, now func() time.Time
 // check against the configured URL -- does this system_id/secret belong to a
 // subscriber at all -- which is what every ingest route uses. A non-empty
 // service additionally asks whether that subscriber carries a named
-// entitlement, by calling <base>/service/<name>; "ng-blacklist" is the
-// Threat Shield feed's. The caller supplies it; this package never guesses
-// one from a path.
+// entitlement, by calling <base>/service/<name>; "ng-blacklist" and
+// "crowdsec-advanced-threat-shield" are the Threat Shield feed's, one per
+// client. The caller supplies it; this package never guesses one from a path.
 func (a *ForwardAuth) Validate(ctx context.Context, authHeader, service string) (string, error) {
 	systemID, secret, err := ParseBasic(authHeader)
 	if err != nil {
