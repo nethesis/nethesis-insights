@@ -461,7 +461,8 @@ blind result. Load-bearing rules (reasons in `docs/architecture.md` §
   refuses to start with `DECISIONS_API_KEY` set and `ADMIN_API_KEY` empty,
   since nobody could undo a delivery.
 - **Asked once per `(RulesVersion, DECISIONS_MODEL)`.** Any ask row,
-  `unsure` and `failed` included, excludes the class until either changes.
+  `unsure` and `failed` included, excludes the class until either changes, or until the ask row is pruned
+  after `ANALYSIS_RETENTION` (default 90 days), when a still-pending class is asked again.
   A decided class is never re-decided.
 - **Unsure stays pending and blind.** Never show the API's guess on
   `/review`: the operator's later decision is the only measurement the
@@ -891,8 +892,13 @@ successful no-op, not an error.
   `TestClassDecisionIsAudited`, `TestVisibilityNeverReturnsToPending`,
   `TestDismissedFindingsNeverReachTheReadAPI`,
   `TestSecurityClassesCanBeDismissed`, `TestDismissedClassKeepsItsFindings`,
-  `TestDismissedClassesLeaveTheQueue` and
-  `TestListAllFindingsHidesDismissedClasses` are
+  `TestDismissedClassesLeaveTheQueue`,
+  `TestListAllFindingsHidesDismissedClasses`,
+  `TestRulesFileChangeNeedsVersionBump`, `TestOperatorWinsTheRace`,
+  `TestUnsureDecisionStaysPending`, `TestPrecedentsExcludeAutomaticDecisions`,
+  `TestGroupSuggestionIgnoresAutomaticDecisions`,
+  `TestAutomaticActorCannotSignIn`, `TestSecurityClassIsDeliveredWithoutAsking`,
+  `TestCandidatesWithGroupingNeedAVector` and `TestFailedClassDoesNotBlockQueue` are
   named so deleting one is visible.
 - `sizing`: table-driven, no fixtures. `TestSanitizeAcceptsEveryMetricKey` and
   `TestSanitizeRejectsEveryNonNumericValue` are the executable form of the

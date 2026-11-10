@@ -2517,8 +2517,9 @@ Rules that are not visible from the code:
   what the rewritten rules intend. **Known gap**: the code cannot see rule
   D5, so a Dovecot master-user login class (support access, dismissed by the
   rules) that the edge tagged security would be delivered. None of the four
-  on the dev host was tagged; if one ever is, the operator clears the tag or
-  dismisses the class. An untagged class goes to the API, where G1 still
+  on the dev host was tagged; if one ever is, the operator dismisses it or keeps it
+  internal (the security rule delivers a tagged pending class within one
+  `DECISIONS_INTERVAL`, so clearing the tag afterwards does not withdraw it). An untagged class goes to the API, where G1 still
   applies to what its text describes.
 - **Visibility only.** The API never sets severity, the security tag, the
   doc reference or the wording. On ~730 classes severity had been overridden

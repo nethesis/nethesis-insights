@@ -1055,7 +1055,7 @@ the effective configuration, lives alongside it.
 |---|---|
 | `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale), severity or words in the title (any part of it, upper or lower case alike) — machine plus title is the quick way to find the one problem a customer is asking about, then **review class** in its dialog to reclassify it. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here except those of a dismissed class; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
 | `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal or dismissed, or all but the dismissed ones. Similar classes are grouped and may carry a suggested decision ("Review" below). Click a column name to sort by it, click it again to reverse; the arrow marks the column in use, and the order survives filtering and every decision. The **Module** column shows the module of the class's latest finding, `(host)` for host-level logs, and "+N" when it names more — the class dialog lists them all. A long class name is cut short with "…"; hover for the whole of it. |
-| `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. A second table shows the Decisions API's results per rules version and model, and how many of its decisions an operator later changed. |
+| `/logs/review/stats` | Per prompt version: how many finding classes it raised and what was decided about them (automatic decisions included). The number to watch when the prompt changes. A second table shows the Decisions API's results per rules version and model, and how many of its decisions an operator later changed. |
 | `/logs/review/audit` | Every review decision, who made it and when — automatic ones under the actor `decisions-api` or `security-rule`. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at a discount), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
@@ -1543,7 +1543,8 @@ What it never does:
 - decide a class someone has already decided. If you decide a class while
   the API is still answering about it, yours wins;
 - ask twice about the same class. A class is asked once per rules version
-  and model; when either changes (a server release with new rules, or a new
+  and model (and again if it is still pending when the record of the ask is
+  pruned after `ANALYSIS_RETENTION`); when either changes (a server release with new rules, or a new
   `DECISIONS_MODEL`), the classes still pending are asked once more;
 - learn from itself. Only classes decided by a person serve as its examples,
   and only they count toward a group's "Suggested: …".
@@ -1571,7 +1572,7 @@ and the class stays marked as the API's. To turn the feature off, remove
 **One gap in the security rule.** The rules dismiss Dovecot master-user
 logins — support staff opening a mailbox, not an attack — but the security
 rule looks only at the tag. If a node ever tags such a class as security, it
-is delivered. If you see one, clear its **Security** box or dismiss it.
+is delivered within one run. If you see one, dismiss it or keep it internal; clearing its **Security** box afterwards does not take it back from customers.
 
 **When the API is unavailable.** If it cannot be reached, is overloaded, or
 refuses the key or the model, the run stops and the next one tries again;
@@ -1589,7 +1590,7 @@ Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
 every decision is written to `/review/audit` with who made it. Without the
 key the queue is read-only — and, since nothing can be delivered, no new
 finding reaches customers. `/review/stats` shows, per prompt version, how
-many classes it raised and what operators decided about them; it is the page
+many classes it raised and what was decided about them, automatic decisions included; it is the page
 to watch when the prompt changes. Below it, a second table shows the
 automatic decisions per rules version and model: classes asked, applied,
 left unsure, failed, late (you decided first), **changed later** (how many
