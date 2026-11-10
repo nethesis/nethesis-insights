@@ -29,6 +29,7 @@ type recordingReader struct {
 	// can assert Run derived it from `now` and the right Config field.
 	templatesOlderThan, findingsOlderThan, analysesOlderThan, nodesOlderThan int64
 	classesOlderThan                                                         int64
+	asksOlderThan                                                            int64
 }
 
 func (r *recordingReader) PruneClasses(_ context.Context, olderThan int64) (int, error) {
@@ -59,6 +60,12 @@ func (r *recordingReader) PruneAnalyses(_ context.Context, olderThan int64) (int
 	r.calls = append(r.calls, "analyses")
 	r.analysesOlderThan = olderThan
 	return 3, r.analysesErr
+}
+
+func (r *recordingReader) PruneDecisionAsks(_ context.Context, olderThan int64) (int, error) {
+	r.calls = append(r.calls, "decision_asks")
+	r.asksOlderThan = olderThan
+	return 5, nil
 }
 
 func testConfig() Config {
@@ -269,5 +276,19 @@ func TestPassPrunesEachTableIndependently(t *testing.T) {
 	}
 	if len(analyses) != 1 || analyses[0].WindowStart != 495*day {
 		t.Fatalf("expected only the recent analysis to survive, got %+v", analyses)
+	}
+}
+
+// The Decisions API ledger is ledger-like spend history, so it ages out with
+// the analyses it sits beside, on AnalysisRetention.
+func TestMaintPrunesDecisionAsks(t *testing.T) {
+	r := &recordingReader{}
+	cfg := testConfig()
+	now := int64(1_000_000_000_000)
+	if err := New(r, cfg).Run(context.Background(), now); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if want := now - cfg.AnalysisRetention.Milliseconds(); r.asksOlderThan != want {
+		t.Errorf("decision asks cutoff = %d, want %d", r.asksOlderThan, want)
 	}
 }

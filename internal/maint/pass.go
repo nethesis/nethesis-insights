@@ -37,6 +37,7 @@ type Reader interface {
 	PruneFindings(ctx context.Context, olderThan int64) (int, error)
 	PruneAnalyses(ctx context.Context, olderThan int64) (int, error)
 	PruneClasses(ctx context.Context, olderThan int64) (int, error)
+	PruneDecisionAsks(ctx context.Context, olderThan int64) (int, error)
 }
 
 // Config is the pass's three retention windows. Each is independently
@@ -91,6 +92,9 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 	// collected in this same pass rather than the next.
 	classesPruned := r.prune(ctx, "classes", r.store.PruneClasses, now-r.cfg.FindingRetention.Milliseconds())
 	analysesPruned := r.prune(ctx, "analyses", r.store.PruneAnalyses, now-r.cfg.AnalysisRetention.Milliseconds())
+	// Decisions API asks are spend history like analyses, so they share
+	// AnalysisRetention.
+	asksPruned := r.prune(ctx, "decision_asks", r.store.PruneDecisionAsks, now-r.cfg.AnalysisRetention.Milliseconds())
 	// The node roster shares the template cutoff -- see PruneNodes for why
 	// it has no retention knob of its own.
 	nodesPruned := r.prune(ctx, "nodes", r.store.PruneNodes, now-r.cfg.TemplateRetention.Milliseconds())
@@ -100,6 +104,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		"findings_pruned", findingsPruned,
 		"classes_pruned", classesPruned,
 		"analyses_pruned", analysesPruned,
+		"decision_asks_pruned", asksPruned,
 		"nodes_pruned", nodesPruned)
 	return nil
 }

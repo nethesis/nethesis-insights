@@ -42,3 +42,23 @@ func (r *Results) Add(result string, n int) {
 		r.counter.WithLabelValues(result).Add(float64(n))
 	}
 }
+
+// Counter is a single unlabelled counter, for a total whose only dimension is
+// time, such as a running cost in micro-dollars.
+type Counter struct {
+	counter prometheus.Counter
+}
+
+// NewCounter builds and registers the counter into reg.
+func NewCounter(reg *Registry, name, help string) *Counter {
+	c := &Counter{counter: prometheus.NewCounter(prometheus.CounterOpts{Name: name, Help: help})}
+	reg.prefixed.MustRegister(c.counter)
+	return c
+}
+
+// Add records n. A non-positive n is a no-op.
+func (c *Counter) Add(n int64) {
+	if n > 0 {
+		c.counter.Add(float64(n))
+	}
+}

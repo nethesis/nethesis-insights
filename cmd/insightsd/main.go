@@ -25,7 +25,10 @@ import (
 	"github.com/nethesis/nethesis-insights/internal/analyzer"
 	logsapi "github.com/nethesis/nethesis-insights/internal/api/logs"
 	"github.com/nethesis/nethesis-insights/internal/budget"
+	"github.com/nethesis/nethesis-insights/internal/classdecide"
 	"github.com/nethesis/nethesis-insights/internal/classgroup"
+	"github.com/nethesis/nethesis-insights/internal/decide"
+	"github.com/nethesis/nethesis-insights/internal/decisions"
 	"github.com/nethesis/nethesis-insights/internal/embed"
 	"github.com/nethesis/nethesis-insights/internal/gate"
 	"github.com/nethesis/nethesis-insights/internal/llm"
@@ -223,6 +226,40 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Class decision pass (internal/classdecide): decides pending review
+	// classes through the OpenAI Decisions API. An empty key turns it off.
+	decisionsAPIKey := svc.Getenv("DECISIONS_API_KEY", "")
+	decisionsModel := svc.Getenv("DECISIONS_MODEL", "gpt-6-luna")
+	decisionsBaseURL := svc.Getenv("DECISIONS_BASE_URL", "https://api.openai.com/v1")
+	decisionsMinConfidence := svc.GetenvFloat("DECISIONS_MIN_CONFIDENCE", 0.9)
+	decisionsInterval := svc.GetenvDuration("DECISIONS_INTERVAL", time.Minute)
+	decisionsBatch := svc.GetenvInt("DECISIONS_BATCH", 20)
+	decisionsPrices := decide.Prices{
+		InputPerMTok:       svc.GetenvFloat("DECISIONS_PRICE_INPUT_PER_MTOK", priceInput),
+		CachedInputPerMTok: svc.GetenvFloat("DECISIONS_PRICE_CACHED_INPUT_PER_MTOK", priceCachedInput),
+		OutputPerMTok:      svc.GetenvFloat("DECISIONS_PRICE_OUTPUT_PER_MTOK", priceOutput),
+	}
+	decisionsOn := decisionsAPIKey != ""
+	// Written as a negation so NaN is refused too.
+	if !(decisionsMinConfidence > 0 && decisionsMinConfidence <= 1) {
+		slog.Error("invalid DECISIONS_MIN_CONFIDENCE: must be above 0 and at most 1", "value", decisionsMinConfidence)
+		os.Exit(1)
+	}
+	if decisionsOn && decisionsInterval <= 0 {
+		slog.Error("invalid DECISIONS_INTERVAL: must be positive when DECISIONS_API_KEY is set", "value", decisionsInterval)
+		os.Exit(1)
+	}
+	if decisionsOn && decisionsBatch < 1 {
+		slog.Error("invalid DECISIONS_BATCH: must be at least 1 when DECISIONS_API_KEY is set", "value", decisionsBatch)
+		os.Exit(1)
+	}
+	// An automatic decision is a write the operator UI would otherwise gate
+	// behind ADMIN_API_KEY, so the pass does not run without one.
+	if decisionsOn && adminAPIKey == "" {
+		slog.Error("DECISIONS_API_KEY is set but ADMIN_API_KEY is not: automatic class decisions need the review write routes enabled")
+		os.Exit(1)
+	}
+
 	if gateSimilarity <= 0 || gateSimilarity > 1 {
 		slog.Error("invalid GATE_SIMILARITY: must be above 0 and at most 1", "value", gateSimilarity)
 		os.Exit(1)
@@ -281,7 +318,15 @@ func main() {
 	if embedURL != "" {
 		passNames = append(passNames, classgroup.PassName)
 	}
+	if decisionsOn {
+		passNames = append(passNames, classdecide.PassName)
+	}
 	passMetrics := metrics.NewPass(reg, passNames...)
+	decisionMetrics := metrics.NewResults(reg, "review_decisions_total",
+		"Pending classes the decision pass handled, by result: applied, unsure, failed, late, error or security.",
+		classdecide.Results...)
+	decisionCost := metrics.NewCounter(reg, "review_decision_cost_micros_total",
+		"Total Decisions API spend in micro-dollars (1e-6 USD).")
 	windowMetrics := metrics.NewResults(reg, "windows_total",
 		"Fresh bundle windows, by what the gate decided: called, gated_out or budget.",
 		analyzer.WindowResults...)
@@ -389,6 +434,15 @@ func main() {
 		{Name: "EMBED_URL", Value: embedURL},
 		{Name: "REVIEW_GROUP_SIMILARITY", Value: strconv.FormatFloat(reviewGroupSimilarity, 'f', -1, 64)},
 		{Name: "GROUP_INTERVAL", Value: groupInterval.String()},
+		{Name: "DECISIONS_API_KEY", Value: svc.SecretState(decisionsOn)},
+		{Name: "DECISIONS_MODEL", Value: decisionsModel},
+		{Name: "DECISIONS_BASE_URL", Value: decisionsBaseURL},
+		{Name: "DECISIONS_MIN_CONFIDENCE", Value: strconv.FormatFloat(decisionsMinConfidence, 'f', -1, 64)},
+		{Name: "DECISIONS_INTERVAL", Value: decisionsInterval.String()},
+		{Name: "DECISIONS_BATCH", Value: strconv.Itoa(decisionsBatch)},
+		{Name: "DECISIONS_PRICE_INPUT_PER_MTOK", Value: strconv.FormatFloat(decisionsPrices.InputPerMTok, 'f', -1, 64)},
+		{Name: "DECISIONS_PRICE_CACHED_INPUT_PER_MTOK", Value: strconv.FormatFloat(decisionsPrices.CachedInputPerMTok, 'f', -1, 64)},
+		{Name: "DECISIONS_PRICE_OUTPUT_PER_MTOK", Value: strconv.FormatFloat(decisionsPrices.OutputPerMTok, 'f', -1, 64)},
 	}
 
 	// BuildInfo reads runtime/debug once here, not per request. q satisfies
@@ -469,6 +523,28 @@ func main() {
 		groupDone = svc.RunPassLoop(groupCtx, classgroup.PassName, groupRunner, groupInterval, passMetrics)
 	}
 
+	// The class decision pass exists only with a Decisions API key; stopped
+	// and awaited like the grouping loop.
+	stopDecide := func() {}
+	var decideDone <-chan struct{} = closed
+	if decisionsOn {
+		decideRunner := classdecide.New(s, decisions.New(decisionsBaseURL, decisionsAPIKey, 60*time.Second),
+			classdecide.Config{
+				Model:         decisionsModel,
+				MinConfidence: decisionsMinConfidence,
+				Batch:         decisionsBatch,
+				Prices:        decisionsPrices,
+				Grouping:      embedURL != "",
+				Metrics: &classdecide.Metrics{
+					Result: decisionMetrics.Inc,
+					Cost:   decisionCost.Add,
+				},
+			})
+		var decideCtx context.Context
+		decideCtx, stopDecide = context.WithCancel(context.Background())
+		decideDone = svc.RunPassLoop(decideCtx, classdecide.PassName, decideRunner, decisionsInterval, passMetrics)
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -496,9 +572,11 @@ func main() {
 	// sizingd give their own housekeeping loops.
 	stopMaint()
 	stopGroup()
+	stopDecide()
 	<-maintDone
 	<-groupDone
-	slog.Info("maintenance and grouping loops stopped")
+	<-decideDone
+	slog.Info("maintenance, grouping and decision loops stopped")
 }
 
 // logGauges refreshes insightsd's database-derived gauges after each
