@@ -245,7 +245,9 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 
 type reviewStatsPageData struct {
 	chrome.PageData
-	Rows []logsstore.ClassStatsRow
+	Rows               []logsstore.ClassStatsRow
+	Decisions          []logsstore.DecisionStatsRow
+	SecurityDeliveries int
 }
 
 func (s *server) handleReviewStats(w http.ResponseWriter, r *http.Request) {
@@ -254,9 +256,21 @@ func (s *server) handleReviewStats(w http.ResponseWriter, r *http.Request) {
 		s.chrome.StoreError(w, "review-stats", err)
 		return
 	}
+	decisions, err := s.reader.DecisionStats(r.Context())
+	if err != nil {
+		s.chrome.StoreError(w, "review-stats", err)
+		return
+	}
+	security, err := s.reader.SecurityRuleDeliveries(r.Context())
+	if err != nil {
+		s.chrome.StoreError(w, "review-stats", err)
+		return
+	}
 	s.chrome.Render(w, "review-stats.html", reviewStatsPageData{
-		PageData: s.chrome.PageData(r, "review-stats"),
-		Rows:     rows,
+		PageData:           s.chrome.PageData(r, "review-stats"),
+		Rows:               rows,
+		Decisions:          decisions,
+		SecurityDeliveries: security,
 	})
 }
 

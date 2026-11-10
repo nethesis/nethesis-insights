@@ -70,6 +70,8 @@ type Reader interface {
 	ListClasses(ctx context.Context, f logsstore.ClassFilter) ([]logsstore.ClassRow, error)
 	ClassStats(ctx context.Context) ([]logsstore.ClassStatsRow, error)
 	ListClassDecisions(ctx context.Context, limit int) ([]logsstore.ClassDecision, error)
+	DecisionStats(ctx context.Context) ([]logsstore.DecisionStatsRow, error)
+	SecurityRuleDeliveries(ctx context.Context) (int, error)
 }
 
 // Writer is the slice of logsstore.Store the review routes need. Each method

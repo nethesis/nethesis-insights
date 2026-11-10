@@ -109,9 +109,10 @@ type GateRow struct {
 	CostMicros                               int64
 }
 
-// CostRow is spend and token totals for one UTC day and model.
+// CostRow is spend and token totals for one UTC day, source and model.
 type CostRow struct {
 	Day                       string // "2006-01-02", UTC
+	Source                    string // "analysis" (log windows) or "review" (Decisions API asks)
 	Model                     string
 	Windows, LLMCalls         int
 	InputTokens, OutputTokens int
@@ -388,15 +389,23 @@ func (s *Store) GateRollup(ctx context.Context, since int64) ([]GateRow, error) 
 // as the spec requires -- SQLite and Postgres agree on integer /.
 func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT created_at / ? AS day_idx, model,
-		       count(*) AS windows, coalesce(sum(llm_called), 0) AS llm_calls,
-		       coalesce(sum(input_tokens), 0) AS in_tok, coalesce(sum(output_tokens), 0) AS out_tok,
-		       coalesce(sum(cost_micros), 0) AS cost_micros
-		FROM analyses
-		WHERE llm_called = 1
-		GROUP BY created_at / ?, model
-		ORDER BY created_at / ? DESC, model
-	`, dayMillis, dayMillis, dayMillis)
+		SELECT day_idx, source, model, windows, llm_calls, in_tok, out_tok, cost_micros FROM (
+			SELECT created_at / ? AS day_idx, 'analysis' AS source, model,
+			       count(*) AS windows, coalesce(sum(llm_called), 0) AS llm_calls,
+			       coalesce(sum(input_tokens), 0) AS in_tok, coalesce(sum(output_tokens), 0) AS out_tok,
+			       coalesce(sum(cost_micros), 0) AS cost_micros
+			FROM analyses
+			WHERE llm_called = 1
+			GROUP BY created_at / ?, model
+			UNION ALL
+			SELECT created_at / ?, 'review', model, 0, count(*),
+			       coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0),
+			       coalesce(sum(cost_micros), 0)
+			FROM class_decision_asks
+			GROUP BY created_at / ?, model
+		)
+		ORDER BY day_idx DESC, source, model
+	`, dayMillis, dayMillis, dayMillis, dayMillis)
 	if err != nil {
 		return nil, fmt.Errorf("store: cost rollup: %w", err)
 	}
@@ -406,7 +415,7 @@ func (s *Store) CostRollup(ctx context.Context) ([]CostRow, error) {
 	for rows.Next() {
 		var dayIdx int64
 		var r CostRow
-		if err := rows.Scan(&dayIdx, &r.Model, &r.Windows, &r.LLMCalls, &r.InputTokens, &r.OutputTokens, &r.CostMicros); err != nil {
+		if err := rows.Scan(&dayIdx, &r.Source, &r.Model, &r.Windows, &r.LLMCalls, &r.InputTokens, &r.OutputTokens, &r.CostMicros); err != nil {
 			return nil, fmt.Errorf("store: scan cost row: %w", err)
 		}
 		r.Day = time.UnixMilli(dayIdx * dayMillis).UTC().Format("2006-01-02")

@@ -322,3 +322,60 @@ func decidePending(ctx context.Context, tx bun.Tx, key, visibility, action, deta
 	}
 	return true, nil
 }
+
+// DecisionStatsRow summarises the Decisions API's asks for one rules version
+// and model. ChangedLater counts applied asks whose class's newest visibility
+// decision is now a person's.
+type DecisionStatsRow struct {
+	RulesVersion, Model                                string
+	Asked, Applied, Unsure, Failed, Late, ChangedLater int
+	CostMicros                                         int64
+}
+
+// DecisionStats returns one row per (rules_version, model), newest first.
+func (s *Store) DecisionStats(ctx context.Context) ([]DecisionStatsRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.rules_version, a.model, count(*),
+		       coalesce(sum(a.result = 'applied'), 0), coalesce(sum(a.result = 'unsure'), 0),
+		       coalesce(sum(a.result = 'failed'), 0), coalesce(sum(a.result = 'late'), 0),
+		       coalesce(sum(a.result = 'applied' AND
+		           coalesce((SELECT d.actor NOT IN ('`+ActorDecisionsAPI+`', '`+ActorSecurityRule+`')
+		               FROM class_decisions d
+		               WHERE d.class_key = a.class_key AND d.action IN ('deliver', 'internal', 'dismiss')
+		               ORDER BY d.created_at DESC, d.id DESC LIMIT 1), 0)), 0),
+		       coalesce(sum(a.cost_micros), 0)
+		FROM class_decision_asks a
+		GROUP BY a.rules_version, a.model
+		ORDER BY max(a.created_at) DESC, a.rules_version DESC, a.model
+	`) // #nosec G202 -- only constants are concatenated
+	if err != nil {
+		return nil, fmt.Errorf("store: decision stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []DecisionStatsRow{}
+	for rows.Next() {
+		var r DecisionStatsRow
+		if err := rows.Scan(&r.RulesVersion, &r.Model, &r.Asked, &r.Applied, &r.Unsure, &r.Failed,
+			&r.Late, &r.ChangedLater, &r.CostMicros); err != nil {
+			return nil, fmt.Errorf("store: scan decision stats: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: decision stats: %w", err)
+	}
+	return out, nil
+}
+
+// SecurityRuleDeliveries counts the classes whose newest visibility decision
+// is the security rule's.
+func (s *Store) SecurityRuleDeliveries(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM finding_classes c WHERE `+lastVisibilityActor+` = ?
+	`, ActorSecurityRule).Scan(&n) // #nosec G202 -- constant subquery
+	if err != nil {
+		return 0, fmt.Errorf("store: security rule deliveries: %w", err)
+	}
+	return n, nil
+}

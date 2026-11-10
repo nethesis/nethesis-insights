@@ -36,4 +36,37 @@ whatever their visibility.</small></p>
 </table>
 </figure>
 <p><small>Undecided classes are pruned once none of their findings are retained, so an old version's pending count shrinks over time.</small></p>
+
+<h2>Decisions API</h2>
+<p>{{.SecurityDeliveries}} classes were delivered to the customer by the security rule.</p>
+<p><small>Classes the Decisions API answered, by rules version and model. Changed later counts its decisions an operator has since changed.</small></p>
+<figure class="overflow-auto">
+<table class="striped">
+<thead>
+<tr>
+<th scope="col">Rules</th><th scope="col">Model</th><th scope="col" class="num">Asked</th>
+<th scope="col" class="num">Applied</th><th scope="col" class="num">Unsure</th>
+<th scope="col" class="num">Failed</th><th scope="col" class="num">Late</th>
+<th scope="col" class="num">Changed later</th><th scope="col" class="num">Cost</th>
+</tr>
+</thead>
+<tbody>
+{{range .Decisions}}
+<tr>
+<td class="mono">{{.RulesVersion}}</td>
+<td class="mono">{{.Model}}</td>
+<td class="num">{{.Asked}}</td>
+<td class="num">{{.Applied}}</td>
+<td class="num">{{.Unsure}}</td>
+<td class="num">{{.Failed}}</td>
+<td class="num">{{.Late}}</td>
+<td class="num">{{.ChangedLater}}</td>
+<td class="num">{{fmtCost .CostMicros}}</td>
+</tr>
+{{else}}
+<tr><td colspan="9">no questions asked yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</figure>
 {{end}}

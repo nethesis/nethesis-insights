@@ -278,3 +278,53 @@ func TestCurrentEmbedModel(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestDecisionStatsCountsChangedLater(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, k := range []string{"a", "b", "c", "d"} {
+		seedEvidenceFinding(t, s, k, "v3:"+k, nil, []string{k}, 1000)
+	}
+	for _, k := range []string{"a", "b"} {
+		_, err := s.RecordDecisionAsk(ctx, appliedAsk("v3:"+k, VisibilityOperator))
+		mustDo(t, err)
+	}
+	// An operator overrules a; b stands.
+	mustDo(t, s.SetClassVisibility(ctx, "v3:a", VisibilityCustomer, "alice", 6000))
+	u := appliedAsk("v3:c", VisibilityOperator)
+	u.Result = AskUnsure
+	_, err := s.RecordDecisionAsk(ctx, u)
+	mustDo(t, err)
+	f := appliedAsk("v3:d", VisibilityOperator)
+	f.Result = AskFailed
+	_, err = s.RecordDecisionAsk(ctx, f)
+	mustDo(t, err)
+
+	rows, err := s.DecisionStats(ctx)
+	mustDo(t, err)
+	if len(rows) != 1 {
+		t.Fatalf("%+v", rows)
+	}
+	r := rows[0]
+	if r.RulesVersion != "r5" || r.Model != "m1" || r.Asked != 4 || r.Applied != 2 ||
+		r.Unsure != 1 || r.Failed != 1 || r.Late != 0 || r.ChangedLater != 1 || r.CostMicros != 28 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSecurityRuleDeliveries(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedEvidenceFinding(t, s, "a", "v3:a", nil, []string{"a"}, 1000)
+	seedEvidenceFinding(t, s, "b", "v3:b", nil, []string{"b"}, 1000)
+	ok, err := s.DeliverSecurityClass(ctx, "v3:a", 2000)
+	mustDo(t, err)
+	if !ok {
+		t.Fatal("not delivered")
+	}
+	n, err := s.SecurityRuleDeliveries(ctx)
+	mustDo(t, err)
+	if n != 1 {
+		t.Fatalf("got %d", n)
+	}
+}

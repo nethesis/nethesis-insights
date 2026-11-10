@@ -35,6 +35,8 @@ type fakeReader struct {
 	roster     map[string]map[int]string
 	classes    []logsstore.ClassRow
 	classStats []logsstore.ClassStatsRow
+	decStats   []logsstore.DecisionStatsRow
+	secCount   int
 	decisions  []logsstore.ClassDecision
 	classSeen  logsstore.ClassFilter // the last filter ListClasses was called with
 
@@ -156,6 +158,14 @@ func (f *fakeReader) ClassStats(context.Context) ([]logsstore.ClassStatsRow, err
 	return f.classStats, f.err
 }
 
+func (f *fakeReader) DecisionStats(context.Context) ([]logsstore.DecisionStatsRow, error) {
+	return f.decStats, f.err
+}
+
+func (f *fakeReader) SecurityRuleDeliveries(context.Context) (int, error) {
+	return f.secCount, f.err
+}
+
 func (f *fakeReader) ListClassDecisions(context.Context, int) ([]logsstore.ClassDecision, error) {
 	return f.decisions, f.err
 }
@@ -194,7 +204,8 @@ func seededReader() *fakeReader {
 			{Reasons: nil, Windows: 10, LLMCalls: 0, PaidCalls: 0, CostMicros: 0},
 		},
 		cost: []logsstore.CostRow{
-			{Day: "2026-08-20", Model: "gpt-4o-mini", Windows: 4, LLMCalls: 4, InputTokens: 400, OutputTokens: 200, CostMicros: 8000},
+			{Day: "2026-08-20", Source: "review", Model: "gpt-6-luna", LLMCalls: 3, CostMicros: 900},
+			{Day: "2026-08-20", Source: "analysis", Model: "gpt-4o-mini", Windows: 4, LLMCalls: 4, InputTokens: 400, OutputTokens: 200, CostMicros: 8000},
 		},
 		findings: []model.Finding{
 			{
@@ -234,6 +245,10 @@ func seededReader() *fakeReader {
 				Modules: []string{"sshd"}, Evidence: []string{"line two"},
 			},
 		},
+		decStats: []logsstore.DecisionStatsRow{
+			{RulesVersion: "r5", Model: "gpt-6-luna", Asked: 3, Applied: 2, Unsure: 1, ChangedLater: 1, CostMicros: 900},
+		},
+		secCount: 4,
 		classStats: []logsstore.ClassStatsRow{
 			{PromptVersion: "v1", Classes: 2, Security: 1, Pending: 1, Delivered: 1},
 		},
@@ -845,5 +860,18 @@ func TestFindingsPageShowsTheCustomerWording(t *testing.T) {
 	}
 	if strings.Contains(body, "Summary the customer sees") {
 		t.Error("a class summary equal to the finding's own was shown")
+	}
+}
+
+func TestCostAndReviewStatsShowDecisionsAPI(t *testing.T) {
+	h := newTestServer(t, seededReader(), fakeRuntime{depth: 2, cap: 100, workers: 4})
+	if body := get(t, h, "/cost").Body.String(); !strings.Contains(body, "review") || !strings.Contains(body, "gpt-6-luna") {
+		t.Fatalf("/cost lacks the review row: %s", body)
+	}
+	body := get(t, h, "/review/stats").Body.String()
+	for _, want := range []string{"Decisions API", "r5", "gpt-6-luna", "4 classes"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/review/stats lacks %q", want)
+		}
 	}
 }

@@ -765,3 +765,34 @@ func TestFindingCountsByStatusLeavesOutDismissedClasses(t *testing.T) {
 		t.Fatalf("FindingCounts = %v, want one open and one stale", got)
 	}
 }
+
+func TestCostRollupIncludesReviewCalls(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	at := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := s.BeginAnalysis(ctx, "sys1", 1, 101, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinalizeAnalysis(ctx, Analysis{SystemID: "sys1", WindowStart: 1, WindowEnd: 101,
+		LLMCalled: true, Model: "gpt-4o-mini", InputTokens: 10, CostMicros: 100}); err != nil {
+		t.Fatal(err)
+	}
+	seedEvidenceFinding(t, s, "a", "v3:a", nil, []string{"a"}, 1000)
+	a := appliedAsk("v3:a", VisibilityOperator)
+	a.Model, a.At = "gpt-6-luna", at+1000
+	if _, err := s.RecordDecisionAsk(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.CostRollup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Source != "analysis" || rows[1].Source != "review" {
+		t.Fatalf("%+v", rows)
+	}
+	r := rows[1]
+	if r.Day != "2026-08-20" || r.Model != "gpt-6-luna" || r.Windows != 0 || r.LLMCalls != 1 ||
+		r.InputTokens != 10 || r.OutputTokens != 2 || r.CostMicros != 7 {
+		t.Fatalf("%+v", r)
+	}
+}

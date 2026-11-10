@@ -4,14 +4,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 -->
 {{define "content"}}
 <h1>Cost</h1>
-<p><small>Fleet-wide LLM spend and token totals, grouped by UTC day and model. Each day
-sums the analyses across every system for that day (see <code>/analyses</code> for
-per-system detail, <code>/gate</code> for why calls happened at all).</small></p>
+<p><small>Fleet-wide LLM spend and token totals, grouped by UTC day, source and model. Analysis
+rows sum the log analyses across every system (see <code>/analyses</code> for per-system detail,
+<code>/gate</code> for why calls happened at all); review rows are the calls that decide pending
+finding classes, one call each.</small></p>
 <figure class="overflow-auto">
 <table class="striped">
 <thead>
 <tr>
-<th scope="col">Day</th><th scope="col">Model</th><th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th>
+<th scope="col">Day</th><th scope="col">Source</th><th scope="col">Model</th><th scope="col" class="num">Windows</th><th scope="col" class="num">LLM calls</th>
 <th scope="col" class="num">In tok</th><th scope="col" class="num">Out tok</th><th scope="col" class="num">Cost</th>
 </tr>
 </thead>
@@ -21,8 +22,9 @@ per-system detail, <code>/gate</code> for why calls happened at all).</small></p
 {{range .Rows}}
 <tr>
 <td class="mono">{{$day}}</td>
+<td>{{.Source}}</td>
 <td class="mono">{{.Model}}</td>
-<td class="num">{{.Windows}}</td>
+<td class="num">{{if eq .Source "review"}}&mdash;{{else}}{{.Windows}}{{end}}</td>
 <td class="num">{{.LLMCalls}}</td>
 <td class="num">{{.InputTokens}}</td>
 <td class="num">{{.OutputTokens}}</td>
@@ -31,18 +33,18 @@ per-system detail, <code>/gate</code> for why calls happened at all).</small></p
 {{end}}
 <tr>
 <td class="mono"><strong>{{$day}} total</strong></td>
-<td></td><td></td><td></td><td></td><td></td>
+<td></td><td></td><td></td><td></td><td></td><td></td>
 <td class="num"><strong>{{fmtCost .TotalCostMicros}}</strong></td>
 </tr>
 {{else}}
-<tr><td colspan="7">no spend yet</td></tr>
+<tr><td colspan="8">no spend yet</td></tr>
 {{end}}
 </tbody>
 {{if .Days}}
 <tfoot>
 <tr>
 <td><strong>Grand total</strong></td>
-<td></td><td></td><td></td><td></td><td></td>
+<td></td><td></td><td></td><td></td><td></td><td></td>
 <td class="num"><strong>{{fmtCost .GrandTotalCostMicros}}</strong></td>
 </tr>
 </tfoot>
