@@ -45,6 +45,7 @@ see `docs/admin-guide.md`. For the HTTP contract, see `docs/api/openapi.yaml`.
 - [Cost control: the ceiling](#cost-control-the-ceiling)
 - [Review: per finding class](#review-per-finding-class)
   - [Grouping and suggested decisions](#grouping-and-suggested-decisions)
+  - [Automatic decisions](#automatic-decisions)
 - [Degradation and failure modes](#degradation-and-failure-modes)
 - [Determinism](#determinism)
 - [LLM integration](#llm-integration)
@@ -198,8 +199,11 @@ threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohort keying
 grouping                    PURE — review grouping: embedded text, cosine, anchor
                              rule, suggestion rule — logs only
+decide                      PURE — automatic review decisions: the rules text and
+                             RulesVersion, request, response, cost — logs only
 llm  queue  budget          logs only; interfaces where I/O is needed
 embed                       logs only; client for the embedding sidecar
+decisions                   logs only; client for the OpenAI Decisions API
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 baseline                    fleet-sizing cohort pass; same shape as blocklist
@@ -207,6 +211,8 @@ maint                       insightsd's housekeeping pass; same shape again,
                              depends only on store/logs
 classgroup                  insightsd's review-grouping pass; same shape again,
                              depends on grouping, embed and store/logs
+classdecide                 insightsd's automatic review-decision pass; same
+                             shape, depends on decide, decisions and store/logs
 
 store/logs  store/threat  store/sizing   one store package per pipeline,
                                           each its own SQLite file
@@ -236,11 +242,14 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/grouping` | Review grouping's pure half: `Text` (what a class is embedded as), `Cosine`, `Assign` (the anchor rule) and `Suggest`. See "Grouping and suggested decisions". |
 | `internal/embed` | Client for the embedding sidecar's `/v1/embeddings`; returns the model name the server reports and retries a non-2xx at shorter cuts. |
 | `internal/classgroup` | `Runner.Run` — the grouping pass: probe the sidecar, embed ungrouped classes, assign to anchors, store. Writes only `class_groups`. |
+| `internal/decide` | Automatic review decisions' pure half: `rules.md` (the review rules, embedded verbatim with `go:embed`) and `RulesVersion`, `Describe` (what a class is sent as), `Nearest` (the precedents, by cosine over the grouping vectors), `BuildRequest`, `ParseResponse` and `Prices.CostMicros`. See "Automatic decisions". |
+| `internal/decisions` | Client for the Decisions API's `POST {base}/decisions`; raw bytes in and out, never retries. A non-2xx is a `StatusError` that says whether it is `Fatal` (401, 403, 404) or `Retryable` (429, 5xx). |
+| `internal/classdecide` | `Runner.Run` — the class decision pass: deliver pending security classes, then ask the Decisions API about up to `DECISIONS_BATCH` other pending classes and record each answer. Writes only through `RecordDecisionAsk` and `DeliverSecurityClass`. |
 | `internal/llm` | `llm.Client` interface; `openai.go` is the real OpenAI-compatible implementation, `stub.go` a test double. |
-| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, nodes), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`) and the finding-class review state (`classes.go` for the decisions, `review.go` for the queue's reads). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneClasses`/`PruneAnalyses`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
+| `internal/store/logs` | insightsd's only store package: ingest bookkeeping (systems, templates, nodes), the analyses cost ledger, findings, plus the cross-system reads the operator UI needs (`ui.go`) and the finding-class review state (`classes.go` for the decisions, `review.go` for the queue's reads, `groups.go` for grouping, `decisions.go` for the automatic decisions and their ask ledger). A separate SQLite file from threat and sizing, sharing nothing with them but the `sqlitex` runtime settings. `prune.go` holds `PruneTemplates`/`PruneNodes`/`PruneFindings`/`PruneClasses`/`PruneAnalyses`/`PruneDecisionAsks`, each internally batched (`pruneBatchSize`) so a large backlog is worked off across many short write-lock holds rather than one. |
 | `internal/budget` | `budget.Controller` — the fleet-level ceiling the gate cannot provide: an in-flight concurrency bound, a per-system daily call cap, and a daily spend cap that degrades the gate to security-only. Counts off the `analyses` ledger, never an in-process counter. |
 | `internal/analyzer` | `Analyzer.Process` — the pipeline that ties budget, gate, fingerprint, prompt, llm and `store/logs` together for one bundle. An optional nil-safe `Analyzer.Metrics` hook (`BudgetRejected`, `LLMCall`, `Window`, `Templates`) reports one call per budget-suppressed window, one per LLM attempt, classed `success`/`transient`/`permanent`/`parse`, one per fresh window, classed by `WindowResults`, and the gate's near-known and returning template counts, classed by `TemplateResults` — `cmd/insightsd` wires it to `metrics.Budget`/`metrics.LLM`/`metrics.Results`. |
-| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses` and `system_nodes` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
+| `internal/maint` | `Runner.Run` — insightsd's housekeeping pass: prune `system_templates`, `findings`, `finding_classes`, `analyses`, `class_decision_asks` and `system_nodes` against the three retention windows in `maint.Config`. Same `Runner`/`Config`/`Run(ctx, now) error` shape as `internal/blocklist` and `internal/baseline`, but with no ordering constraint between its steps — see "Maintenance pass" below. |
 | `internal/queue` | In-memory bounded channel decoupling ingest from analysis, plus in-flight dedup so a resend never starts a second LLM call for the same window. Not the same package as `internal/platform/ingestq`: this one's window claim is load-bearing and specific to bundle redelivery, which threat events neither have nor need. |
 | `internal/threat` | Threat Shield's pure half: `Sanitize` (every ingest drop rule) and `Allowlist` (portable CIDR containment). It deliberately holds no scenario allowlist — see "Scenarios are not interpreted". |
 | `internal/blocklist` | `Runner.Run` — one consensus pass: expire, promote, unlist the newly allowlisted, prune, regenerate the full feed and then the basic one from the same rows (`BasicCutoff`). `Snapshot` holds one rendered feed behind an `RWMutex`; `threatd` holds two. |
@@ -252,11 +261,11 @@ Each pipeline's binary imports exactly one of `store/*`, `api/*` and `ui/*`;
 | `internal/api/threat` | HTTP handlers for `POST /v1/events`, `GET /v1/feed`, `GET /v1/basic-feed`, `POST /v1/allowlist-requests`, `/healthz`, `/metrics`. Entitlement is entirely the proxy's business — these handlers are identical whichever `forwardAuth` ran, and the two feed handlers differ only in the snapshot they read (Traefik adds `/blocklist` to the first four; `/metrics` is routed under `/metrics/threat`). `handleEvents` sanitizes synchronously and publishes to an `ingestq.Queue[Work]`; `NewConsumer` builds the queue's handler (`InsertThreatEvents` then `RecordIngestCounters`) against the same `Store`. |
 | `internal/api/sizing` | HTTP handlers for `POST /v1/reports`, `/healthz`, `/metrics` (Traefik adds `/sizing` to the first; `/metrics` is routed under `/metrics/sizing`). |
 | `internal/ui/chrome` | Everything the three operator dashboards share: layout and stylesheet, the formatters in `view.go`, the GET-only-plus-enumerated-POST route discipline, `AuthenticateWrite`/`CanWrite` (HTTP Basic against `ADMIN_API_KEY`), and `Link` — the one place that knows the deployment's base path exists, since Traefik strips the prefix before a handler ever sees a request. |
-| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only writes, reachable only with `ADMIN_API_KEY`. |
+| `internal/ui/logs` | insightsd's operator dashboard: findings (every one, whatever its class's visibility, each opening in a `<dialog>`), systems, the analyses cost ledger, the gate rollup, per-day spend, templates, and the finding-class review pages (`/review`, `/review/stats`, `/review/audit`). Its three review routes (`writableRoutes`: decide, group, bulk) are insightsd's only operator writes, reachable only with `ADMIN_API_KEY`, and refused (`403`) to the usernames the automatic decisions record as their actor. |
 | `internal/ui/threat` | threatd's operator dashboard: the blocklist and its allowlist, per-system ingest accounting, the raw event stream, daily totals over the retained events, feed downloads per machine (`/downloads`), the allowlist review queue, and `/audit` — the only reader of the allowlist audit trail. Its four write routes (`writableRoutes`) are threatd's only writes. `/status` also reports the ingest queue's depth/cap/workers through a local `Runtime` interface, the same shape `internal/ui/logs` uses for the bundle queue. |
 | `internal/ui/sizing` | sizingd's operator dashboard: per-node pressure and verdicts, published cohort baselines, pipeline status. Read-only — sizingd has no write routes at all. |
 | `cmd/authd` | A thin HTTP shell over `internal/platform/auth`: `GET /auth` for Traefik's `forwardAuth`, `GET /auth/service/{service}` for the entitlement variant (closed `[a-z0-9-]` charset, `404` otherwise), `GET /healthz`, `GET /metrics` (routed under `/metrics/authd`). Owns no store and no UI: every `401`/`403` is one `authd: denied` log line and nothing else (see "Denials are log-only"). Wires `auth.ForwardAuth.Metrics` to `metrics.Auth`'s cache-hit/miss and upstream-result counters. |
-| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker and, only when `EMBED_URL` is set, the class-grouping pass loop together, runs graceful shutdown. |
+| `cmd/insightsd` | Reads environment config, wires `api/logs`, `ui/logs`, `store/logs`, the bundle pipeline and the `maint` housekeeping ticker and, only when `EMBED_URL` is set, the class-grouping pass loop and, only when `DECISIONS_API_KEY` is set, the class-decision pass loop together, runs graceful shutdown. |
 | `cmd/threatd` | Same shape for Threat Shield: `api/threat`, `ui/threat`, `store/threat`, the consensus ticker. |
 | `cmd/sizingd` | Same shape for fleet sizing: `api/sizing`, `ui/sizing`, `store/sizing`, the cohort-pass ticker. |
 
@@ -497,8 +506,19 @@ way baseline's rollup-then-prune steps are.
 2. PruneFindings(now - FINDING_RETENTION)        -- open findings are never candidates
 3. PruneClasses(now - FINDING_RETENTION)         -- never one with an operator decision
 4. PruneAnalyses(now - ANALYSIS_RETENTION)
-5. PruneNodes(now - TEMPLATE_RETENTION)
+5. PruneDecisionAsks(now - ANALYSIS_RETENTION)
+6. PruneNodes(now - TEMPLATE_RETENTION)
 ```
+
+`class_decision_asks` shares `ANALYSIS_RETENTION` because it is the other
+half of `/cost`'s spend history: with one cutoff for both, the page's
+history ends on the same day for analysis and review spend. An ask row is
+not the decision — that is `finding_classes` plus its `class_decisions`
+row, which no retention touches — so pruning one costs only the record that
+a class was asked. A class still pending when its unsure ask is pruned
+counts as not asked and is put to the API once more: at most one call per
+class per `ANALYSIS_RETENTION`, which is accepted rather than given a
+retention of its own.
 
 The review state has no retention knob of its own; it shares
 `FINDING_RETENTION`. `PruneClasses` deletes a
@@ -1219,7 +1239,7 @@ succeeded at the Unix epoch" and would fire
 `time() - threatd_pass_last_success_timestamp_seconds > 3600` on every restart.
 Absent is the honest representation of "has not succeeded yet".
 
-Four optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`
+Five optional, nil-safe hooks feed the rest: `analyzer.Analyzer.Metrics`
 (LLM call outcome, budget rejections, and `Window` -- one call per fresh
 window, `called`/`gated_out`/`budget`, for `insightsd_windows_total`, a
 duplicate window not counted; and `Templates` -- the gate's `near_known` and
@@ -1228,13 +1248,19 @@ API's `Config.Events` (each `202`'s `model.ThreatCounters`, for
 `threatd_events_total{result}`; a `503` is not counted because the reporter
 re-sends it), both wired in their `cmd/*`,
 `auth.ForwardAuth.Metrics` (cache hit/miss and upstream result, wired in
-`cmd/authd`), and `ingestq.Queue[T].Metrics.Full` (the saturated-queue
-counter, wired in `cmd/threatd`) -- each the same shape as the pattern
+`cmd/authd`), `ingestq.Queue[T].Metrics.Full` (the saturated-queue
+counter, wired in `cmd/threatd`), and `classdecide.Config.Metrics` (one
+`Result` per class the decision pass handled, `applied`/`unsure`/`failed`/
+`late`/`security`, or `error` for a pass an API outage ended, for
+`insightsd_review_decisions_total{result}`; and `Cost`, for the unlabelled
+`insightsd_review_decision_cost_micros_total`, kept apart from
+`insightsd_llm_cost_micros_total` for the reason "Automatic decisions" gives
+for keeping it out of the spend cap) -- each the same shape as the pattern
 established elsewhere in this codebase for an optional side effect: a struct
 of function fields, checked for nil before every call, so every existing
 caller and test predates the field and needs no change. `svc.RunPassLoop`'s
 optional `PassRecorder` parameter (`*metrics.Pass` satisfies it) is the
-fifth: it is what gives `blocklist consensus`, `sizing cohort` and `log
+sixth: it is what gives `blocklist consensus`, `sizing cohort` and `log
 maintenance` their run/duration/last-success metrics without each pass
 package depending on `internal/platform/metrics` itself -- only the three
 `main()`s that already import it do.
@@ -1289,8 +1315,9 @@ without a goroutine to leak.
 | `system_nodes` | The reporting cluster's node roster: `(system_id, node_id)` plus the `fqdn` that node reports for itself, and first/last-seen. A `system_id` is an NS8 *cluster*, so this is the dimension that lets a finding name a machine. It is the **only** table in this pipeline holding a customer-identifying string — see "Node attribution" below and "Data protection". Names live here and nowhere else: `findings` stores node ids and joins this table at read time. Pruned on the `TEMPLATE_RETENTION` cutoff by `maint.Runner`, which it shares rather than having a knob of its own. |
 | `analyses` | One row per `(system_id, window_start)` — the cost/decision ledger: gated or not, `gate_reasons`, tokens (including `cached_tokens`), cost, duration, error, and `suppressed_by` when a budget limit refused the window (`system_call_cap`, no reasons). Unique on that key for idempotency; `completed` distinguishes a claimable retry from a finished window. Pruned past `ANALYSIS_RETENTION` by `maint.Runner`; there is no rollup table, so this permanently truncates `/cost`'s and `/gate`'s history beyond that window — see "Maintenance pass". |
 | `findings` | One row per `(system_id, fingerprint)` — unique so a repeat detection bumps the same row instead of inserting a duplicate. `class_key` names its class (`fingerprint.Class`) and never changes, since it is the fingerprint minus the system: the join every review decision goes through, never part of the read API. `nodes` holds the cluster node ids the cited templates were seen on, **replaced** on every occurrence (a model re-report or a `RefreshFindings` match) rather than accumulated, and resolved to names against `system_nodes` at read time. Non-open (`status != model.StatusOpen`) rows are pruned past `FINDING_RETENTION` by `maint.Runner`; an open finding is never a candidate regardless of age. |
-| `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every operator decision. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
-| `class_decisions` | Append-only audit trail of operator actions on classes: actor, action, detail, the class's `first_prompt_version`, time. Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
+| `finding_classes` | Fleet-wide, one row per class key: `visibility` (`pending`/`customer`/`operator`/`dismissed`; every class starts `pending`), the `security` tag (seeded from the edge's category on first sight, never reset by a recurrence), `severity_override`, `doc_ref`, `first_prompt_version`, first/last seen. Holds the current effect of every decision, an operator's or an automatic one. Pruned past `FINDING_RETENTION` only when undecided and no retained finding names it. |
+| `class_decisions` | Append-only audit trail of every action on a class: actor, action, detail, the class's `first_prompt_version`, time. The actor is the operator's Basic username, or `decisions-api` / `security-rule` for an automatic decision (`logsstore.IsAutomaticActor`, the one list). Exists because the `UPDATE` on `finding_classes` destroys the value that would say who changed it. Never pruned. |
+| `class_decision_asks` | Append-only: one row per Decisions API call about a class — `rules_version`, `model`, `result` (`applied`/`unsure`/`failed`/`late`), the `choice` and `confidence` when the API answered, tokens (input, cached, output) and `cost_micros`. Several rows per class across rules versions and models. It is what "already asked under this rules version and model" reads, the blind record for measuring the API, and the review half of `/cost`. Never read by anything that feeds the prompt. Pruned past `ANALYSIS_RETENTION`. |
 | `class_texts` | Fleet-wide, one row per class key: the class's one customer-facing wording. `title`/`summary`/`suggested_action` are the **seed** — the first finding stored in the class, written with `ON CONFLICT DO NOTHING` and never changed; `title_override`/`summary_override`/`suggested_action_override` are the operator's, `NULL` for none. Its own table rather than columns on `finding_classes` because `CREATE TABLE IF NOT EXISTS` is the only schema mechanism, so a new column would never reach an existing database. Read by `ListFindings`, `ListAllFindings` and the review queue, never by `OpenFindings`. Orphan rows are deleted by `PruneClasses`. |
 | `class_groups` | One row per grouped class: `anchor_key` (the group's first class; the anchor's own row points at itself with similarity 1), the cosine it joined at, the `threshold` in force then, the `model` the sidecar reported, and the `vector` as a JSON array in `TEXT`. Written only by the grouping pass; never read by anything that feeds the prompt. Orphan rows are deleted by `PruneClasses`. |
 | `threat_events` | One sanitized CrowdSec sighting. Unique on `(system_id, attacker_ip, scenario, observed_at)`, which is what makes redelivery safe. Pruned past `THREAT_EVENT_RETENTION`. |
@@ -1792,6 +1819,13 @@ cannot be turned back into a list of working credentials.
 counts, module names, and the summaries of currently-open findings. No raw
 line, no address, no credential.
 
+**What reaches the Decisions API** (only with `DECISIONS_API_KEY` set) is
+the class being decided and up to 15 precedents, each as its module names,
+the class's customer wording (title and summary) and at most 6 evidence lines
+of its latest finding, each cut to 400 characters — the same masked
+templates the LLM provider already saw — plus the review rules. No
+`system_id`, no node name, no count.
+
 ## Finding identity: the fingerprint
 
 `fingerprint.Compute(systemID, modules, evidence, category)` hashes
@@ -2121,6 +2155,15 @@ is what bounds a day's spend.
 The spend cap deliberately degrades rather than stops: a cap that blinded the
 fleet to a break-in would be worse than the invoice it prevents.
 
+**The automatic review decisions' spend is outside all three limits.** Its
+calls are not analyses, are recorded in `class_decision_asks` rather than
+`analyses`, and `internal/budget` never reads that table: counted toward
+`LLM_DAILY_SPEND_CAP_USD`, review traffic would narrow the gate, and deciding
+what customers see must never be what makes the server stop looking. It has
+no cap of its own because it does not need one — a call costs about $0.0002,
+and `DECISIONS_BATCH` per `DECISIONS_INTERVAL`, over a queue that gains about
+100 classes a week, bounds it. `/cost` shows it beside the analyses.
+
 A suppressed window still records its templates. Skipping that
 would leave the system never learning what it saw, so every later window would
 look novel — the cap would make the next day more expensive, not less.
@@ -2137,9 +2180,10 @@ It is the class and not the window or the gate condition because those name
 several unrelated conclusions, and a decision over all of them at once is
 one an operator cannot judge. The split is therefore: **the system alone
 decides when to pay** (the gate above), **the operator decides what the
-customer sees**, per class.
+customer sees**, per class — directly, or through the written review rules
+the automatic decisions apply (see "Automatic decisions").
 
-**Operator decisions never reach the prompt.** The prompt is rendered from
+**Decisions never reach the prompt**, an operator's or an automatic one. The prompt is rendered from
 the bundle and `OpenFindings` only, whatever a finding's class or its
 visibility. `OpenFindings` deliberately does not join `finding_classes`, so
 no decision can ride along on the findings it returns.
@@ -2210,13 +2254,18 @@ Rules that are not visible from the code:
   `finding_classes` row with an empty key. With no `ADMIN_API_KEY` nothing
   can be delivered at all. This was chosen over "deliver unless hidden":
   review is the point, and an unreviewed AI finding reaching a customer is
-  the failure it exists to prevent.
+  the failure it exists to prevent. The automatic decisions (below) do not
+  change the default; they are a reviewer, and one that leaves every class
+  it is unsure of pending.
 - **Security is a tag, not a bypass.** A security class waits in `pending`
   like any other and can be kept internal. The gate's security condition
   (`security_new`) is untouched — they decide *cost*,
-  which is not the same question as *visibility*: a security finding is as
-  much an unreviewed AI conclusion as any other, and delivering it unread
-  would be the failure review exists to prevent.
+  which is not the same question as *visibility*. With the automatic
+  decisions on, a pending class with the tag is delivered by the security
+  rule within a pass (see "Automatic decisions"); that is a written review
+  rule applied in code, not the tag becoming a bypass of review — the
+  delivery is a recorded decision an operator can change like any other,
+  and with `DECISIONS_API_KEY` unset a security class waits exactly as before.
 - **The tag is the edge's on first sight and the operator's after.** The
   upsert seeds `security` from the edge's category and never resets it on
   conflict, so an operator's `off` survives the next recurrence. It is
@@ -2307,8 +2356,17 @@ Rules that are not visible from the code:
   visibilities (`customer`, `operator`, `dismissed`). Exactly one distinct
   value is suggested to the group's `pending` classes, with the count of
   classes that carry it; none or several suggest nothing. A conflicting group
-  is a signal, not a vote to be settled by majority.
-- **Never applied without a POST.** The pass writes only `class_groups`; it
+  is a signal, not a vote to be settled by majority. **Only a person's
+  decision votes**: a class whose newest visibility decision has an
+  automatic actor still counts toward "group of N" but not toward the
+  suggestion (`attachGroups`, `TestGroupSuggestionIgnoresAutomaticDecisions`).
+  Otherwise a class the Decisions API left unsure would show the API's
+  answer through its group — no longer blind — and an operator accepting it
+  would turn the API's answer into a person's precedent: the feedback loop
+  "Automatic decisions" forbids, routed through the operator.
+- **A grouping suggestion is never applied without a POST.** This holds for
+  grouping only; the automatic decisions below are the deliberate exception,
+  and live in a different pass. The grouping pass writes only `class_groups`; it
   never calls a `SetClass*` or `UpdateClass` method and never touches `finding_classes` or
   `class_decisions`. `POST /review/group` (in `writableRoutes`, authenticated
   and cross-site-checked like every write) applies one visibility to the
@@ -2353,6 +2411,150 @@ Rules that are not visible from the code:
   may differ" and never a plain word. A wrong merge here costs a review
   decision; in the gate it would silently swallow a novel line.
 
+### Automatic decisions
+
+About 100 new classes reach `/review` a week, and each one's findings are
+withheld from customers until it is decided. insightsd's **class decision
+pass** decides most of them without the operator and leaves the ones it is
+unsure of `pending`. It runs only with `DECISIONS_API_KEY` set, every
+`DECISIONS_INTERVAL`, in the same `svc.RunPassLoop` shape as the grouping
+pass, and has two deciders:
+
+1. **The security rule.** Every `pending` class with the `security` tag is
+   delivered to the customer in code, with no call and no confidence bar:
+   actor `security-rule`, detail `security tag`.
+2. **The Decisions API.** Up to `DECISIONS_BATCH` other `pending` classes,
+   oldest `first_seen` first, that have no ask recorded under the current
+   `decide.RulesVersion` and `DECISIONS_MODEL`, each get one
+   `POST {DECISIONS_BASE_URL}/decisions`: one `choice` question
+   (`customer`/`operator`/`dismissed`) with the review rules in its
+   instructions, the class, and up to 15 precedents. An answer whose
+   confidence reaches `DECISIONS_MIN_CONFIDENCE` (default `0.9`) is applied
+   through the same kind of transaction an operator decision uses, writing
+   `finding_classes` and one `class_decisions` row: actor `decisions-api`,
+   detail `rules <version>, <model>, confidence <c>`.
+
+The pieces: `internal/decide` (pure), `internal/decisions` (the client),
+`internal/classdecide` (the pass), `internal/store/logs/decisions.go` and the
+`class_decision_asks` table.
+
+**Why it ships on a failed measurement.** The OpenAI Decisions API, given the
+review rules then in force plus the 15 most similar decided classes, was
+tested blind on 76 operator decisions (2026-11-10). At confidence 0.9 or more
+it answered 41% of classes, 84% of them right and 6% wrong on
+customer-versus-not, against a bar of 90% right and 2% wrong: it failed.
+All five confident errors were classes where the operator's decision
+contradicted the rules as written, so the rules were rewritten
+(`internal/decide/rules.md`, `RulesVersion` `r5`), and the operator chose to
+ship knowing there is **no blind result for the rewritten rules**. Asked
+with no precedents (zero-shot) it was worse: 12% wrong instead of 6%. Most of
+the rules below exist so that every automatic decision stays undoable and
+the rewritten rules still get measured.
+
+Rules that are not visible from the code:
+
+- **Applied without a POST, on purpose.** The operator decided that a
+  confident answer takes effect immediately, with no confirmation step — the
+  deliberate exception to grouping's "never applied without a POST", which
+  keeps holding there. Undoing one is an ordinary operator decision on the
+  class. insightsd refuses to start with `DECISIONS_API_KEY` set and
+  `ADMIN_API_KEY` empty: without the write routes nobody could undo an
+  automatic delivery.
+- **Unsure means pending, and stays blind.** Below the bar the class stays
+  `pending` exactly as it would with the feature off. The API's guess is
+  stored on its `class_decision_asks` row and **never shown on `/review`**,
+  so the operator's eventual decision on that class is a free blind sample
+  (the stored ask against the operator's answer). Showing the guess would
+  anchor the operator and spoil the only measurement the rewritten rules
+  will ever get.
+- **Asked once per rules version and model.** Any recorded ask under
+  `(RulesVersion, DECISIONS_MODEL)` excludes the class from later passes:
+  asking again gets the same answer at the same price. A bump of either puts
+  every class still pending to the API again; a class already decided, by
+  anyone, is never re-decided, including one that contradicts new rules.
+  `/review/stats` splits its table by both.
+- **The rules live in the code.** `rules.md` is embedded verbatim and
+  `RulesVersion` is a constant next to it, bumped by hand — the same
+  discipline as `prompt.Version`: never configuration, so it cannot drift
+  from the text it stamps. `TestRulesFileChangeNeedsVersionBump` pins the
+  file's sha256, so changing the rules without the bump fails the build.
+  The question's instructions and the three choice descriptions are
+  byte-for-byte what was measured; change them only deliberately.
+- **Precedents and hints come from people only.** The precedents are the
+  decided classes nearest by cosine over the vectors the grouping pass
+  already stores (`class_groups`, current embedding model only) whose newest
+  visibility decision was **not** made by an automatic actor
+  (`logsstore.IsAutomaticActor`; any other actor, including the labels
+  imported earlier as `claude`, which an operator approved, counts as a
+  person). The API never learns from its own answers: if it did, one
+  confident mistake would become the precedent for the next similar class
+  and the error would compound with nobody in the loop. Group suggestions
+  apply the same test (see "Suggestion rule" above), and the operator UI
+  refuses every write (`403`) from the usernames `decisions-api` and
+  `security-rule`: the actor is self-declared, and a person signing in under
+  one would make their own decisions look automatic in the audit and drop
+  them from the precedents. A consequence: agreeing with an automatic
+  decision records nothing (an unchanged form, and a bulk or group decision
+  to the same visibility, write no row), so such a class stays the API's,
+  outside the precedent pool, until an operator changes it.
+- **The operator wins the race.** The apply changes a class only while it is
+  still `pending`, in the same transaction as the check (`decidePending`).
+  An answer for a class an operator decided while the call was in flight is
+  stored as `late` and changes nothing. The security rule is guarded the
+  same way.
+- **Waits for its vector.** With `EMBED_URL` set, only classes already
+  embedded under the current embedding model (the model of the newest
+  `class_groups` row) are candidates, filtered before the batch limit, so a
+  class the embedder never manages to embed cannot fill the batch or hold up
+  the queue; the grouping pass embeds a new class within about a minute.
+  With `EMBED_URL` empty the pass asks zero-shot. That works but was
+  measured worse, which is why grouping is recommended alongside it.
+- **The security rule is code, not a question.** Rule G1 sends security
+  findings to the customer, and the pass applies it to the tag directly
+  rather than paying to be told so. On the dev host it would have delivered
+  13 classes the operator had kept back (4 successful root SSH logins, 7
+  probes, API access without 2FA, Redis authentication failures), which is
+  what the rewritten rules intend. **Known gap**: the code cannot see rule
+  D5, so a Dovecot master-user login class (support access, dismissed by the
+  rules) that the edge tagged security would be delivered. None of the four
+  on the dev host was tagged; if one ever is, the operator clears the tag or
+  dismisses the class. An untagged class goes to the API, where G1 still
+  applies to what its text describes.
+- **Visibility only.** The API never sets severity, the security tag, the
+  doc reference or the wording. On ~730 classes severity had been overridden
+  31 times (4 on customer classes) and the security tag 17 times, and
+  neither was ever measured; a wrong security tag would also cascade into a
+  wrong delivery through the security rule.
+- **Errors are not answers.** A `401`, `403` or `404` means the key, the
+  base URL or the model is wrong and every class would fail the same way; a
+  `429`, a `5xx` or a transport error may pass. Both end the pass with a
+  warning and record nothing, so the class is asked again next pass. Any
+  other `4xx`, an unparseable answer or a refusal is recorded as `failed`,
+  with the reason in the log, so that one class neither blocks the queue
+  (which is oldest first) nor takes a batch slot forever; it is asked again
+  only when the rules version or the model changes. The class stays
+  `pending` in every case. The pass returns an error only for a store
+  failure: like grouping, it degrades and never fails, and analysis, ingest
+  and every page carry on.
+- **Spend is recorded, never capped.** Every ask stores its tokens (input,
+  cached, output) and `cost_micros`, priced like the analyses ledger from
+  `DECISIONS_PRICE_*` (each defaulting to its `LLM_PRICE_*`). `/cost` shows
+  it as `review` rows next to the analyses, inside the day and grand totals,
+  and `insightsd_review_decision_cost_micros_total` adds it up. It is outside
+  `LLM_DAILY_SPEND_CAP_USD` — see "Cost control: the ceiling".
+- **None of it reaches the gate, the prompt, a fingerprint or
+  `OpenFindings`.** The pass writes `finding_classes.visibility`,
+  `class_decisions` and `class_decision_asks` and nothing else;
+  `TestDecisionsNeverReachThePrompt` passes unchanged.
+
+**Measuring it.** `/review/stats` has one table per rules version and
+model: classes asked, applied, unsure, failed, late, **changed later**
+(applied asks whose class's newest visibility decision is now a person's,
+which is the visible error rate of the confident answers) and cost, plus the
+count of classes the security rule delivered. The unsure answers' blind
+samples are the `class_decision_asks` rows set against the operator's later
+`class_decisions`.
+
 ## Degradation and failure modes
 
 Every dependency failure is designed to cost one capability rather than the
@@ -2371,6 +2573,7 @@ run.
 | consensus or cohort pass fails | the previous snapshot keeps being served with its original `generated_at`; the feed never serves an empty body |
 | threat store write fails after the `202` | that batch is lost with no compensation; promotion needs three distinct systems and a live attacker keeps re-alerting |
 | embedding sidecar (`EMBED_URL`) down, slow or on a changed model | the grouping pass logs and ends; no new groups form and nothing else changes — existing groups and suggestions still show, and analysis, ingest and every page are unaffected. A changed model does not unlist old rows: they keep displaying their group and voting until re-embedded under the new model, and a decided class whose findings were all pruned cannot be re-embedded, so its old-model row stays and may still vote. This arises only after a deliberate model change, and suggestions are confirm-only. A class the sidecar rejects at every size is skipped and retried next pass |
+| Decisions API (`DECISIONS_API_KEY`) down, rate-limited, or the key, URL or model wrong | the class decision pass logs a warning and ends with nothing recorded; the classes it did not reach stay `pending` for the operator and are asked on a later pass. The security rule runs before any call, so security classes are still delivered. Analysis, ingest, grouping and every page are unaffected |
 | process crash or restart | whatever the queue held is lost. The edge's next 15-minute bundle fills the gap if the condition persists |
 
 **The thundering herd is the one failure that is fleet-wide by construction.**
@@ -2719,7 +2922,7 @@ buffered bundles were already acknowledged to an edge that won't resend them
 and must still be processed before exit — and only then cancel and wait for
 that binary's own background pass(es) (the consensus loop in `threatd`, the
 cohort pass in `sizingd`, and in `insightsd` both the queue drain *and* the
-`maint` housekeeping loop and the class-grouping loop, the latter stopped last of everything). Every pass
+`maint` housekeeping loop, the class-grouping loop and the class-decision loop, the last two stopped last of everything). Every pass
 loop goes last because none of them holds acknowledged work: a cancelled
 consensus or cohort pass simply leaves the previous snapshot in place, and a
 cancelled maintenance pass simply leaves whatever it has not pruned yet for
@@ -2779,7 +2982,13 @@ does not starve the basic feed of eligible rows.
 - **The admin actor is self-declared.** One shared `ADMIN_API_KEY` has no
   identity behind it, so the HTTP Basic username recorded on a write — the
   same value Traefik's htpasswd layer would show — is a readable trail, not an
-  authorization boundary: anyone with the key can claim any name.
+  authorization boundary: anyone with the key can claim any name. The two
+  automatic actors' names, `decisions-api` and `security-rule`, are the only
+  ones refused (see "Automatic decisions").
+- **The rewritten review rules have no blind result.** The automatic
+  decisions ship on rules rewritten after the only blind test failed its bar;
+  `/review/stats`' "changed later" column and the stored unsure answers are
+  the measurement, accumulating as the operator works the queue.
 - **No per-system ingest rate limit.** The design calls for one (roughly 10
   bundles/hour burst) so a single misbehaving node cannot fill the queue by
   itself. It is not built: `QUEUE_SIZE` and the per-system daily call cap are

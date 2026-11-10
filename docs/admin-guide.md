@@ -224,13 +224,20 @@ Four environment files, mode 0600, none of them in the repository.
 the blocklist dashboard's allowlist changes and `insightsd` on the logs
 dashboard's review decisions, and one operator password covers both.
 
+To have new review classes decided automatically (see "Automatic decisions"
+under "6. Review"), also add a `DECISIONS_API_KEY=<your OpenAI key>` line to
+`insightsd.env`. Leave it out and every class waits for an operator, as
+before.
+
 `sizingd` has no secret of its own. Create the empty file anyway: its unit
 names that file unconditionally and will fail to start without it.
 
 Then the operator password file for the proxy. Every operator gets a line, and
 they all share one password — the `ADMIN_API_KEY` value. The **username** is
 what gets recorded as the actor on any change made from the blocklist or logs
-dashboard, which is why each operator gets their own line:
+dashboard, which is why each operator gets their own line. Do not use
+`decisions-api` or `security-rule`: those names mark automatic decisions,
+and the logs dashboard refuses any change made under them:
 
     install -d -m 755 /etc/traefik
     ADMIN_API_KEY=$(sed -n 's/^ADMIN_API_KEY=//p' /etc/insights/threatd.env)
@@ -409,6 +416,13 @@ depth. It never logs a credential: the model API key appears only as
 | `EMBED_URL` | base URL of the embedding sidecar that groups similar finding classes on `/review` (default empty: grouping off). The deployed unit sets `http://127.0.0.1:9597`. With it set and the sidecar down, everything else keeps working and `/review` just shows no new groups |
 | `REVIEW_GROUP_SIMILARITY` | how alike two classes' evidence must be, as a cosine between 0 and 1, for the newer to join the older's group (default `0.98`; above 0 and at most 1, startup refuses a number outside that range, or `NaN`, but a value that is not a number, such as `0,98`, is silently replaced by the default). Higher groups less and is safer. It is recorded on each class when it is grouped, so changing it affects only classes grouped afterwards |
 | `GROUP_INTERVAL` | how often the grouping pass runs (default `1m`; must be positive when `EMBED_URL` is set, startup refuses otherwise); each run groups up to 200 ungrouped classes |
+| `DECISIONS_API_KEY` | OpenAI key for the Decisions API, which decides new review classes automatically (see "Automatic decisions" under "6. Review") — secret (default empty: automatic decisions off, `/review` works as it always did). Never logged or stored; `/status` shows only whether it is set. It is separate from `LLM_API_KEY` because the Decisions API exists only at OpenAI while `LLM_BASE_URL` may point elsewhere; it may hold the same value. **`insightsd` refuses to start with this set and `ADMIN_API_KEY` empty**: without the review write routes nobody could undo an automatic decision |
+| `DECISIONS_MODEL` | the Decisions API model (default `gpt-6-luna`). Changing it asks every class still pending again |
+| `DECISIONS_BASE_URL` | where the Decisions API is (default `https://api.openai.com/v1`); only worth changing to point a test at a fake |
+| `DECISIONS_MIN_CONFIDENCE` | how sure the API must be, between 0 and 1, for its answer to take effect (default `0.9`). Below it the class stays pending for you. Above 0 and at most 1; startup refuses a number outside that range, or `NaN`, even with the feature off, but a value that is not a number, such as `0,9`, is silently replaced by the default |
+| `DECISIONS_INTERVAL` | how often the automatic decision pass runs (default `1m`; must be positive when `DECISIONS_API_KEY` is set, startup refuses otherwise) |
+| `DECISIONS_BATCH` | how many classes the pass asks about per run (default `20`; at least 1 when `DECISIONS_API_KEY` is set, startup refuses otherwise). This, with the interval, is what bounds the spend |
+| `DECISIONS_PRICE_INPUT_PER_MTOK`, `DECISIONS_PRICE_CACHED_INPUT_PER_MTOK`, `DECISIONS_PRICE_OUTPUT_PER_MTOK` | the Decisions API model's list prices in dollars per million tokens, used to put a cost on each call (default: the matching `LLM_PRICE_*` value, which is right when both use the same model). This spend shows on `/cost` but does **not** count toward `LLM_DAILY_SPEND_CAP_USD` |
 | `MAINT_INTERVAL` | how often the housekeeping pass prunes those three tables (default `10m`). Each prune is internally batched, so running it often is cheap |
 
 ### `threatd`
@@ -826,11 +840,12 @@ So, per binary, in addition to `go_*`/`process_*`:
 | `insightsd_active_systems`, `threatd_active_systems` | both | machines that reported in the last 24 hours: a log bundle for `insightsd`, a threat event for `threatd` |
 | `threatd_regular_systems` | `threatd` | machines that reported on at least 2 of the last 7 days (UTC, today included). A machine sends only when it has a ban to report, so a quiet machine is invisible until something touches it. When one scanner sweeps the internet it wakes hundreds of quiet machines at once, and `threatd_active_systems` jumps for a day. This count needs a second day of reports, so a one-off wake-up does not move it. Machines that have never blocked anything are counted by neither |
 | `insightsd_findings{status}` | `insightsd` | findings currently kept, by status (`open`, `stale`); dismissed classes are not counted |
+| `insightsd_review_decisions_total{result}`, `insightsd_review_decision_cost_micros_total` | `insightsd` | the automatic review decisions (both stay at 0 while `DECISIONS_API_KEY` is unset): classes handled, by result — `applied` (the API was sure and its decision took effect), `unsure` (left pending for you), `failed` (the API refused or answered something unusable; not asked again until the rules or the model change), `late` (an operator decided the class while the API was answering), `security` (delivered by the security rule, no API call) or `error` (the API was unreachable or refused the key, ending that run) — and the running Decisions API spend in micro-dollars, kept apart from `insightsd_llm_cost_micros_total` |
 | `threatd_events_total{result}` | `threatd` | decisions nodes sent, by what ingest did with each: `accepted`, one of the `dropped_*` reasons the `202` reply lists, or `truncated`. A batch refused with `503` is not counted, because the node sends it again |
 | `threatd_blocklist_entries{feed}` | `threatd` | addresses in each published feed — what nodes download, after the allowlist and each feed's cap: `feed="full"` (the add-on's `/v1/feed`, capped by `BLOCKLIST_MAX_ENTRIES`) and `feed="basic"` (`/v1/basic-feed`, capped by `BLOCKLIST_BASIC_MAX_ENTRIES`) |
 | `threatd_http_requests_total{route,status}` for the two feed routes | `threatd` | per-feed request counts come from the generic request counter, by route: `/v1/feed` is the full feed, `/v1/basic-feed` the basic one. `200` sent the list, `304` told the machine its copy is current, `503` means no feed generated yet, `401`/`405` a bad request. A credential the proxy refused never reaches `threatd`, so it is not counted here — see "Who was refused". There is no separate feed counter; daily downloads and machines per feed are on `/blocklist/stats` |
 | `threatd_ingestq_full_total{queue}` | `threatd` | `POST /v1/events` batches that hit `503` because the ingest queue was saturated |
-| `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead |
+| `<svc>_pass_runs_total{pass,result}`, `<svc>_pass_duration_seconds{pass}`, `<svc>_pass_last_success_timestamp_seconds{pass}` | `insightsd` (`pass="log maintenance"`), `insightsd` (`pass="class grouping"`, only when `EMBED_URL` is set), `insightsd` (`pass="class decision"`, only when `DECISIONS_API_KEY` is set), `threatd` (`pass="blocklist consensus"`), `sizingd` (`pass="sizing cohort"`) | the periodic background pass each binary runs. The grouping pass degrades rather than fails: a sidecar outage, or a class the sidecar rejects, still counts as a successful run, so watch the `embedder`'s health and the warning in the `insightsd` log instead. The decision pass is the same: an unreachable API or a wrong key still counts as a successful run, so watch `insightsd_review_decisions_total{result="error"}` |
 | `authd_cache_results_total{result}`, `authd_upstream_results_total{result}` | `authd` | forward-auth cache hits/misses and what the upstream validator answered (`valid`, `invalid`, `forbidden` — a subscriber without the entitlement — or `unavailable`) |
 | `authd_http_requests_total{route="/auth/service/{service}",status}` | `authd` | entitlement checks by outcome; the `403` share is how much of the fleet is asking for Threat Shield without holding it. Both entitlements (`ng-blacklist` for NethSecurity, `crowdsec-advanced-threat-shield` for NS8 CrowdSec) share this one label, so it cannot tell the two apart: a rise in `403`s may also be NS8 nodes still calling the NethSecurity base URL `/blocklist/v1/`. The `authd` log line for each `403` names the service |
 
@@ -843,8 +858,9 @@ gate reasons and findings.
 known list — the four `insightsd_llm_calls_total` outcomes, the
 `insightsd_budget_rejections_total` reason, the three
 `insightsd_windows_total` results, both `insightsd_gate_templates_total`
-results, every `threatd_events_total` result, both
-`authd_*` families, `threatd_ingestq_full_total`, and both
+results, every `insightsd_review_decisions_total` result,
+`insightsd_review_decision_cost_micros_total`, every `threatd_events_total`
+result, both `authd_*` families, `threatd_ingestq_full_total`, and both
 `<svc>_pass_runs_total` results — is
 exported at `0` from the first scrape after a restart, before the thing it
 counts has ever happened. That is what lets an alert like
@@ -1040,7 +1056,7 @@ the effective configuration, lives alongside it.
 | `/logs/` | The actual reported problems, most severe and most recent first. Filter by machine, status (open/stale), severity or words in the title (any part of it, upper or lower case alike) — machine plus title is the quick way to find the one problem a customer is asking about, then **review class** in its dialog to reclassify it. The **Nodes** column names the cluster machines the problem was last seen on, each as its node number and full name (`1 · rl1.example.org`), or the bare number when no name has been reported yet. Click a title to open the full summary, suggested action, evidence, fingerprint, class, security tag, trigger, and whether the customer sees it; Escape, a click outside it or **Close** dismisses it. The **System** column shows the first characters of the id, and **Nodes** lists at most three machines per row (then "+N more"), each name cut short if long — hover for the whole of either; the dialog lists them in full. **The operator sees every finding here except those of a dismissed class; a customer sees one only once its class has been delivered on `/logs/review`.** The ID filter also matches a class key. |
 | `/logs/review` | The review queue — see "Review" below. New finding classes wait here, ranked by how many machines raised them, each with its titles, summary and evidence and the decisions you can make on it. Switch the view to see classes already delivered, kept internal or dismissed, or all but the dismissed ones. Similar classes are grouped and may carry a suggested decision ("Review" below). Click a column name to sort by it, click it again to reverse; the arrow marks the column in use, and the order survives filtering and every decision. The **Module** column shows the module of the class's latest finding, `(host)` for host-level logs, and "+N" when it names more — the class dialog lists them all. A long class name is cut short with "…"; hover for the whole of it. |
 | `/logs/review/stats` | Per prompt version: how many finding classes it raised and what operators decided about them. The number to watch when the prompt changes. A second table shows the Decisions API's results per rules version and model, and how many of its decisions an operator later changed. |
-| `/logs/review/audit` | Every review decision, who made it and when. |
+| `/logs/review/audit` | Every review decision, who made it and when — automatic ones under the actor `decisions-api` or `security-rule`. |
 | `/logs/systems` | Every cluster the server has ever heard from, with a quick summary: its **nodes** (number and reported name), how many templates, findings, analysis windows, and how much it's cost so far. |
 | `/logs/analyses` | The cost ledger: every window processed, whether it was gated out, whether the AI was called, tokens used (including the part served from the provider's cache at a discount), cost, how long it took, any error, and whether a spending limit suppressed it. This answers "what did we spend, and on what." |
 | `/logs/gate` | The gate's decisions grouped by *why* — how many windows and how much money went to each distinct set of reasons. Read the summary line first: it says what share of windows was gated out, which is the only number that tells you whether the gate is working. In the table, remember that a reason set *is* the trigger, so every window in a row with reasons went to the AI; the `(none)` row is the free ones, plus any a spending limit refused (**Suppressed**). Scoped to the last 7 days by default — see the note below. |
@@ -1280,6 +1296,12 @@ limits do:
 The counts come from the stored ledger, not from memory, so restarting the
 server does not hand anybody a fresh allowance.
 
+The automatic review decisions ("6. Review") are not counted against any of
+these. They are not analyses, and if their spend counted toward the daily
+ceiling, deciding what customers see could narrow what the server looks for.
+They are cheap — about $0.0002 a class — and bounded by how many classes
+are asked per run (`DECISIONS_BATCH`); `/cost` shows them as `review` rows.
+
 ### 4. The analysis: when the AI actually looks
 
 When the gate says yes, the server builds a prompt describing that window
@@ -1378,7 +1400,9 @@ first, on the logs dashboard's `/review` page, and **every new kind of
 finding is withheld from customers until someone delivers it** — the
 operator dashboard shows it straight away, the customer's findings API does
 not. That includes security findings: they wait for review like everything
-else.
+else. With automatic decisions turned on (see "Automatic decisions" below)
+the "someone" can be the server itself, which decides most new classes
+within a few minutes and leaves the rest for you.
 
 What an operator reviews is a **finding class**: one kind of problem, across
 every machine. Two machines reporting the same database timeout have two
@@ -1460,7 +1484,9 @@ the next run; it never holds up the classes behind it. On `/review`:
   all delivered, or all kept internal, or all dismissed — a pending class
   shows **Suggested: …** with how many similar classes were decided that way,
   and the matching choice in its form is marked "(suggested)" — marked, not
-  selected. If they disagree, or none is decided, nothing is suggested.
+  selected. If they disagree, or none is decided, nothing is suggested. Only
+  decisions made by a person count here: a class last decided automatically
+  still counts toward "group of N" but never toward a suggestion.
 - On a group's page, **Deliver / Keep internal / Dismiss all pending in this
   group** applies one decision to the pending classes listed on the page, each
   recorded on `/review/audit` as its own decision with the detail
@@ -1476,8 +1502,9 @@ the next run; it never holds up the classes behind it. On `/review`:
   a class already at that decision is left alone. Up to 200 classes at a time,
   and there is no select-all: tick the rows one by one.
 
-**A suggestion is only a hint.** Nothing is ever decided without someone
-pressing a button, and a group is formed by similarity, not by identity: in a
+**A suggestion is only a hint.** Grouping never decides anything without
+someone pressing a button (automatic decisions, below, are a separate
+feature that does), and a group is formed by similarity, not by identity: in a
 trial on 1,259 real classes, grouping at `0.98` cut the decisions needed by
 about 38%, and roughly 8% of inherited suggestions were a near-miss — a
 related condition in the same component, never an unrelated one (judged by
@@ -1489,12 +1516,85 @@ None of this changes what the AI is shown or when the server pays for a
 call: that is the gate's business, and nothing an operator decides here
 reaches it.
 
+**Automatic decisions.** With `DECISIONS_API_KEY` set, the server decides new
+classes itself, about once a minute (`DECISIONS_INTERVAL`), so most of them
+never wait for you. It does so in two ways:
+
+- **Security classes are delivered.** A pending class with the security tag
+  goes to customers straight away, without asking anyone. On `/review/audit`
+  it reads: actor `security-rule`, action `deliver`, detail `security tag`.
+- **The rest are put to OpenAI's Decisions API.** For each pending class the
+  server sends its modules, the wording customers would read, up to six of
+  its evidence lines, the written review rules, and the 15 most similar
+  classes a person has already decided, with what was decided. The API
+  answers deliver, keep internal or dismiss, with how sure it is. If it is at
+  least `DECISIONS_MIN_CONFIDENCE` sure (90% by default), **the decision
+  takes effect at once, with no confirmation**: a delivered class reaches
+  customers on their next read. On `/review/audit` it reads: actor
+  `decisions-api`, action `deliver`, `internal` or `dismiss`, and a detail
+  such as `rules r5, gpt-6-luna, confidence 0.93` — the rules version, the
+  model and how sure it was. If it is less sure, the class stays pending for
+  you, and `/review` does not show what the API guessed. That is on purpose:
+  your decision is then an independent check of the API.
+
+What it never does:
+
+- change a class's severity, security tag, documentation link or wording;
+- decide a class someone has already decided. If you decide a class while
+  the API is still answering about it, yours wins;
+- ask twice about the same class. A class is asked once per rules version
+  and model; when either changes (a server release with new rules, or a new
+  `DECISIONS_MODEL`), the classes still pending are asked once more;
+- learn from itself. Only classes decided by a person serve as its examples,
+  and only they count toward a group's "Suggested: …".
+
+With grouping running (`EMBED_URL`), a class is asked about only once it has
+been grouped, usually within a minute, because the similar classes are what
+make the answers good. Without grouping it asks with no examples, which in
+testing got twice as many classes on the wrong side (12% against 6%). Run
+both.
+
+How good it is: tested blind on 76 of the operator's decisions, it was sure
+about 41% of the classes; of those, 84% matched the operator and 6% were put
+on the wrong side of "the customer sees it or not". The rules were then
+rewritten to fix the cases where it disagreed, and there is no test result
+for the rewritten rules yet — so look at `/review/audit` now and then.
+
+**Undoing an automatic decision.** Find the class: on `/review/audit` (the
+class column links to it), or on the delivered, internal or dismissed view of
+`/review`. Open it, choose another decision and save. Your decision is
+recorded under your name and the class counts as decided by a person from
+then on. Agreeing needs no action: saving the same choice records nothing,
+and the class stays marked as the API's. To turn the feature off, remove
+`DECISIONS_API_KEY` and restart `insightsd`; decisions already made stay.
+
+**One gap in the security rule.** The rules dismiss Dovecot master-user
+logins — support staff opening a mailbox, not an attack — but the security
+rule looks only at the tag. If a node ever tags such a class as security, it
+is delivered. If you see one, clear its **Security** box or dismiss it.
+
+**When the API is unavailable.** If it cannot be reached, is overloaded, or
+refuses the key or the model, the run stops and the next one tries again;
+classes simply wait as pending meanwhile (a warning in the `insightsd` log,
+and `insightsd_review_decisions_total{result="error"}`). A class the API
+refuses to answer about, or answers with something unusable, is left for
+you and not asked again until the rules or the model change.
+
+**What it costs.** About $0.0002 per class asked, priced with
+`DECISIONS_PRICE_*`. It shows on `/cost` as `review` rows, included in each
+day's and the overall total, and it does **not** count toward
+`LLM_DAILY_SPEND_CAP_USD`.
+
 Deciding needs the operator password (`ADMIN_API_KEY` on `insightsd`), and
 every decision is written to `/review/audit` with who made it. Without the
 key the queue is read-only — and, since nothing can be delivered, no new
 finding reaches customers. `/review/stats` shows, per prompt version, how
 many classes it raised and what operators decided about them; it is the page
-to watch when the prompt changes.
+to watch when the prompt changes. Below it, a second table shows the
+automatic decisions per rules version and model: classes asked, applied,
+left unsure, failed, late (you decided first), **changed later** (how many
+of its decisions an operator has since changed — the number to watch) and
+what they cost, plus how many classes the security rule delivered.
 
 A class nobody has decided on is forgotten once all its findings have been
 pruned (`FINDING_RETENTION`), its wording with it; a class with a decision

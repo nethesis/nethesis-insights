@@ -430,15 +430,60 @@ rules (reasons in `docs/architecture.md` § "Grouping and suggested decisions"):
 - **Embed the evidence, never the model's title/summary.** `grouping.Text` is
   modules plus cited evidence, cut to 1500 **bytes** on a rune boundary.
 - **Group by anchor, not nearest member** — nearest-member chaining drifts.
-- **A suggestion is never applied without an operator POST.** The pass writes
-  only `class_groups`, never `finding_classes`/`class_decisions`, and nothing
-  here is read by `OpenFindings`, the prompt, the fingerprint or the gate.
+- **A grouping suggestion is never applied without an operator POST.** The
+  grouping pass writes only `class_groups`, never
+  `finding_classes`/`class_decisions`, and nothing here is read by
+  `OpenFindings`, the prompt, the fingerprint or the gate. The automatic
+  decisions below are the one deliberate exception, in their own pass.
+- **Only a person's decision votes.** A class whose newest visibility
+  decision has an automatic actor sizes its group but never feeds
+  "Suggested: …" — else an unsure class would show the API's answer and an
+  operator accepting it would make it a person's precedent.
 - **Never mix embedding models.** Every row records the model the sidecar
   reports; anchors are read per model; another model's row is re-embedded.
 - **Embeddings are not for the gate's line similarity**: one changed word
   barely moves a long line's vector (`in` vs `out` scored 1.000).
 - **Degrades, never fails**: off with `EMBED_URL` empty; sidecar down means no
   new groups and nothing else changes.
+
+## Automatic decision rules
+
+`internal/classdecide` (with pure `internal/decide` and the
+`internal/decisions` client) decides pending classes when
+`DECISIONS_API_KEY` is set: security-tagged ones go to `customer` in code
+(actor `security-rule`), the rest are asked of the OpenAI Decisions API and
+applied at `confidence >= DECISIONS_MIN_CONFIDENCE` (actor `decisions-api`).
+It shipped after its blind test failed the bar, on rewritten rules with no
+blind result. Load-bearing rules (reasons in `docs/architecture.md` §
+"Automatic decisions"):
+
+- **Applied without a POST, on purpose** — the operator's call. insightsd
+  refuses to start with `DECISIONS_API_KEY` set and `ADMIN_API_KEY` empty,
+  since nobody could undo a delivery.
+- **Asked once per `(RulesVersion, DECISIONS_MODEL)`.** Any ask row,
+  `unsure` and `failed` included, excludes the class until either changes.
+  A decided class is never re-decided.
+- **Unsure stays pending and blind.** Never show the API's guess on
+  `/review`: the operator's later decision is the only measurement the
+  rewritten rules get.
+- **Precedents and group hints come from people only** —
+  `logsstore.IsAutomaticActor` is the one list, applied to the class's
+  newest visibility decision. The API must never learn from its own
+  answers. The UI refuses writes (403) from those two usernames.
+- **The operator wins the race.** Every automatic write is pending-guarded in
+  the same transaction (`decidePending`); a lost race is stored `late`.
+- **`RulesVersion` is bumped with `rules.md`**, like `prompt.Version`: a
+  code constant, never config. `TestRulesFileChangeNeedsVersionBump` pins
+  the file's hash. Keep the question text byte-for-byte unless the change is
+  deliberate — it is what was measured.
+- **Visibility only.** Never severity, the security tag, `doc_ref` or
+  wording.
+- **Errors are not answers.** 401/403/404 and 429/5xx/transport end the
+  pass recording nothing; any other 4xx, an unparseable answer or a refusal
+  is recorded `failed`, so one class cannot block the oldest-first queue.
+- **Spend is outside `LLM_DAILY_SPEND_CAP_USD`** (it would narrow the gate);
+  it lives in `class_decision_asks`, shown on `/cost`, pruned with
+  `ANALYSIS_RETENTION`.
 
 ## Current state
 
@@ -456,7 +501,7 @@ against, before assuming a bug:
 | Missing packages | — | `ingest` (rate limit, full §5.4 validation). `maint` is now **built** — `internal/maint` prunes `system_templates`, `findings`, undecided `finding_classes`, `analyses` and `system_nodes` on a periodic pass in `insightsd`. **`version` was considered and dropped** 2026-09-10: the image's `org.opencontainers.image.revision` label already answers "what is running", and wiring a version var through four binaries, two build files and three `/status` pages buys nothing on top of it |
 | Tooling | built: `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `scripts/check-license-headers.sh` | — |
 | Operator UI | three separate dashboards, `internal/ui/{logs,threat,sizing}` on shared `internal/ui/chrome`, one per binary at `/logs`, `/blocklist`, `/sizing`, each off unless that binary's `UI_LISTEN_ADDR` is set. `GET` is unauthenticated and fleet-wide at the app layer, so bind it to loopback (a wider bind warns, never refuses) when not fronted by Traefik; in the deployed shape Traefik's BasicAuth (`ADMIN_API_KEY` as the htpasswd password) is what actually stands between it and the internet. threatd's and insightsd's enumerated `POST` routes (allowlist changes; finding-class review decisions) additionally authenticate against `ADMIN_API_KEY` inside the app — that check and the cross-site check stay even behind Traefik's BasicAuth, since both are Basic auth and a browser replays either the same way. Backed by the cross-system read methods in `internal/store/{logs,threat,sizing}/ui.go` | a *consumer* dashboard is a non-goal; these three are not that |
-| Review | built per **finding class**: `fingerprint.Class` (the fingerprint without `system_id`), `findings.class_key`, `finding_classes` (visibility `pending`/`customer`/`operator`/`dismissed`, `security` tag, `severity_override`, `doc_ref`, `first_prompt_version`) and append-only `class_decisions`, in `internal/store/logs/{classes,review}.go`. The system alone decides when to pay. `ListFindings` returns only findings whose class is `visibility = customer` — **pending is withheld, security included**: security is a tag (seeded from the edge's category on first sight, never reset by recurrence, operator-editable, returned as `Finding.security`), and the gate's security condition is cost, not visibility. It applies `severity_override`/`doc_ref` and the class wording (`class_texts`: title/summary/suggested action seeded by the class's first finding, operator-editable, blank restores the seed) there and only there (`OpenFindings` joins neither table). `dismissed` hides a class from every view, operator ones included, but is **hidden, not dropped**: its findings still upsert and `OpenFindings` still returns them, so it never reaches the prompt and saves no money. Three review routes on `ui/logs` (decide/group/bulk) in `writableRoutes` — `decide` is the class dialog's one form carrying visibility, security, severity, doc-ref and wording together — one `class_decisions` row per changed field, `/review`, `/review/stats` per `first_prompt_version`, `/review/audit`; maint prunes an undecided class once no retained finding names it. A decision applies to the whole class on every system, including systems that raise it later. **Grouping is built**: `internal/{grouping,embed,classgroup}`, `class_groups`, a bge-small llama.cpp sidecar (`deploy/quadlet/embedder.container`, `EMBED_URL`/`REVIEW_GROUP_SIMILARITY`/`GROUP_INTERVAL`), `/review` shows "group of N" and "Suggested: …", `?group=<anchor>` is a GET view of one group and only `POST /review/group` decides its pending classes. See § Review grouping rules above and `docs/architecture.md` § "Grouping and suggested decisions" | per-finding (per-system) decisions, deliberately — a decision is per class. Trigger ignore, merge and trigger visibility were removed 2026-09-25; the **trigger memory** itself (`internal/trigger`, `system_triggers`, `trigger_key`, `TRIGGER_REUSE_WINDOW`, `trigger_hit`) was removed 2026-10-08 with the volume condition, because every reuse it ever made was a volume-only window and a novelty trigger cannot recur once its templates are recorded |
+| Review | built per **finding class**: `fingerprint.Class` (the fingerprint without `system_id`), `findings.class_key`, `finding_classes` (visibility `pending`/`customer`/`operator`/`dismissed`, `security` tag, `severity_override`, `doc_ref`, `first_prompt_version`) and append-only `class_decisions`, in `internal/store/logs/{classes,review}.go`. The system alone decides when to pay. `ListFindings` returns only findings whose class is `visibility = customer` — **pending is withheld, security included** (with `DECISIONS_API_KEY` set the security rule delivers a tagged pending class within a pass; see § Automatic decision rules): security is a tag (seeded from the edge's category on first sight, never reset by recurrence, operator-editable, returned as `Finding.security`), and the gate's security condition is cost, not visibility. It applies `severity_override`/`doc_ref` and the class wording (`class_texts`: title/summary/suggested action seeded by the class's first finding, operator-editable, blank restores the seed) there and only there (`OpenFindings` joins neither table). `dismissed` hides a class from every view, operator ones included, but is **hidden, not dropped**: its findings still upsert and `OpenFindings` still returns them, so it never reaches the prompt and saves no money. Three review routes on `ui/logs` (decide/group/bulk) in `writableRoutes` — `decide` is the class dialog's one form carrying visibility, security, severity, doc-ref and wording together — one `class_decisions` row per changed field, `/review`, `/review/stats` per `first_prompt_version`, `/review/audit`; maint prunes an undecided class once no retained finding names it. A decision applies to the whole class on every system, including systems that raise it later. **Grouping is built**: `internal/{grouping,embed,classgroup}`, `class_groups`, a bge-small llama.cpp sidecar (`deploy/quadlet/embedder.container`, `EMBED_URL`/`REVIEW_GROUP_SIMILARITY`/`GROUP_INTERVAL`), `/review` shows "group of N" and "Suggested: …", `?group=<anchor>` is a GET view of one group and only `POST /review/group` decides its pending classes. See § Review grouping rules above and `docs/architecture.md` § "Grouping and suggested decisions". **Automatic decisions are built**: `internal/{decide,decisions,classdecide}`, `class_decision_asks`, `internal/store/logs/decisions.go`, `DECISIONS_*`, a `/review/stats` table per rules version and model and `review` rows on `/cost` — § Automatic decision rules | per-finding (per-system) decisions, deliberately — a decision is per class. Trigger ignore, merge and trigger visibility were removed 2026-09-25; the **trigger memory** itself (`internal/trigger`, `system_triggers`, `trigger_key`, `TRIGGER_REUSE_WINDOW`, `trigger_hit`) was removed 2026-10-08 with the volume condition, because every reuse it ever made was a volume-only window and a novelty trigger cannot recur once its templates are recorded |
 | Allowlist management | built: `POST /blocklist/v1/allowlist-requests`, write routes in `internal/ui/threat` (add/delete allowlist, approve/reject a request) gated on `ADMIN_API_KEY`, an append-only audit table read on threatd's `/audit` page. `internal/admin` and `ADMIN_LISTEN_ADDR` no longer exist | cross-org scoping once auth returns a tenant |
 | Fleet sizing | built server-side: `internal/sizing` (pure), `internal/store/sizing/{store.go,ui.go}`, `internal/api/sizing/{api.go,sizing.go}`, `internal/baseline`, three UI pages (`/`, `/cohorts`, `/status`) on `cmd/sizingd`. Single-instance only — the cohort pass takes no distributed lock. The `ns8-core` cluster reporter is **not** built | the reporter; `webtop` / `imapsync` `get-facts`; calibrated thresholds once ~30 days of fleet data exist |
 | Threat Shield | built: `internal/threat` (pure), `internal/store/threat/{store.go,ui.go,allowlist.go}`, `internal/blocklist`, `internal/api/threat/{api.go,threat.go,allowlist.go}`, eight UI pages including `/audit` and `/downloads`, on `cmd/threatd`. Two feeds from one pass: `/v1/feed` (entitlement) and `/v1/basic-feed` (subscription; each new entry `BLOCKLIST_BASIC_DELAY` late). Feed polls are counted in memory per day/feed/client/system, with each machine's last address and time (`blocklist.Downloads`), and flushed on each pass into the accumulating `threat_feed_downloads_daily`, shown per day on `/stats` and per machine on `/downloads` — a crash loses at most one pass of counts. The client comes from Traefik's `X-Forwarded-Prefix` and is statistics only — threatd still never learns which entitlement ran. Single-instance only — the consensus pass takes no distributed lock | cross-org promotion (D5) once auth returns a tenant. Multi-instance locking is **not** planned — single-instance is the supported shape |
@@ -542,8 +587,10 @@ fingerprint  gate  prompt   PURE — no I/O, no clock beyond an injected now() �
 threat                      PURE — the Threat Shield sanitizer and allowlist
 sizing                      PURE — the sizing sanitizer, pressure score, cohorts
 grouping                    PURE — review grouping text, cosine, anchor and suggestion rules — logs only
+decide                      PURE — automatic review decisions: rules, request, response, cost — logs only
 llm  queue  budget          logs only; interfaces where I/O is needed
 embed  classgroup           logs only; the embedding-sidecar client, and insightsd's grouping pass
+decisions  classdecide      logs only; the Decisions API client, and insightsd's decision pass
 analyzer                    the bundle pipeline; depends on all of the above
 blocklist                   Threat Shield consensus + the served snapshot
 baseline                    fleet-sizing cohort pass; same shape as blocklist
