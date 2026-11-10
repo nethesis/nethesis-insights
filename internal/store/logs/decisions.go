@@ -36,12 +36,17 @@ func IsAutomaticActor(actor string) bool {
 	return actor == ActorDecisionsAPI || actor == ActorSecurityRule
 }
 
-// lastVisibilityActor is a correlated subquery over an outer finding_classes
-// row aliased c: the actor of the class's newest visibility decision, or NULL
-// when it has none.
-const lastVisibilityActor = `(SELECT d.actor FROM class_decisions d
-	WHERE d.class_key = c.class_key AND d.action IN ('deliver', 'internal', 'dismiss')
+// lastVisibilityActorOf is a correlated subquery over an outer row aliased
+// alias that has a class_key: the actor of the class's newest visibility
+// decision, or NULL when it has none. alias is always a code literal.
+func lastVisibilityActorOf(alias string) string {
+	return `(SELECT d.actor FROM class_decisions d
+	WHERE d.class_key = ` + alias + `.class_key AND d.action IN ('deliver', 'internal', 'dismiss')
 	ORDER BY d.created_at DESC, d.id DESC LIMIT 1)`
+}
+
+// lastVisibilityActor is lastVisibilityActorOf over finding_classes aliased c.
+var lastVisibilityActor = lastVisibilityActorOf("c")
 
 // DecisionCandidate is a pending class to ask about. Vector is nil when the
 // class is not embedded under the requested embedding model.
@@ -335,14 +340,12 @@ type DecisionStatsRow struct {
 // DecisionStats returns one row per (rules_version, model), newest first.
 func (s *Store) DecisionStats(ctx context.Context) ([]DecisionStatsRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
+		-- an applied ask needs a pending class, so a class has at most one
 		SELECT a.rules_version, a.model, count(*),
 		       coalesce(sum(a.result = 'applied'), 0), coalesce(sum(a.result = 'unsure'), 0),
 		       coalesce(sum(a.result = 'failed'), 0), coalesce(sum(a.result = 'late'), 0),
 		       coalesce(sum(a.result = 'applied' AND
-		           coalesce((SELECT d.actor NOT IN ('`+ActorDecisionsAPI+`', '`+ActorSecurityRule+`')
-		               FROM class_decisions d
-		               WHERE d.class_key = a.class_key AND d.action IN ('deliver', 'internal', 'dismiss')
-		               ORDER BY d.created_at DESC, d.id DESC LIMIT 1), 0)), 0),
+		           coalesce(`+lastVisibilityActorOf("a")+` NOT IN ('`+ActorDecisionsAPI+`', '`+ActorSecurityRule+`'), 0)), 0),
 		       coalesce(sum(a.cost_micros), 0)
 		FROM class_decision_asks a
 		GROUP BY a.rules_version, a.model

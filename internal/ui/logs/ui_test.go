@@ -869,7 +869,7 @@ func TestCostAndReviewStatsShowDecisionsAPI(t *testing.T) {
 		t.Fatalf("/cost lacks the review row: %s", body)
 	}
 	body := get(t, h, "/review/stats").Body.String()
-	for _, want := range []string{"Decisions API", "r5", "gpt-6-luna", "4 classes"} {
+	for _, want := range []string{"Decisions API", "r5", "gpt-6-luna", "security rule: 4"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/review/stats lacks %q", want)
 		}
