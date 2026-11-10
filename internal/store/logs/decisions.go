@@ -337,10 +337,11 @@ type DecisionStatsRow struct {
 	CostMicros                                         int64
 }
 
-// DecisionStats returns one row per (rules_version, model), newest first.
+// DecisionStats returns one row per (rules_version, model), newest first. An
+// applied ask needs a pending class, which it then decides, so a class has at
+// most one applied ask and ChangedLater cannot double count.
 func (s *Store) DecisionStats(ctx context.Context) ([]DecisionStatsRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		-- an applied ask needs a pending class, so a class has at most one
 		SELECT a.rules_version, a.model, count(*),
 		       coalesce(sum(a.result = 'applied'), 0), coalesce(sum(a.result = 'unsure'), 0),
 		       coalesce(sum(a.result = 'failed'), 0), coalesce(sum(a.result = 'late'), 0),
