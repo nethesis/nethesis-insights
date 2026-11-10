@@ -116,13 +116,14 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		}
 	}
 
-	var applied, unsure, failed, late int
+	var applied, unsure, failed, late, waiting int
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return nil
 		}
 		if r.cfg.Grouping && c.Vector == nil {
-			continue // not embedded yet; asked once it is
+			waiting++ // not embedded yet; asked once it is
+			continue
 		}
 		var precedents []decide.Precedent
 		if r.cfg.Grouping {
@@ -137,6 +138,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		}
 		raw, err := r.client.Decide(ctx, body)
 		ask := logsstore.DecisionAsk{Key: c.Key, RulesVersion: decide.RulesVersion, Model: r.cfg.Model, At: now}
+		var reason error
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -144,7 +146,7 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 			var se *decisions.StatusError
 			if errors.As(err, &se) && !se.Fatal() && !se.Retryable() {
 				ask.Result = logsstore.AskFailed
-				ask.Detail = fmt.Sprintf("rules %s, %s, %v", decide.RulesVersion, r.cfg.Model, err)
+				reason = err
 			} else {
 				slog.Warn("decisions API unavailable, ending pass", "class_key", c.Key, "error", err)
 				r.cfg.Metrics.result("error")
@@ -157,10 +159,10 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 			switch {
 			case perr != nil:
 				ask.Result = logsstore.AskFailed
-				ask.Detail = fmt.Sprintf("rules %s, %s, %v", decide.RulesVersion, r.cfg.Model, perr)
+				reason = perr
 			case a.Refused:
 				ask.Result = logsstore.AskFailed
-				ask.Detail = fmt.Sprintf("rules %s, %s, refused", decide.RulesVersion, r.cfg.Model)
+				reason = errors.New("refused")
 			default:
 				ask.Choice, ask.Confidence = a.Choice, a.Confidence
 				ask.Result = logsstore.AskUnsure
@@ -186,12 +188,16 @@ func (r *Runner) Run(ctx context.Context, now int64) error {
 		default:
 			failed++
 		}
-		slog.Info("class decision", "class_key", c.Key, "result", res, "choice", ask.Choice,
-			"confidence", ask.Confidence, "cost_micros", ask.CostMicros)
+		attrs := []any{"class_key", c.Key, "result", res, "choice", ask.Choice,
+			"confidence", ask.Confidence, "cost_micros", ask.CostMicros}
+		if reason != nil {
+			attrs = append(attrs, "error", reason)
+		}
+		slog.Info("class decision", attrs...)
 	}
-	if delivered+applied+unsure+failed+late > 0 {
+	if delivered+applied+unsure+failed+late+waiting > 0 {
 		slog.Info("class decision pass", "security", delivered, "applied", applied,
-			"unsure", unsure, "failed", failed, "late", late)
+			"unsure", unsure, "failed", failed, "late", late, "waiting", waiting)
 	}
 	return nil
 }

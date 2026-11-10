@@ -126,11 +126,11 @@ func TestCandidateCarriesDescriptionAndVector(t *testing.T) {
 	mustDo(t, s.SetClassGroup(ctx, group("v3:b", "v3:b", "e0", 1)))
 	got, err := s.DecisionCandidates(ctx, "r5", "m1", "e1", 10)
 	mustDo(t, err)
-	if len(got) != 2 || got[0].Key != "v3:a" || got[1].Key != "v3:b" {
+	if len(got) != 1 || got[0].Key != "v3:a" {
 		t.Fatalf("%+v", got)
 	}
-	if !reflect.DeepEqual(got[0].Vector, []float32{1, 0.5}) || got[1].Vector != nil {
-		t.Fatalf("vectors %v / %v", got[0].Vector, got[1].Vector)
+	if !reflect.DeepEqual(got[0].Vector, []float32{1, 0.5}) {
+		t.Fatalf("vector %v", got[0].Vector)
 	}
 	if want := decide.Describe([]string{"mod"}, []string{"x"}, "a", ""); !reflect.DeepEqual(got[0].Class, want) {
 		t.Fatalf("class %+v, want %+v", got[0].Class, want)
@@ -139,6 +139,19 @@ func TestCandidateCarriesDescriptionAndVector(t *testing.T) {
 	mustDo(t, err)
 	if len(got) != 1 || got[0].Vector != nil {
 		t.Fatalf("limit or empty embed model: %+v", got)
+	}
+}
+
+func TestCandidatesWithGroupingNeedAVector(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedEvidenceFinding(t, s, "a", "v3:a", nil, []string{"x"}, 1000) // older, never embedded
+	seedEvidenceFinding(t, s, "b", "v3:b", nil, []string{"y"}, 2000)
+	mustDo(t, s.SetClassGroup(ctx, group("v3:b", "v3:b", "e1", 1)))
+	got, err := s.DecisionCandidates(ctx, "r5", "m1", "e1", 1)
+	mustDo(t, err)
+	if len(got) != 1 || got[0].Key != "v3:b" || got[0].Vector == nil {
+		t.Fatalf("un-embedded class occupied the batch: %+v", got)
 	}
 }
 

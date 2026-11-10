@@ -168,13 +168,21 @@ func (s *Store) classVectors(ctx context.Context, embedModel string, where strin
 
 // DecisionCandidates returns up to limit pending, non-security classes with a
 // retained finding and no ask recorded under (rulesVersion, model), oldest
-// first_seen first. Vector is set only from a class_groups row recorded under
-// embedModel; with embedModel "" vectors are not read.
+// first_seen first. With embedModel set, only classes with a class_groups row
+// recorded under it qualify (checked before the limit, so a class the embedder
+// never embeds cannot fill the batch) and Vector is set from that row; with
+// embedModel "" vectors are not read and every such class qualifies.
 func (s *Store) DecisionCandidates(ctx context.Context, rulesVersion, model, embedModel string, limit int) ([]DecisionCandidate, error) {
-	ds, err := s.describedClasses(ctx, `c.visibility = ? AND c.security = 0
+	where := `c.visibility = ? AND c.security = 0
 		AND NOT EXISTS (SELECT 1 FROM class_decision_asks a
-			WHERE a.class_key = c.class_key AND a.rules_version = ? AND a.model = ?)`,
-		[]any{VisibilityPending, rulesVersion, model}, limit)
+			WHERE a.class_key = c.class_key AND a.rules_version = ? AND a.model = ?)`
+	args := []any{VisibilityPending, rulesVersion, model}
+	if embedModel != "" {
+		where += ` AND EXISTS (SELECT 1 FROM class_groups g
+			WHERE g.class_key = c.class_key AND g.model = ?)`
+		args = append(args, embedModel)
+	}
+	ds, err := s.describedClasses(ctx, where, args, limit)
 	if err != nil {
 		return nil, err
 	}
