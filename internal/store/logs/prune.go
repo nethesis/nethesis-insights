@@ -195,3 +195,12 @@ func (s *Store) PruneClasses(ctx context.Context, olderThan int64) (int, error) 
 	}
 	return n, nil
 }
+
+// PruneDecisionAsks deletes Decisions API ask rows created before olderThan.
+func (s *Store) PruneDecisionAsks(ctx context.Context, olderThan int64) (int, error) {
+	return s.pruneLoop(ctx, `
+		DELETE FROM class_decision_asks WHERE id IN (
+			SELECT id FROM class_decision_asks WHERE created_at < ? LIMIT ?
+		)
+	`, olderThan)
+}

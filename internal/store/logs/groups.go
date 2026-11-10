@@ -409,3 +409,18 @@ func changingClasses(ctx context.Context, tx bun.Tx, keys []string, visibility s
 	}
 	return out, rows.Err()
 }
+
+// CurrentEmbedModel is the embedding model of the newest class_groups row, ""
+// when nothing has been embedded yet.
+func (s *Store) CurrentEmbedModel(ctx context.Context) (string, error) {
+	var m string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT model FROM class_groups ORDER BY created_at DESC, class_key DESC LIMIT 1`).Scan(&m)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: current embed model: %w", err)
+	}
+	return m, nil
+}

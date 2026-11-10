@@ -256,6 +256,24 @@ func (s *Store) Init(ctx context.Context) error {
 			suggested_action_override TEXT,
 			created_at INTEGER NOT NULL
 		)`,
+		// Automatic review decisions: see decisions.go. Append-only, several
+		// rows per class across rules versions and models.
+		`CREATE TABLE IF NOT EXISTS class_decision_asks (
+			id TEXT PRIMARY KEY,
+			class_key TEXT NOT NULL,
+			rules_version TEXT NOT NULL,
+			model TEXT NOT NULL,
+			result TEXT NOT NULL,
+			choice TEXT,
+			confidence REAL,
+			input_tokens INTEGER NOT NULL,
+			cached_tokens INTEGER NOT NULL,
+			output_tokens INTEGER NOT NULL,
+			cost_micros INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_class_decision_asks_key ON class_decision_asks(class_key, rules_version, model)`,
+		`CREATE INDEX IF NOT EXISTS idx_class_decision_asks_created ON class_decision_asks(created_at)`,
 	}
 
 	for _, stmt := range stmts {
