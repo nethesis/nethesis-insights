@@ -147,11 +147,8 @@ func (s *Store) classDecision(ctx context.Context, key, actor, action string, no
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ulid.Make().String(), key, actor, action, nullIfEmpty(detail), pv.String, now); err != nil {
-		return fmt.Errorf("store: record class decision: %w", err)
+	if err := insertClassDecision(ctx, tx, key, pv, actor, action, detail, now); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -340,11 +337,8 @@ func (s *Store) UpdateClass(ctx context.Context, key string, u ClassUpdate, acto
 			`UPDATE `+c.table+` SET `+c.column+` = ? WHERE class_key = ?`, c.value, key); err != nil { // #nosec G202
 			return 0, fmt.Errorf("store: set class %s: %w", c.column, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, ulid.Make().String(), key, actor, c.action, nullIfEmpty(c.detail), pv.String, now); err != nil {
-			return 0, fmt.Errorf("store: record class decision: %w", err)
+		if err := insertClassDecision(ctx, tx, key, pv, actor, c.action, c.detail, now); err != nil {
+			return 0, err
 		}
 	}
 	if len(changes) == 0 {
@@ -509,4 +503,16 @@ func scanClassDecisions(rows *sql.Rows) ([]ClassDecision, error) {
 // nullIfEmpty stores an empty string as NULL, so "no value" has one spelling.
 func nullIfEmpty(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
+}
+
+// insertClassDecision appends one class_decisions row: the single writer of
+// that table's columns.
+func insertClassDecision(ctx context.Context, tx bun.Tx, key string, pv sql.NullString, actor, action, detail string, now int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, ulid.Make().String(), key, actor, action, nullIfEmpty(detail), pv.String, now); err != nil {
+		return fmt.Errorf("store: record class decision: %w", err)
+	}
+	return nil
 }

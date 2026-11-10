@@ -309,11 +309,8 @@ func decidePending(ctx context.Context, tx bun.Tx, key, visibility, action, deta
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ulid.Make().String(), key, actor, action, detail, pv.String, now); err != nil {
-		return false, fmt.Errorf("store: record class decision: %w", err)
+	if err := insertClassDecision(ctx, tx, key, pv, actor, action, detail, now); err != nil {
+		return false, err
 	}
 	return true, nil
 }

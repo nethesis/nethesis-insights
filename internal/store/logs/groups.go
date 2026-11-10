@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/oklog/ulid/v2"
 	"github.com/uptrace/bun"
 
 	"github.com/nethesis/nethesis-insights/internal/grouping"
@@ -193,13 +192,7 @@ func applyVisibility(ctx context.Context, tx bun.Tx, p pendingClass, visibility,
 		`UPDATE finding_classes SET visibility = ? WHERE class_key = ?`, visibility, p.key); err != nil {
 		return fmt.Errorf("store: set class visibility: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO class_decisions (id, class_key, actor, action, detail, prompt_version, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ulid.Make().String(), p.key, actor, action, detail, p.pv.String, now); err != nil {
-		return fmt.Errorf("store: record class decision: %w", err)
-	}
-	return nil
+	return insertClassDecision(ctx, tx, p.key, p.pv, actor, action, detail, now)
 }
 
 // SetClassesVisibility applies visibility to each listed class, in one
