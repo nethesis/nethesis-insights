@@ -829,3 +829,24 @@ func TestReviewSaveAndNextOpensTheFollowingClass(t *testing.T) {
 		t.Errorf("%d autofocus attributes, want 1 (the open dialog's checked choice)", n)
 	}
 }
+
+func TestAutomaticActorCannotSignIn(t *testing.T) {
+	for _, actor := range []string{"decisions-api", "security-rule"} {
+		w := &fakeWriter{}
+		h := newWriteTestServer(t, seededReader(), w)
+		for p, form := range map[string]url.Values{
+			"/review/decide": {"key": {"v3:aaaa"}, "visibility": {"customer"}},
+			"/review/group":  {"anchor": {"v3:aaaa"}, "visibility": {"customer"}, "member": {"v3:aaaa"}},
+			"/review/bulk":   {"visibility": {"customer"}, "member": {"v3:aaaa"}},
+		} {
+			req := writeReq(p, form)
+			req.SetBasicAuth(actor, testAdminKey)
+			if rec := do(h, req); rec.Code != http.StatusForbidden {
+				t.Fatalf("%s as %s: got %d, want 403", p, actor, rec.Code)
+			}
+		}
+		if len(w.calls) != 0 {
+			t.Fatalf("automatic actor %s reached the store: %v", actor, w.calls)
+		}
+	}
+}

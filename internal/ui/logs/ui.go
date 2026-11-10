@@ -246,6 +246,11 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		if logsstore.IsAutomaticActor(actor) {
+			slog.Warn("review write refused: automatic actor name", "actor", actor, "path", r.URL.Path)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		s.handleDecision(w, r, actor)
 		return
 	}

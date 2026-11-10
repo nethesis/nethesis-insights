@@ -341,3 +341,23 @@ func TestSetClassesVisibilityRefusalsAndEmpty(t *testing.T) {
 		t.Fatalf("refused call changed a class: %s", c.Visibility)
 	}
 }
+
+func TestGroupSuggestionIgnoresAutomaticDecisions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedGroup(t, s)
+	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityCustomer, ActorDecisionsAPI, 1500))
+
+	rows, err := s.ListClasses(ctx, ClassFilter{Key: "v3:b"})
+	mustDo(t, err)
+	if len(rows) != 1 || rows[0].Suggestion != "" || rows[0].GroupSize != 3 {
+		t.Fatalf("automatic decision made a suggestion or shrank the group: %+v", rows)
+	}
+
+	mustDo(t, s.SetClassVisibility(ctx, "v3:c", VisibilityCustomer, "alice", 1600))
+	rows, err = s.ListClasses(ctx, ClassFilter{Key: "v3:b"})
+	mustDo(t, err)
+	if len(rows) != 1 || rows[0].Suggestion != VisibilityCustomer || rows[0].SuggestionVotes != 1 {
+		t.Fatalf("person's decision gave no suggestion: %+v", rows)
+	}
+}

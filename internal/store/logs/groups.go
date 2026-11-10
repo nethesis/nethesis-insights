@@ -284,11 +284,12 @@ func (s *Store) attachGroups(ctx context.Context, rows []ClassRow) error {
 	}
 	ain := strings.TrimSuffix(strings.Repeat("?,", len(anchorArgs)), ",")
 	cr, err := s.db.QueryContext(ctx, `
-		SELECT g.anchor_key, c.visibility, count(*)
+		SELECT g.anchor_key, c.visibility,
+		       coalesce(`+lastVisibilityActor+`, '') IN (?, ?) AS automatic, count(*)
 		FROM class_groups g JOIN finding_classes c ON c.class_key = g.class_key
 		WHERE g.anchor_key IN (`+ain+`)
-		GROUP BY g.anchor_key, c.visibility
-	`, anchorArgs...) // #nosec G202 -- only "?" placeholders are concatenated
+		GROUP BY g.anchor_key, c.visibility, automatic
+	`, append([]any{ActorDecisionsAPI, ActorSecurityRule}, anchorArgs...)...) // #nosec G202 -- only "?" placeholders are concatenated
 	if err != nil {
 		return fmt.Errorf("store: group sizes: %w", err)
 	}
@@ -300,8 +301,9 @@ func (s *Store) attachGroups(ctx context.Context, rows []ClassRow) error {
 	tallies := map[string]*tally{}
 	for cr.Next() {
 		var anchor, vis string
+		var automatic bool
 		var n int
-		if err := cr.Scan(&anchor, &vis, &n); err != nil {
+		if err := cr.Scan(&anchor, &vis, &automatic, &n); err != nil {
 			return fmt.Errorf("store: scan group size: %w", err)
 		}
 		t := tallies[anchor]
@@ -310,7 +312,11 @@ func (s *Store) attachGroups(ctx context.Context, rows []ClassRow) error {
 			tallies[anchor] = t
 		}
 		t.size += n
-		t.by[vis] += n
+		// A decision a machine made sizes the group but is never a vote:
+		// a suggestion must repeat what a person decided.
+		if !automatic {
+			t.by[vis] += n
+		}
 	}
 	if err := cr.Err(); err != nil {
 		return fmt.Errorf("store: group sizes: %w", err)
