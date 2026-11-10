@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type Client struct {
 // never included in any error.
 func New(baseURL, apiKey string, timeout time.Duration) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		client:  &http.Client{Timeout: timeout},
 	}

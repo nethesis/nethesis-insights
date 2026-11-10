@@ -125,3 +125,20 @@ func TestErrorNeverCarriesKey(t *testing.T) {
 		t.Errorf("transport error %q carries the API key", err.Error())
 	}
 }
+
+func TestBaseURLTrailingSlash(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL+"/v1/", "k", 5*time.Second)
+	if _, err := c.Decide(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if gotPath != "/v1/decisions" {
+		t.Errorf("path = %q, want /v1/decisions", gotPath)
+	}
+}
