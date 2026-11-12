@@ -18,4 +18,4 @@ const RulesVersion = "r7"
 //go:embed rules.md
 var Rules string
 
-const rulesSHA256 = "2f441a1fbe37f9fa4833d1312d18f43ad4c11f12589dc282ffc17e2c0dc84207"
+const rulesSHA256 = "97f7f377dbffec4e186751836c02dc37fb7b2c7cf480b819563f2b100a910526"
