@@ -1,4 +1,4 @@
-# Review rules (draft 5)
+# Review rules (draft 6)
 
 Labels: customer = send to the customer; internal = keep for Nethesis;
 dismiss = nobody needs to act. Rules are checked in order; the first that
@@ -14,9 +14,10 @@ G2. Development problems the customer cannot act on are internal: bugs in
     infrastructure (I1-I5).
 G3. Configuration errors the administrator can fix go to the customer
     (C4, C6).
-G4. Temporary faults are never sent to the customer: timeouts, dropped or
-    refused connections, a service that failed while stopping and will
-    probably be restarted. Dismiss them, unless I4 makes them internal.
+G4. Temporary faults are never sent to the customer. A single request that
+    timed out, a dropped connection or a service that failed while stopping
+    is dismissed (D7, D13), even between our own components. One of our
+    components that is down or keeps refusing connections is internal (I4).
 
 ## Send to the customer
 
@@ -57,9 +58,12 @@ I3. The NethVoice proxy failing in itself: kamailio or rtpengine not
     connection errors caused by outside traffic: D10.)
 I4. Our own plumbing failing: the satellite database and transcription
     (MQTT, helper missing, deadlock), report and queue-statistic jobs,
-    internal connections refused or timing out, broken or disabled FreePBX
-    modules, default ARI credentials, sound-file conflicts, a product
-    logging personal data or passwords.
+    broken or disabled FreePBX modules, default ARI credentials, sound-file
+    conflicts, a product logging personal data or passwords; one of our
+    components down or refusing connections (Asterisk not connected, the
+    FreePBX database refusing connections, the CTI backend unreachable,
+    rclone gateway servers down). A request that timed out is not one of
+    these: D13.
 I5. Capacity limits in a product we ship: Apache MaxRequestWorkers, PHP-FPM
     pool busy, database "too many connections", database buffer pool too
     small. A request that timed out is not one of these: D13.
@@ -69,9 +73,12 @@ I6. Deprecated functions or syntax in the configuration we ship (e.g.
 ## Dismiss
 
 D1. Third parties' problems: remote senders' SPF/DKIM/DNS, rspamd DNS or
-    Redis lookups, client hostnames that do not resolve, malware rejected.
+    Redis lookups, client hostnames that do not resolve, malware rejected,
+    suspicious or phished URLs rspamd found in a message it was filtering.
 D2. Normal user actions failing: a call hangup, transfer, pickup, parking or
-    queue action failing; authorization or capability denied to a user.
+    queue action failing; authorization or capability denied to a user;
+    a Nextcloud or OnlyOffice file action failing (an upload interrupted, a
+    move refused, a notice while opening a shared link).
 D3. Expected setup noise: domain binding warnings, "trust" authentication at
     initdb, Apache ServerName, outdated TimescaleDB, deprecated functions or
     syntax outside our shipped configuration, empty FreePBX profile/operator
@@ -88,8 +95,14 @@ D7. A service that failed while stopping or will be restarted: a single
 D8. Dovecot authentication errors "auth: Error: plain(...): user ... found
     from any userdbs".
 D9. Steps skipped with "fork/exec ... permission denied" during an action.
-D10. NethVoice proxy parse, TLS-handshake and connection errors
-    (reset, refused, no route, timeout, branch limit) caused by outside
-    traffic or broken phones.
-D13. Requests that timed out: backend or upstream timeouts, preview or
-    conversion timeouts.
+D10. NethVoice proxy (kamailio) errors caused by outside traffic, broken
+    phones or the normal life of a call: malformed SIP messages or
+    headers, TLS handshake errors and full TLS write buffers, connection
+    errors (reset, refused, no route, timeout, branch limit), SIP hostnames
+    that do not resolve, dialogs not found, topos warnings about record
+    routing and failures to store a dialog record. Exception: a SIP header
+    carrying an attack payload, such as SQL injection (OR '1'='1'), is an
+    attack (G1, C3).
+D13. Requests that timed out, even between our own components: backend or
+    upstream timeouts, preview or conversion timeouts, module metrics
+    exports, history fetches ("context deadline exceeded").

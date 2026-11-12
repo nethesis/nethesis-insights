@@ -2446,7 +2446,13 @@ customer-versus-not, against a bar of 90% right and 2% wrong: it failed.
 All five confident errors were classes where the operator's decision
 contradicted the rules as written, so the rules were rewritten
 (`internal/decide/rules.md`, `RulesVersion` `r5`), and the operator chose to
-ship knowing there is **no blind result for the rewritten rules**. Asked
+ship knowing there is **no blind result for the rewritten rules**. Draft 6
+(`r6`, 2026-11-12) was then written from the operator's decisions on the
+classes the API had left pending: it settles where timeouts and refused
+connections go (a single timeout is dismissed, one of our components down
+is internal), widens the NethVoice proxy and Nextcloud/OnlyOffice dismissal
+rules and keeps a SIP header carrying an attack payload an attack. The bump
+re-asks every pending class once. Asked
 with no precedents (zero-shot) it was worse: 12% wrong instead of 6%. Most of
 the rules below exist so that every automatic decision stays undoable and
 the rewritten rules still get measured.

@@ -11,11 +11,11 @@ import _ "embed"
 // RulesVersion stamps every stored decision with the rules text it was made
 // under. Bump it by hand whenever rules.md changes; the test pins the file's
 // hash so forgetting fails the build.
-const RulesVersion = "r5"
+const RulesVersion = "r6"
 
 // Rules is rules.md verbatim.
 //
 //go:embed rules.md
 var Rules string
 
-const rulesSHA256 = "f2510a41f9e375086ea71306b7933db48470339036df13aef5ac29c261884478"
+const rulesSHA256 = "8fadf12b1e18ce4729a1b5e1ee1abe8af581c951fba61930cee1e0c7df658c5f"

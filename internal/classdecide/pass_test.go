@@ -96,7 +96,7 @@ func TestConfidentAnswerIsApplied(t *testing.T) {
 	s := &fakeStore{cands: []logsstore.DecisionCandidate{cand("a")}}
 	run(t, s, &fakeClient{replies: []reply{answer("customer", 0.95)}}, cfg)
 	a := s.asks[0]
-	if a.Result != "applied" || a.Choice != "customer" || a.Detail != "rules r5, gpt-6-luna, confidence 0.95" {
+	if a.Result != "applied" || a.Choice != "customer" || a.Detail != "rules "+decide.RulesVersion+", gpt-6-luna, confidence 0.95" {
 		t.Fatalf("%+v", a)
 	}
 }
