@@ -1,4 +1,4 @@
-# Review rules (draft 6)
+# Review rules (draft 7)
 
 Labels: customer = send to the customer; internal = keep for Nethesis;
 dismiss = nobody needs to act. Rules are checked in order; the first that
@@ -11,7 +11,8 @@ G1. Security findings go to the customer: attacks, login attempts, probes
     Exception: Dovecot master-user logins (D5) are dismissed.
 G2. Development problems the customer cannot act on are internal: bugs in
     our code, problems in the configuration we ship, our own plumbing and
-    infrastructure (I1-I5).
+    infrastructure (I1-I5). A program describing its own internals without
+    reporting an error is not a problem: D14.
 G3. Configuration errors the administrator can fix go to the customer
     (C4, C6).
 G4. Temporary faults are never sent to the customer. A single request that
@@ -106,3 +107,8 @@ D10. NethVoice proxy (kamailio) errors caused by outside traffic, broken
 D13. Requests that timed out, even between our own components: backend or
     upstream timeouts, preview or conversion timeouts, module metrics
     exports, history fetches ("context deadline exceeded").
+D14. Internal details that do not explicitly report an error: a program
+    describing its own state, configuration or internal steps, even at
+    error priority, when the message itself does not say that something
+    failed or is wrong (e.g. rspamd "map has no urls to be loaded: empty
+    list").

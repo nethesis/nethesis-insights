@@ -1532,7 +1532,7 @@ never wait for you. It does so in two ways:
   takes effect at once, with no confirmation**: a delivered class reaches
   customers on their next read. On `/review/audit` it reads: actor
   `decisions-api`, action `deliver`, `internal` or `dismiss`, and a detail
-  such as `rules r6, gpt-6-luna, confidence 0.93` — the rules version, the
+  such as `rules r7, gpt-6-luna, confidence 0.93` — the rules version, the
   model and how sure it was. If it is less sure, the class stays pending for
   you, and `/review` does not show what the API guessed. That is on purpose:
   your decision is then an independent check of the API.

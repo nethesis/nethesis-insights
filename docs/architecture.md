@@ -2451,8 +2451,9 @@ ship knowing there is **no blind result for the rewritten rules**. Draft 6
 classes the API had left pending: it settles where timeouts and refused
 connections go (a single timeout is dismissed, one of our components down
 is internal), widens the NethVoice proxy and Nextcloud/OnlyOffice dismissal
-rules and keeps a SIP header carrying an attack payload an attack. The bump
-re-asks every pending class once. Asked
+rules and keeps a SIP header carrying an attack payload an attack. Draft 7 (`r7`, the same day) adds D14:
+a program describing its own internals without reporting an error is
+dismissed. Each bump re-asks every pending class once. Asked
 with no precedents (zero-shot) it was worse: 12% wrong instead of 6%. Most of
 the rules below exist so that every automatic decision stays undoable and
 the rewritten rules still get measured.
